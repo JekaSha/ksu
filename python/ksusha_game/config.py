@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,4 +49,9 @@ class GameConfig:
     sprite_path: Path = Path("source/textures/ksusha.png")
 
 
-DEFAULT_GAME_CONFIG = GameConfig()
+def _resolve_default_skin() -> Path:
+    skin = os.getenv("KSU_SKIN", "ksusha.png").strip()
+    return Path("source/textures") / skin
+
+
+DEFAULT_GAME_CONFIG = GameConfig(sprite_path=_resolve_default_skin())

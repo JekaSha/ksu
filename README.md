@@ -28,6 +28,13 @@ python3 -m pip install -r python/requirements.txt
 python3 python/ksusha_walk.py
 ```
 
+Выбор скина:
+
+```bash
+KSU_SKIN=ksu.png python3 python/ksusha_walk.py
+KSU_SKIN=ksu_with_bag.png python3 python/ksusha_walk.py
+```
+
 Также можно запускать как модуль:
 
 ```bash
