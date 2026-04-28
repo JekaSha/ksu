@@ -75,6 +75,9 @@ class WorldRenderer:
         ]
         if extra_players:
             all_players.extend(extra_players)
+        # Painter's algorithm for characters: lower Y should be rendered later (on top).
+        # Secondary X key keeps ordering stable when Y is equal.
+        all_players.sort(key=lambda item: (item[0][1], item[0][0]))
 
         world_layer.fill(self._config.window.background_color)
         self._draw_outside_nonwalkable(world_layer, camera, world)
