@@ -2,6 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Tests
+
+```bash
+cd python
+pytest           # run all 111 tests
+pytest -v        # verbose output
+pytest tests/domain/test_inventory.py   # single file
+```
+
+Tests live in `python/tests/` mirroring the layer structure (`domain/`, `infrastructure/`). They cover pure logic only — no pygame, no I/O. Infrastructure tests that need `pygame.Rect` require `pygame.init()` and are excluded from the current suite.
+
 ## Running the game
 
 ```bash

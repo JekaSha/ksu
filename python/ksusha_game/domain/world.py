@@ -267,4 +267,16 @@ class WorldMap:
             return spec.item_id
         return "ballon"
 
+    def room_for_point(self, x: float, y: float) -> RoomArea | None:
+        for room in self.rooms:
+            if room.x <= x <= room.x + room.width and room.y <= y <= room.y + room.height:
+                return room
+        return None
+
+    def room_id_for_point_half_open(self, x: float, y: float) -> str | None:
+        for room in reversed(self.rooms):
+            if room.x <= x < room.x + room.width and room.y <= y < room.y + room.height:
+                return room.room_id
+        return None
+
 

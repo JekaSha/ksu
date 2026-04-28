@@ -64,10 +64,17 @@ class WorldRenderer:
         spray_tags: list[SprayTag],
         message: str,
         dragged_object_id: str | None = None,
+        extra_players: list[tuple[tuple[float, float], pygame.Surface, float, bool]] | None = None,
+        control_hints: list[str] | None = None,
     ) -> None:
         width, height = screen.get_size()
         camera = self._build_camera(world, width, height, player_pos)
         world_layer = pygame.Surface((width, height), pygame.SRCALPHA)
+        all_players: list[tuple[tuple[float, float], pygame.Surface, float, bool]] = [
+            (player_pos, player_frame, player_bob, player_left_facing)
+        ]
+        if extra_players:
+            all_players.extend(extra_players)
 
         world_layer.fill(self._config.window.background_color)
         self._draw_outside_nonwalkable(world_layer, camera, world)
@@ -83,25 +90,28 @@ class WorldRenderer:
             dragged_object_id=dragged_object_id,
         )
         self._draw_spray_tags(world_layer, camera, world, spray_tags, object_sprites, target_kind="door")
-        self._draw_player(world_layer, camera, player_pos, player_frame, player_bob, player_left_facing)
-        self._draw_objects_occluder_pass(
-            world_layer,
-            occluders,
-            camera,
-            player_pos,
-            player_frame,
-            player_bob,
-        )
-        self._draw_top_openings_foreground(
-            world_layer,
-            camera,
-            world,
-            wall_sprites,
-            objects,
-            player_pos,
-            player_frame,
-            player_bob,
-        )
+        for cur_pos, cur_frame, cur_bob, cur_left_facing in all_players:
+            self._draw_player(world_layer, camera, cur_pos, cur_frame, cur_bob, cur_left_facing)
+        for cur_pos, cur_frame, cur_bob, _cur_left_facing in all_players:
+            self._draw_objects_occluder_pass(
+                world_layer,
+                occluders,
+                camera,
+                cur_pos,
+                cur_frame,
+                cur_bob,
+            )
+        for cur_pos, cur_frame, cur_bob, _cur_left_facing in all_players:
+            self._draw_top_openings_foreground(
+                world_layer,
+                camera,
+                world,
+                wall_sprites,
+                objects,
+                cur_pos,
+                cur_frame,
+                cur_bob,
+            )
         # Keep wall graffiti strictly behind the character.
         # Re-drawing wall-top spray above player caused inconsistent head overlap
         # on some wall/opening combinations.
@@ -122,6 +132,8 @@ class WorldRenderer:
         world_layer = self._apply_fog(world_layer, world, fog_center)
         screen.blit(world_layer, (0, 0))
         self._draw_inventory(screen, inventory, object_sprites)
+        if control_hints:
+            self._draw_control_hints(screen, control_hints)
         if message:
             self._draw_message(screen, message)
 
@@ -1719,6 +1731,26 @@ class WorldRenderer:
         bg.fill((0, 0, 0, 150))
         screen.blit(bg, (16, 14))
         screen.blit(label, (24, 20))
+
+    def _draw_control_hints(self, screen: pygame.Surface, lines: list[str]) -> None:
+        rendered = [self._lock_marker_font.render(line, True, (226, 232, 240)) for line in lines if line]
+        if not rendered:
+            return
+        max_w = max(surf.get_width() for surf in rendered)
+        line_h = max(surf.get_height() for surf in rendered)
+        pad_x = 10
+        pad_y = 8
+        panel_w = max_w + pad_x * 2
+        panel_h = len(rendered) * line_h + pad_y * 2 + max(0, len(rendered) - 1) * 3
+        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        panel.fill((8, 12, 18, 165))
+        x = 10
+        y = 54
+        screen.blit(panel, (x, y))
+        cy = y + pad_y
+        for surf in rendered:
+            screen.blit(surf, (x + pad_x, cy))
+            cy += line_h + 3
 
     def _apply_fog(
         self,

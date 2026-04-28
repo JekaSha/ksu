@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pygame
 
-from ksusha_game.domain.world import RoomArea, WorldMap, WorldObject
+from ksusha_game.domain.world import WorldMap, WorldObject
 from ksusha_game.infrastructure.object_sprites import ObjectSpriteLibrary
 
 
@@ -12,7 +12,7 @@ def apply_interior_physics(world: WorldMap, object_sprites: ObjectSpriteLibrary)
     for obj in world.objects:
         if obj.kind not in interior_kinds:
             continue
-        room = _room_for_point(world, obj.x, obj.y)
+        room = world.room_for_point(obj.x, obj.y)
         if room is None or not room.walls_enabled:
             continue
         _clamp_inside_room(obj, room, world, object_sprites)
@@ -25,7 +25,7 @@ def apply_interior_physics(world: WorldMap, object_sprites: ObjectSpriteLibrary)
             for obj in world.objects
             if obj.kind in interior_kinds
             and obj.blocking
-            and _room_for_point(world, obj.x, obj.y) is room
+            and world.room_for_point(obj.x, obj.y) is room
         ]
         if len(blockers) < 2:
             continue
@@ -87,13 +87,6 @@ def object_collider_metrics(obj: WorldObject, sprite_w: int, sprite_h: int) -> t
         y_anchor -= extra_up * 0.55
 
     return max(8, collider_w), max(8, collider_h), float(y_anchor)
-
-
-def _room_for_point(world: WorldMap, x: float, y: float) -> RoomArea | None:
-    for room in world.rooms:
-        if room.x <= x <= room.x + room.width and room.y <= y <= room.y + room.height:
-            return room
-    return None
 
 
 def _clamp_inside_room(
