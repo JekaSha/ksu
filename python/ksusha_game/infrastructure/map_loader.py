@@ -119,6 +119,7 @@ class MapLoader:
         )
         balloon_specs, balloon_item_ids = self._load_balloon_specs(Path(str(balloons_root_raw)))
         graffiti_specs = self._load_graffiti_specs(Path(str(graffity_root_raw)))
+        item_settings = self._load_item_settings(Path("source/textures/items"))
 
         object_kinds: dict[str, dict] = raw.get("object_kinds", {})
         raw_item_weights = raw.get("item_weights", {})
@@ -130,6 +131,60 @@ class MapLoader:
                 except (TypeError, ValueError):
                     continue
                 item_weights[str(key)] = max(0.0, parsed)
+        for item_id, spec in item_settings.items():
+            raw_weight = spec.get("weight_kg", spec.get("weight"))
+            if raw_weight is None:
+                continue
+            try:
+                parsed = float(raw_weight)
+            except (TypeError, ValueError):
+                continue
+            item_weights.setdefault(item_id, max(0.0, parsed))
+
+        item_inventory_bonus_slots: dict[str, int] = {}
+        item_inventory_bonus_weight_limit_kg: dict[str, float] = {}
+        item_backpack_storable: dict[str, bool] = {}
+        for item_id, spec in item_settings.items():
+            raw_bonus = spec.get("inventory_slots_bonus", spec.get("inventory_bonus_slots", 0))
+            try:
+                parsed_bonus = max(0, int(raw_bonus))
+            except (TypeError, ValueError):
+                parsed_bonus = 0
+            if parsed_bonus > 0:
+                item_inventory_bonus_slots[item_id] = parsed_bonus
+
+            raw_limit = spec.get(
+                "inventory_bonus_max_weight_kg",
+                spec.get("inventory_bonus_weight_limit_kg", 0.0),
+            )
+            try:
+                parsed_limit = max(0.0, float(raw_limit))
+            except (TypeError, ValueError):
+                parsed_limit = 0.0
+            if parsed_limit > 0.0:
+                item_inventory_bonus_weight_limit_kg[item_id] = parsed_limit
+
+            if "can_store_in_backpack" in spec:
+                item_backpack_storable[item_id] = bool(spec.get("can_store_in_backpack"))
+
+        raw_item_bonus_slots = raw.get("item_inventory_bonus_slots", {})
+        if isinstance(raw_item_bonus_slots, dict):
+            for key, value in raw_item_bonus_slots.items():
+                try:
+                    item_inventory_bonus_slots[str(key)] = max(0, int(value))
+                except (TypeError, ValueError):
+                    continue
+        raw_item_bonus_weight_limits = raw.get("item_inventory_bonus_weight_limits", {})
+        if isinstance(raw_item_bonus_weight_limits, dict):
+            for key, value in raw_item_bonus_weight_limits.items():
+                try:
+                    item_inventory_bonus_weight_limit_kg[str(key)] = max(0.0, float(value))
+                except (TypeError, ValueError):
+                    continue
+        raw_item_backpack_storable = raw.get("item_backpack_storable", {})
+        if isinstance(raw_item_backpack_storable, dict):
+            for key, value in raw_item_backpack_storable.items():
+                item_backpack_storable[str(key)] = bool(value)
         raw_default_balloon_weight = object_kinds.get("ballon", {}).get(
             "weight_kg",
             object_kinds.get("ballon", {}).get("weight", 0.0),
@@ -457,6 +512,9 @@ class MapLoader:
             show_object_labels=bool(world_cfg.get("show_object_labels", False)),
             player_stats=player_stats,
             item_weights=item_weights,
+            item_inventory_bonus_slots=item_inventory_bonus_slots,
+            item_inventory_bonus_weight_limit_kg=item_inventory_bonus_weight_limit_kg,
+            item_backpack_storable=item_backpack_storable,
             item_room_use_limits=item_room_use_limits,
             spray_profiles=spray_profiles,
             item_spray_profiles=item_spray_profiles,
@@ -660,3 +718,28 @@ class MapLoader:
             return str(path.resolve().relative_to(self._project_root.resolve()))
         except ValueError:
             return str(path.resolve())
+
+    def _load_item_settings(self, items_root: Path) -> dict[str, dict]:
+        root = items_root if items_root.is_absolute() else self._project_root / items_root
+        out: dict[str, dict] = {}
+        if not root.exists():
+            return out
+        settings_paths: list[Path] = []
+        for candidate in sorted(root.rglob("settings.json")):
+            settings_paths.append(candidate)
+        for candidate in sorted(root.rglob("setting.json")):
+            if candidate not in settings_paths:
+                settings_paths.append(candidate)
+        for path in settings_paths:
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+            raw_item_id = raw.get("item_id", raw.get("id", ""))
+            item_id = str(raw_item_id).strip()
+            if not item_id:
+                continue
+            out[item_id] = raw
+        return out

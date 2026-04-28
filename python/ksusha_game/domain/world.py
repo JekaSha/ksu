@@ -213,6 +213,9 @@ class WorldMap:
     show_object_labels: bool = False
     player_stats: PlayerStats = field(default_factory=PlayerStats)
     item_weights: dict[str, float] = field(default_factory=dict)
+    item_inventory_bonus_slots: dict[str, int] = field(default_factory=dict)
+    item_inventory_bonus_weight_limit_kg: dict[str, float] = field(default_factory=dict)
+    item_backpack_storable: dict[str, bool] = field(default_factory=dict)
     item_room_use_limits: dict[str, int] = field(default_factory=dict)
     spray_profiles: dict[str, list[str]] = field(default_factory=dict)
     item_spray_profiles: dict[str, str] = field(default_factory=dict)

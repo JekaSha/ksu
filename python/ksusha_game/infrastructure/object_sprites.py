@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,7 +9,7 @@ from statistics import median
 import numpy as np
 import pygame
 
-from ksusha_game.domain.world import BalloonSpec, WorldObject
+from ksusha_game.domain.world import BalloonObject, BalloonSpec, WorldObject
 from ksusha_game.infrastructure.asset_cache import SpriteCache
 
 
@@ -35,6 +36,7 @@ class ObjectSpriteLibrary:
         self._balloon_specs = dict(balloon_specs or {})
         self._balloon_item_ids = dict(balloon_item_ids or {})
         self._disk_cache = disk_cache
+        self._kind_size_cache: dict[str, tuple[int, int] | None] = {}
 
     # ------------------------------------------------------------------ #
     #  Sprite set accessors                                                #
@@ -52,7 +54,8 @@ class ObjectSpriteLibrary:
                 self._cache[key] = result
                 return result
         sheet = pygame.image.load(str(sheet_path)).convert_alpha()
-        variants = self._extract_top_row_variants(sheet, variant_count=4, target_size=(84, 84), min_area=1200)
+        target_size = self._load_kind_world_size("backpack") or (84, 84)
+        variants = self._extract_top_row_variants(sheet, variant_count=4, target_size=target_size, min_area=1200)
         if self._disk_cache is not None:
             self._disk_cache.save_sprite_set(sheet_path, key, variants)
         result = ObjectSpriteSet(variants=variants)
@@ -71,7 +74,8 @@ class ObjectSpriteLibrary:
                 self._cache[key] = result
                 return result
         sheet = pygame.image.load(str(sheet_path)).convert_alpha()
-        variants = self._extract_all_variants(sheet, target_size=(200, 200), min_area=2000)
+        target_size = self._load_kind_world_size("sofa") or (200, 200)
+        variants = self._extract_all_variants(sheet, target_size=target_size, min_area=2000)
         if not variants:
             raise ValueError("Sofa sheet parsing failed: no components detected")
         if self._disk_cache is not None:
@@ -92,7 +96,8 @@ class ObjectSpriteLibrary:
                 self._cache[key] = result
                 return result
         sheet = pygame.image.load(str(sheet_path)).convert_alpha()
-        variants = self._extract_all_variants(sheet, target_size=(180, 218), min_area=900)
+        target_size = self._load_kind_world_size("plant") or (180, 218)
+        variants = self._extract_all_variants(sheet, target_size=target_size, min_area=900)
         if not variants:
             raise ValueError("Plant sheet parsing failed: no components detected")
         if self._disk_cache is not None:
@@ -113,7 +118,8 @@ class ObjectSpriteLibrary:
                 self._cache[key] = result
                 return result
         sheet = pygame.image.load(str(sheet_path)).convert_alpha()
-        variants = self._extract_all_variants(sheet, target_size=(58, 42), min_area=240)
+        target_size = self._load_kind_world_size("key") or (58, 42)
+        variants = self._extract_all_variants(sheet, target_size=target_size, min_area=240)
         if not variants:
             raise ValueError("Key sheet parsing failed: no components detected")
         if self._disk_cache is not None:
@@ -392,9 +398,58 @@ class ObjectSpriteLibrary:
             return len(self.door_set("top").variants)
         return 1
 
+    def nominal_world_size(self, kind: str, obj: WorldObject | None = None) -> tuple[int, int]:
+        if kind == "ballon":
+            specs = self._resolved_balloon_specs()
+            if isinstance(obj, BalloonObject) and obj.balloon_id:
+                spec = specs.get(obj.balloon_id)
+                if spec is not None:
+                    return (int(spec.world_size[0]), int(spec.world_size[1]))
+            if specs:
+                first_id = self._ordered_balloon_ids(specs)[0]
+                spec = specs.get(first_id)
+                if spec is not None:
+                    return (int(spec.world_size[0]), int(spec.world_size[1]))
+            return (78, 110)
+        size = self._load_kind_world_size(kind)
+        if size is not None:
+            return size
+        if obj is not None:
+            return (max(32, int(obj.width)), max(32, int(obj.height)))
+        return (64, 64)
+
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
     # ------------------------------------------------------------------ #
+
+    def _load_kind_world_size(self, kind: str) -> tuple[int, int] | None:
+        if kind in self._kind_size_cache:
+            return self._kind_size_cache[kind]
+        items_root = self._project_root / "source/textures/items"
+        candidates = [
+            items_root / kind / "settings.json",
+            items_root / (kind + "s") / "settings.json",
+            items_root / (kind + "es") / "settings.json",
+        ]
+        result: tuple[int, int] | None = None
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+            ws = raw.get("world_size")
+            if isinstance(ws, list) and len(ws) == 2:
+                try:
+                    result = (int(ws[0]), int(ws[1]))
+                    break
+                except (TypeError, ValueError):
+                    pass
+        self._kind_size_cache[kind] = result
+        return result
 
     def _normalize_door_orientation(self, orientation: str) -> str:
         token = str(orientation).strip().lower()

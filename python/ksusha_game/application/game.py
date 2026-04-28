@@ -93,7 +93,7 @@ class KsushaGame:
         ) = self._load_runtime_resources(project_root, loader, cache)
         input_controller = KeyboardInputController()
         renderer = WorldRenderer(self._config)
-        inventory = Inventory(capacity=5)
+        inventory = Inventory(base_capacity=5, capacity=5)
 
         player = Player(x=float(world.spawn_x), y=float(world.spawn_y), stats=world.player_stats)
         snapshot = self._resource_snapshot(project_root) if dev_hot_enabled else None
@@ -170,6 +170,7 @@ class KsushaGame:
             dx, dy = input_controller.read_direction()
             keys = pygame.key.get_pressed()
             holding_pickup = input_controller.is_action_pressed(keys, "pickup")
+            self._sync_inventory_extension_from_active_item(inventory, world)
             selected_item = inventory.selected_item()
             selected_slot_index = inventory.active_index
             spray_holding = holding_pickup and self._is_spray_item(selected_item)
@@ -422,7 +423,7 @@ class KsushaGame:
             room = self._room_for_point(world, obj.x, obj.y)
             if room is None or not room.walls_enabled:
                 continue
-            self._clamp_object_inside_room_interior(obj, room, world)
+            self._clamp_object_inside_room_interior(obj, room, world, object_sprites)
 
         # Resolve authored overlaps between movable interior blockers (mostly plants near sofas).
         # Without this, grabbed plants can appear "stuck" because they start intersecting a sofa.
@@ -443,11 +444,11 @@ class KsushaGame:
                 for obj in blockers:
                     if obj.kind == "sofa":
                         continue
-                    rect = self._nominal_object_collider_rect(obj, world)
+                    rect = self._nominal_object_collider_rect(obj, world, object_sprites)
                     for other in blockers:
                         if other.object_id == obj.object_id:
                             continue
-                        other_rect = self._nominal_object_collider_rect(other, world)
+                        other_rect = self._nominal_object_collider_rect(other, world, object_sprites)
                         if not rect.colliderect(other_rect):
                             continue
                         overlap_x = min(rect.right, other_rect.right) - max(rect.left, other_rect.left)
@@ -460,8 +461,8 @@ class KsushaGame:
                         else:
                             dir_y = -1.0 if rect.centery < other_rect.centery else 1.0
                             obj.y += dir_y * float(overlap_y + 1)
-                        self._clamp_object_inside_room_interior(obj, room, world)
-                        rect = self._nominal_object_collider_rect(obj, world)
+                        self._clamp_object_inside_room_interior(obj, room, world, object_sprites)
+                        rect = self._nominal_object_collider_rect(obj, world, object_sprites)
                         moved = True
                 if not moved:
                     break
@@ -471,6 +472,7 @@ class KsushaGame:
         obj: WorldObject,
         room: RoomArea,
         world: WorldMap,
+        object_sprites: ObjectSpriteLibrary,
     ) -> None:
         t = max(1, min(room.wall_thickness, room.width // 3, room.height // 3))
         top_t = (
@@ -485,7 +487,7 @@ class KsushaGame:
         if interior_left >= interior_right or interior_top >= interior_bottom:
             return
 
-        nominal_w, nominal_h = self._object_nominal_sprite_size(obj, world)
+        nominal_w, nominal_h = object_sprites.nominal_world_size(obj.kind, obj)
         collider_w, collider_h, y_anchor = self._object_collider_metrics_from_size(
             obj=obj,
             sprite_w=nominal_w,
@@ -502,8 +504,8 @@ class KsushaGame:
         if min_y <= max_y:
             obj.y = max(min_y, min(max_y, obj.y))
 
-    def _nominal_object_collider_rect(self, obj: WorldObject, world: WorldMap) -> pygame.Rect:
-        nominal_w, nominal_h = self._object_nominal_sprite_size(obj, world)
+    def _nominal_object_collider_rect(self, obj: WorldObject, world: WorldMap, object_sprites: ObjectSpriteLibrary) -> pygame.Rect:
+        nominal_w, nominal_h = object_sprites.nominal_world_size(obj.kind, obj)
         collider_w, collider_h, y_anchor = self._object_collider_metrics_from_size(
             obj=obj,
             sprite_w=nominal_w,
@@ -515,28 +517,6 @@ class KsushaGame:
             max(8, int(collider_w)),
             max(8, int(collider_h)),
         )
-
-    def _object_nominal_sprite_size(self, obj: WorldObject, world: WorldMap) -> tuple[int, int]:
-        # Fast startup path: use known nominal sizes without forcing expensive sprite-sheet parsing.
-        if obj.kind == "sofa":
-            return (200, 200)
-        if obj.kind == "plant":
-            return (180, 218)
-        if obj.kind == "backpack":
-            return (84, 84)
-        if obj.kind == "key":
-            return (58, 42)
-        if obj.kind == "ballon":
-            if hasattr(obj, "balloon_id"):
-                balloon_id = str(getattr(obj, "balloon_id") or "").strip()
-                spec = world.balloon_specs.get(balloon_id)
-                if spec is not None:
-                    return (int(spec.world_size[0]), int(spec.world_size[1]))
-            default_balloon = world.balloon_specs.get(world.default_balloon_id())
-            if default_balloon is not None:
-                return (int(default_balloon.world_size[0]), int(default_balloon.world_size[1]))
-            return (78, 110)
-        return (max(32, int(obj.width)), max(32, int(obj.height)))
 
     def _room_for_point(self, world: WorldMap, x: float, y: float) -> RoomArea | None:
         for room in world.rooms:
@@ -630,20 +610,64 @@ class KsushaGame:
         player: Player,
         object_sprites: ObjectSpriteLibrary,
     ) -> None:
+        if input_controller.is_action(event, "inventory_move"):
+            self._toggle_inventory_move_mode(inventory, world)
+            return
+
+        if inventory.move_mode:
+            if input_controller.is_action(event, "inventory_left"):
+                inventory.move_cursor_left()
+                return
+            if input_controller.is_action(event, "inventory_right"):
+                inventory.move_cursor_right()
+                return
+            if input_controller.is_action(event, "inventory_up"):
+                inventory.move_cursor_up()
+                return
+            if input_controller.is_action(event, "inventory_down"):
+                inventory.move_cursor_down()
+                return
+            # While inventory transfer mode is active, block world interactions.
+            return
+
+        if input_controller.is_action(event, "inventory_up"):
+            inventory.move_cursor_up()
+            self._sync_inventory_extension_from_active_item(inventory, world)
+            return
+
+        if input_controller.is_action(event, "inventory_down"):
+            inventory.move_cursor_down()
+            self._sync_inventory_extension_from_active_item(inventory, world)
+            return
+
+        if input_controller.is_action(event, "inventory_left"):
+            inventory.move_cursor_left()
+            self._sync_inventory_extension_from_active_item(inventory, world)
+            return
+
+        if input_controller.is_action(event, "inventory_right"):
+            inventory.move_cursor_right()
+            self._sync_inventory_extension_from_active_item(inventory, world)
+            return
+
         if input_controller.is_action(event, "select_prev"):
             inventory.select_previous()
+            self._sync_inventory_extension_from_active_item(inventory, world)
             return
 
         if input_controller.is_action(event, "select_next"):
             inventory.select_next()
+            self._sync_inventory_extension_from_active_item(inventory, world)
             return
 
         if input_controller.is_action(event, "pickup"):
             self._pickup_or_interact(world, player, inventory, object_sprites)
+            self._sync_inventory_extension_from_active_item(inventory, world)
             return
 
         if input_controller.is_action(event, "drop"):
             self._drop_selected(world, player, inventory)
+            self._sync_inventory_extension_from_active_item(inventory, world)
             return
 
         if input_controller.is_action(event, "use"):
@@ -877,10 +901,16 @@ class KsushaGame:
         player: Player,
         inventory: Inventory,
     ) -> None:
+        selected_item = inventory.selected_item()
+        if selected_item == "backpack":
+            if self._extra_slots_have_items(inventory):
+                self._set_message("Сначала выньте предметы из доп. слотов рюкзака")
+                return
         item_id = inventory.remove_selected()
         if item_id is None:
             self._set_message("Нечего выбрасывать")
             return
+        inventory.cancel_move_mode()
         if self._is_spray_item(item_id):
             # Fresh can in the same slot should not inherit spent state.
             self._spray_spent_slots.pop(inventory.active_index, None)
@@ -1937,6 +1967,187 @@ class KsushaGame:
             if target == "backpack" and (token == "bag" or token.startswith("backpack") or token.startswith("bag_")):
                 return True
         return False
+
+    def _sync_inventory_extension_from_active_item(self, inventory: Inventory, world: WorldMap) -> None:
+        selected = inventory.selected_item()
+        bonus = 0
+        bonus_weight_limit = 0.0
+        if selected is not None:
+            bonus = max(0, int(world.item_inventory_bonus_slots.get(selected, 0)))
+            bonus_weight_limit = max(
+                0.0,
+                float(world.item_inventory_bonus_weight_limit_kg.get(selected, 0.0)),
+            )
+        # Keep extension only while cursor is currently in extra row.
+        # If selected item is not a backpack/extender, inventory should collapse back.
+        keep_extended = inventory.is_extra_slot(inventory.active_index)
+        if keep_extended and bonus <= 0:
+            for slot_item in inventory.slots[: inventory.capacity]:
+                if slot_item is None:
+                    continue
+                slot_bonus = max(0, int(world.item_inventory_bonus_slots.get(slot_item, 0)))
+                if slot_bonus <= 0:
+                    continue
+                slot_limit = max(
+                    0.0,
+                    float(world.item_inventory_bonus_weight_limit_kg.get(slot_item, 0.0)),
+                )
+                if slot_bonus > bonus or (slot_bonus == bonus and slot_limit > bonus_weight_limit):
+                    bonus = slot_bonus
+                    bonus_weight_limit = slot_limit
+        # During inventory move mode keep extension available if backpack/extender
+        # exists in inventory, otherwise A/S vertical navigation can have no target.
+        if inventory.move_mode and bonus <= 0:
+            for slot_item in inventory.slots[: inventory.capacity]:
+                if slot_item is None:
+                    continue
+                slot_bonus = max(0, int(world.item_inventory_bonus_slots.get(slot_item, 0)))
+                if slot_bonus <= 0:
+                    continue
+                slot_limit = max(
+                    0.0,
+                    float(world.item_inventory_bonus_weight_limit_kg.get(slot_item, 0.0)),
+                )
+                if slot_bonus > bonus or (slot_bonus == bonus and slot_limit > bonus_weight_limit):
+                    bonus = slot_bonus
+                    bonus_weight_limit = slot_limit
+        changed = inventory.set_extension(bonus, bonus_weight_limit)
+        if changed:
+            self._trim_spray_spent_slots_for_inventory(inventory)
+            if inventory.move_mode and inventory.move_source_index is not None:
+                if inventory.move_source_index >= inventory.capacity:
+                    inventory.cancel_move_mode()
+
+    def _trim_spray_spent_slots_for_inventory(self, inventory: Inventory) -> None:
+        if not self._spray_spent_slots:
+            return
+        valid = {i for i in range(inventory.capacity)}
+        stale = [idx for idx in self._spray_spent_slots.keys() if idx not in valid]
+        for idx in stale:
+            self._spray_spent_slots.pop(idx, None)
+
+    def _extra_slots_have_items(self, inventory: Inventory) -> bool:
+        for idx in inventory.extra_indices():
+            if idx < len(inventory.slots) and inventory.slots[idx] is not None:
+                return True
+        return False
+
+    def _toggle_inventory_move_mode(self, inventory: Inventory, world: WorldMap) -> None:
+        if not inventory.move_mode:
+            if inventory.begin_move_mode():
+                self._set_message("Перенос: выберите слот и нажмите D")
+            else:
+                self._set_message("Выбранный слот пуст")
+            return
+
+        src = inventory.move_source_index
+        if src is None:
+            inventory.cancel_move_mode()
+            return
+        dst = inventory.active_index
+        src_item = inventory.slots[src] if 0 <= src < len(inventory.slots) else None
+        dst_item = inventory.slots[dst] if 0 <= dst < len(inventory.slots) else None
+        if src_item is None:
+            inventory.cancel_move_mode()
+            self._set_message("Нечего переносить")
+            return
+        if not self._can_swap_inventory_slots(
+            inventory=inventory,
+            world=world,
+            src=src,
+            dst=dst,
+            src_item=src_item,
+            dst_item=dst_item,
+        ):
+            return
+        moved = inventory.commit_move(dst)
+        if moved is None:
+            return
+        self._move_spray_slot_marker(moved[0], moved[1])
+        self._set_message("Предмет перемещен")
+
+    def _can_swap_inventory_slots(
+        self,
+        *,
+        inventory: Inventory,
+        world: WorldMap,
+        src: int,
+        dst: int,
+        src_item: str | None,
+        dst_item: str | None,
+    ) -> bool:
+        if src_item is None:
+            return False
+        if src == dst:
+            return True
+
+        if inventory.is_extra_slot(dst):
+            if str(src_item).strip().lower() == "backpack":
+                self._set_message("Рюкзак нельзя класть в доп. слот")
+                return False
+            if not self._can_store_in_backpack(src_item, world):
+                self._set_message("Этот предмет нельзя положить в рюкзак")
+                return False
+        if inventory.is_extra_slot(src) and dst_item is not None:
+            if str(dst_item).strip().lower() == "backpack":
+                self._set_message("Рюкзак нельзя класть в доп. слот")
+                return False
+            if not self._can_store_in_backpack(dst_item, world):
+                self._set_message("Этот предмет нельзя положить в рюкзак")
+                return False
+
+        # Respect backpack extra slots max carry weight.
+        max_extra_weight = max(0.0, float(inventory.bonus_weight_limit_kg))
+        if max_extra_weight > 0.0:
+            proposed = {src: dst_item, dst: src_item}
+            total_extra_weight = self._extra_slots_weight_kg_after(inventory, world, proposed)
+            if total_extra_weight > (max_extra_weight + 1e-6):
+                self._set_message("Слишком тяжело для рюкзака")
+                return False
+        return True
+
+    def _extra_slots_weight_kg_after(
+        self,
+        inventory: Inventory,
+        world: WorldMap,
+        overrides: dict[int, str | None],
+    ) -> float:
+        total = 0.0
+        for idx in inventory.extra_indices():
+            if idx >= len(inventory.slots):
+                continue
+            item_id = overrides.get(idx, inventory.slots[idx])
+            if item_id is None:
+                continue
+            total += self._item_weight_kg(item_id, world.item_weights)
+        return total
+
+    def _can_store_in_backpack(self, item_id: str, world: WorldMap) -> bool:
+        token = str(item_id).strip().lower()
+        if not token:
+            return False
+        if token == "backpack":
+            return False
+        if token in world.item_backpack_storable:
+            return bool(world.item_backpack_storable[token])
+        return True
+
+    def _move_spray_slot_marker(self, src: int, dst: int) -> None:
+        if src == dst:
+            return
+        src_val = self._spray_spent_slots.get(src)
+        dst_val = self._spray_spent_slots.get(dst)
+        if src_val is None and dst_val is None:
+            return
+        if src_val is None:
+            self._spray_spent_slots.pop(dst, None)
+            self._spray_spent_slots[src] = dst_val  # type: ignore[assignment]
+            return
+        if dst_val is None:
+            self._spray_spent_slots.pop(src, None)
+            self._spray_spent_slots[dst] = src_val
+            return
+        self._spray_spent_slots[src], self._spray_spent_slots[dst] = dst_val, src_val
 
     def _update_grab_target_state(
         self,

@@ -1,0 +1,9 @@
+{
+  "id": "backpack",
+  "item_id": "backpack",
+  "world_size": [84, 84],
+  "weight_kg": 4.0,
+  "inventory_slots_bonus": 5,
+  "inventory_bonus_max_weight_kg": 10.0,
+  "can_store_in_backpack": false
+}

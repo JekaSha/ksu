@@ -65,7 +65,14 @@ class WorldRenderer:
         self._draw_floors(world_layer, camera, world, floor_tileset)
         self._draw_walls(world_layer, camera, world, wall_sprites, objects)
         self._draw_spray_tags(world_layer, camera, world, spray_tags, object_sprites, target_kind="wall_top")
-        occluders = self._draw_objects_base_pass(world_layer, camera, objects, object_sprites)
+        occluders = self._draw_objects_base_pass(
+            world_layer,
+            camera,
+            world,
+            objects,
+            object_sprites,
+            dragged_object_id=dragged_object_id,
+        )
         self._draw_spray_tags(world_layer, camera, world, spray_tags, object_sprites, target_kind="door")
         self._draw_player(world_layer, camera, player_pos, player_frame, player_bob, player_left_facing)
         self._draw_objects_occluder_pass(
@@ -1306,13 +1313,24 @@ class WorldRenderer:
         self,
         screen: pygame.Surface,
         camera: Camera,
+        world: WorldMap,
         objects: list[WorldObject],
         object_sprites: ObjectSpriteLibrary,
+        *,
+        dragged_object_id: str | None = None,
     ) -> list[tuple[pygame.Surface, float, float, int, bool]]:
         draw_list = sorted(objects, key=lambda obj: obj.y)
         occluders: list[tuple[pygame.Surface, float, float, int, bool]] = []
         for obj in draw_list:
             sprite = self._sprite_for_object(object_sprites, obj)
+            # Avoid double-draw artifacts for dragged plants in doorway area:
+            # they are rendered in dedicated foreground pass with lintel clipping.
+            skip_base_draw = (
+                dragged_object_id is not None
+                and obj.object_id == dragged_object_id
+                and obj.kind != "door"
+                and self._dragged_object_lintel_clip_world_y(obj, sprite, world) is not None
+            )
             occluder_sprite = sprite
             x = obj.x - sprite.get_width() / 2 - camera.x
             y = obj.y - sprite.get_height() / 2 - camera.y
@@ -1334,19 +1352,22 @@ class WorldRenderer:
                 split_y = int(sprite.get_height() * split_ratio)
                 split_y = max(1, min(sprite.get_height() - 1, split_y))
                 # Draw full object in base pass; top overlay is applied conditionally in occluder pass.
-                screen.blit(sprite, (x, y))
-                occluders.append(
-                    (
-                        occluder_sprite,
-                        x,
-                        y,
-                        split_y,
-                        obj.kind == "door" and self._normalize_door_orientation(obj.door_orientation) == "top",
+                if not skip_base_draw:
+                    screen.blit(sprite, (x, y))
+                    occluders.append(
+                        (
+                            occluder_sprite,
+                            x,
+                            y,
+                            split_y,
+                            obj.kind == "door" and self._normalize_door_orientation(obj.door_orientation) == "top",
+                        )
                     )
-                )
             else:
-                screen.blit(sprite, (x, y))
-            self._draw_object_lock_marker(screen, obj, x, y, sprite)
+                if not skip_base_draw:
+                    screen.blit(sprite, (x, y))
+            if not skip_base_draw:
+                self._draw_object_lock_marker(screen, obj, x, y, sprite)
         return occluders
 
     def _draw_objects_occluder_pass(
@@ -1468,27 +1489,35 @@ class WorldRenderer:
         obj = next((o for o in objects if o.object_id == dragged_object_id), None)
         if obj is None or obj.kind == "door":
             return
-        # Base pass already draws dragged objects with normal Y-sorting.
-        # Foreground redraw is needed only when dragged object should be in front
-        # of the player; otherwise it incorrectly covers the head.
-        if obj.y <= player_pos[1] + 2:
-            return
         sprite = self._sprite_for_object(object_sprites, obj)
-        if self._dragged_object_hits_top_opening_lintel(obj, sprite, world):
-            # Do not force dragged object to foreground while it crosses a top opening.
-            # This prevents plants from visually climbing on doorway lintels.
-            return
         x = obj.x - sprite.get_width() / 2 - camera.x
         y = obj.y - sprite.get_height() / 2 - camera.y
-        screen.blit(sprite, (x, y))
+        lintel_clip_world_y = self._dragged_object_lintel_clip_world_y(obj, sprite, world)
+        # Base pass already draws dragged objects with normal Y-sorting.
+        # Foreground redraw is usually needed only when object is in front of player.
+        # Exception: when crossing top doorway opening, force redraw so dragged plant
+        # remains visible inside the aperture (with lintel clip).
+        if obj.y <= player_pos[1] + 2 and lintel_clip_world_y is None:
+            return
+        if lintel_clip_world_y is not None:
+            # Keep dragged object visible inside doorway while preventing it from
+            # drawing above the lintel: clip top part by lintel bottom line.
+            clip_top_px = int(lintel_clip_world_y - (obj.y - sprite.get_height() / 2))
+            clip_top_px = max(0, clip_top_px)
+            if clip_top_px >= sprite.get_height():
+                return
+            src = pygame.Rect(0, clip_top_px, sprite.get_width(), sprite.get_height() - clip_top_px)
+            screen.blit(sprite, (x, y + clip_top_px), src)
+        else:
+            screen.blit(sprite, (x, y))
         self._draw_object_lock_marker(screen, obj, x, y, sprite)
 
-    def _dragged_object_hits_top_opening_lintel(
+    def _dragged_object_lintel_clip_world_y(
         self,
         obj: WorldObject,
         sprite: pygame.Surface,
         world: WorldMap,
-    ) -> bool:
+    ) -> int | None:
         obj_rect = pygame.Rect(
             int(obj.x - sprite.get_width() / 2),
             int(obj.y - sprite.get_height() / 2),
@@ -1496,7 +1525,8 @@ class WorldRenderer:
             int(sprite.get_height()),
         )
         if obj_rect.width <= 0 or obj_rect.height <= 0:
-            return False
+            return None
+        clip_y: int | None = None
         for room in world.rooms:
             if not room.walls_enabled:
                 continue
@@ -1511,10 +1541,18 @@ class WorldRenderer:
             if top_span is None:
                 continue
             l, r = top_span
-            lintel_rect = pygame.Rect(l, room.y, max(1, r - l), top_t)
-            if obj_rect.colliderect(lintel_rect):
-                return True
-        return False
+            opening_w = max(1, r - l)
+            # Stable doorway-zone check to avoid flicker when plant touches posts/walls:
+            # apply lintel clip while dragged object center is inside aperture and
+            # sprite intersects doorway vertical band.
+            in_opening_x = (l + 2) <= obj_rect.centerx <= (r - 2)
+            zone_bottom = room.y + top_t + max(120, int(top_t * 0.9))
+            in_opening_y = obj_rect.bottom > room.y and obj_rect.top < zone_bottom
+            if in_opening_x and in_opening_y and opening_w > 8:
+                bottom_y = room.y + top_t
+                if clip_y is None or bottom_y > clip_y:
+                    clip_y = bottom_y
+        return clip_y
 
     def _draw_player(
         self,
@@ -1590,24 +1628,49 @@ class WorldRenderer:
         width, height = screen.get_size()
         slot_size = 56
         spacing = 10
-        bar_width = inventory.capacity * slot_size + (inventory.capacity - 1) * spacing
-        start_x = (width - bar_width) // 2
-        y = height - slot_size - 20
+        row_gap = 12
+        bottom_count = max(1, min(inventory.base_capacity, inventory.capacity))
+        top_count = max(0, inventory.capacity - bottom_count)
+
+        bottom_w = bottom_count * slot_size + (bottom_count - 1) * spacing
+        bottom_x = (width - bottom_w) // 2
+        bottom_y = height - slot_size - 20
+
+        top_w = top_count * slot_size + (max(0, top_count - 1)) * spacing
+        top_x = (width - top_w) // 2
+        top_y = bottom_y - slot_size - row_gap
+
+        def _slot_rect(index: int) -> pygame.Rect:
+            if index < bottom_count:
+                x = bottom_x + index * (slot_size + spacing)
+                y = bottom_y
+            else:
+                j = index - bottom_count
+                x = top_x + j * (slot_size + spacing)
+                y = top_y
+            return pygame.Rect(x, y, slot_size, slot_size)
 
         for i in range(inventory.capacity):
-            x = start_x + i * (slot_size + spacing)
-            rect = pygame.Rect(x, y, slot_size, slot_size)
+            rect = _slot_rect(i)
             pygame.draw.rect(screen, (20, 24, 34), rect)
-            border_color = (255, 208, 92) if i == inventory.active_index else (92, 98, 120)
+            border_color = (92, 98, 120)
+            if i == inventory.active_index:
+                border_color = (255, 208, 92)
             pygame.draw.rect(screen, border_color, rect, width=3)
+            if inventory.move_mode and inventory.move_source_index == i:
+                # Show transfer-source marker as a smaller inner frame so
+                # active (yellow) selection always remains visually dominant.
+                inner = rect.inflate(-10, -10)
+                if inner.width > 4 and inner.height > 4:
+                    pygame.draw.rect(screen, (78, 220, 126), inner, width=2)
 
             item = inventory.slots[i]
             if item is not None:
                 icon = object_sprites.cached_icon_for_item(item)
                 if icon is None:
                     continue
-                ix = x + (slot_size - icon.get_width()) // 2
-                iy = y + (slot_size - icon.get_height()) // 2
+                ix = rect.x + (slot_size - icon.get_width()) // 2
+                iy = rect.y + (slot_size - icon.get_height()) // 2
                 screen.blit(icon, (ix, iy))
 
     def _draw_spray_tags(

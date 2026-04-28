@@ -13,8 +13,13 @@ class KeyboardInputController:
     _MOVE_UP_SCANCODES = (pygame.K_UP, pygame.K_UP)
 
     _ACTION_BY_NAME: dict[str, tuple[int, int]] = {
-        "select_prev": (pygame.KSCAN_Q, pygame.K_q),
-        "select_next": (pygame.KSCAN_W, pygame.K_w),
+        "select_prev": (pygame.KSCAN_A, pygame.K_a),
+        "select_next": (pygame.KSCAN_D, pygame.K_d),
+        "inventory_left": (pygame.KSCAN_A, pygame.K_a),
+        "inventory_right": (pygame.KSCAN_D, pygame.K_d),
+        "inventory_up": (pygame.KSCAN_W, pygame.K_w),
+        "inventory_down": (pygame.KSCAN_S, pygame.K_s),
+        "inventory_move": (pygame.KSCAN_Q, pygame.K_q),
         "pickup": (pygame.KSCAN_E, pygame.K_e),
         "drop": (pygame.KSCAN_G, pygame.K_g),
         "use": (pygame.KSCAN_R, pygame.K_r),
