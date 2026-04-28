@@ -553,3 +553,48 @@ class TestApplyNetworkSnapshot:
         assert world.objects[0].lock_open_flags == [True]
         assert len(session._spray_tags) == 1
         assert session._spray_tags[0].target_id == "door_1"
+
+
+class TestPlayerVsPlayerCollision:
+    def test_player_collision_blocks_movement(self, session, stats):
+        add(session, "p1", stats, x=100.0, y=100.0)
+        add(session, "p2", stats, x=100.0, y=100.0)
+        session._player_states["p1"].last_player_sprite_size = (100, 120)
+        session._player_states["p2"].last_player_sprite_size = (100, 120)
+
+        p1 = session._player_states["p1"].player
+        p1.x = 120.0
+        p1.y = 120.0
+        session._resolve_player_collisions(
+            player_id="p1",
+            player=p1,
+            prev_x=80.0,
+            prev_y=80.0,
+            sprite_w=100,
+            sprite_h=120,
+        )
+
+        assert p1.x == pytest.approx(80.0)
+        assert p1.y == pytest.approx(80.0)
+
+    def test_player_collision_reverts_single_axis_when_possible(self, session, stats):
+        add(session, "p1", stats, x=100.0, y=100.0)
+        add(session, "p2", stats, x=130.0, y=100.0)
+        session._player_states["p1"].last_player_sprite_size = (100, 120)
+        session._player_states["p2"].last_player_sprite_size = (100, 120)
+
+        p1 = session._player_states["p1"].player
+        # Move mostly on X into p2; X should be reverted while Y can stay.
+        p1.x = 130.0
+        p1.y = 118.0
+        session._resolve_player_collisions(
+            player_id="p1",
+            player=p1,
+            prev_x=90.0,
+            prev_y=118.0,
+            sprite_w=100,
+            sprite_h=120,
+        )
+
+        assert p1.x == pytest.approx(90.0)
+        assert p1.y == pytest.approx(118.0)

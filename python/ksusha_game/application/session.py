@@ -319,6 +319,8 @@ class GameSession:
                         if action is None or action == "reload":
                             continue
                         if player_id == self._LOCAL_PLAYER_ID and browser.is_connected():
+                            if not self._can_send_client_action(action=action):
+                                continue
                             browser.send_action(action=action)
                         else:
                             self.queue_player_action(
@@ -351,10 +353,11 @@ class GameSession:
                     )
 
             self._process_async_preloads(world, object_sprites, budget_ms=1.8, max_jobs=1)
-            self._process_command_queue(
-                world=world,
-                object_sprites=object_sprites,
-            )
+            if not browser.is_connected():
+                self._process_command_queue(
+                    world=world,
+                    object_sprites=object_sprites,
+                )
 
             if dev_hot_enabled and now >= next_hot_check:
                 next_hot_check = now + 0.45
@@ -425,6 +428,7 @@ class GameSession:
             local_render: tuple[tuple[float, float], pygame.Surface, float, bool] | None = None
             extra_renders: list[tuple[tuple[float, float], pygame.Surface, float, bool]] = []
             local_wearing_backpack = self._inventory_has_item(local_inventory, "backpack")
+            net_client_mode = browser.is_connected()
 
             for player_id, state in self._player_states.items():
                 prev_context = self._active_player_context_id
@@ -444,6 +448,28 @@ class GameSession:
                     wearing_backpack = self._inventory_has_item(inventory, "backpack")
                     animation_cache = backpack_cache if wearing_backpack else walk_cache
                     frames_by_dir = animation_cache.frames_for_height(target_h)
+                    if net_client_mode:
+                        # Host-authoritative mode: do not locally simulate players,
+                        # otherwise zero-input frames reset walk_time and kill animation.
+                        current_frames = frames_by_dir[player.facing]
+                        frame_index = int(player.walk_time) % len(current_frames)
+                        current_frame = current_frames[frame_index]
+                        self._last_player_sprite_size = (current_frame.get_width(), current_frame.get_height())
+                        moving = player.walk_time > 0.001
+                        bob = math.sin(player.walk_time * 2.0 * math.pi / len(current_frames)) * (2 if moving else 0)
+                        jump_y = player.jump_offset()
+                        player_center = (
+                            player.x + current_frame.get_width() / 2,
+                            player.y + current_frame.get_height() / 2,
+                        )
+                        left_facing = player.facing in {Direction.LEFT, Direction.UP_LEFT, Direction.DOWN_LEFT}
+                        render_item = (player_center, current_frame, bob + jump_y, left_facing)
+                        if is_local:
+                            local_render = render_item
+                            local_wearing_backpack = wearing_backpack
+                        else:
+                            extra_renders.append(render_item)
+                        continue
 
                     pre_frames = frames_by_dir[player.facing]
                     pre_sprite_w = pre_frames[0].get_width()
@@ -516,6 +542,14 @@ class GameSession:
                         sprite_w=sprite_w,
                         sprite_h=sprite_h,
                         world=world,
+                    )
+                    self._resolve_player_collisions(
+                        player_id=player_id,
+                        player=player,
+                        prev_x=prev_x,
+                        prev_y=prev_y,
+                        sprite_w=sprite_w,
+                        sprite_h=sprite_h,
                     )
                     self._update_grabbed_object_drag(
                         player=player,
@@ -676,6 +710,21 @@ class GameSession:
                 issued_at=issued_at,
             )
         )
+
+    def _can_send_client_action(self, *, action: str) -> bool:
+        if action != "drop":
+            return True
+        state = self._player_state(self._LOCAL_PLAYER_ID)
+        if state is None:
+            return False
+        selected_item = state.inventory.selected_item()
+        if selected_item is None:
+            self._set_message("Нечего выбрасывать")
+            return False
+        if selected_item == "backpack" and self._extra_slots_have_items(state.inventory):
+            self._set_message("Сначала выньте предметы из доп. слотов рюкзака")
+            return False
+        return True
 
     def queue_player_action(self, *, player_id: str, action: str, issued_at: float | None = None) -> None:
         when = time.monotonic() if issued_at is None else float(issued_at)
@@ -3223,6 +3272,53 @@ class GameSession:
 
         player.x = prev_x
         player.y = prev_y
+
+    def _resolve_player_collisions(
+        self,
+        *,
+        player_id: str,
+        player: Player,
+        prev_x: float,
+        prev_y: float,
+        sprite_w: int,
+        sprite_h: int,
+    ) -> None:
+        current_rect = self._player_collider_rect(player.x, player.y, sprite_w, sprite_h)
+        if not self._collides_with_other_players(player_id=player_id, player_rect=current_rect):
+            return
+
+        x_only_rect = self._player_collider_rect(prev_x, player.y, sprite_w, sprite_h)
+        if not self._collides_with_other_players(player_id=player_id, player_rect=x_only_rect):
+            player.x = prev_x
+            return
+
+        y_only_rect = self._player_collider_rect(player.x, prev_y, sprite_w, sprite_h)
+        if not self._collides_with_other_players(player_id=player_id, player_rect=y_only_rect):
+            player.y = prev_y
+            return
+
+        player.x = prev_x
+        player.y = prev_y
+
+    def _collides_with_other_players(
+        self,
+        *,
+        player_id: str,
+        player_rect: pygame.Rect,
+    ) -> bool:
+        for other_id, other_state in self._player_states.items():
+            if other_id == player_id:
+                continue
+            other_w, other_h = other_state.last_player_sprite_size
+            other_rect = self._player_collider_rect(
+                other_state.player.x,
+                other_state.player.y,
+                other_w,
+                other_h,
+            )
+            if player_rect.colliderect(other_rect):
+                return True
+        return False
 
     def _collides_with_room_walls(self, player_rect: pygame.Rect, world: WorldMap) -> bool:
         for room in world.rooms:

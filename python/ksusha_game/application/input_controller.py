@@ -33,7 +33,7 @@ class KeyboardInputController:
                 "inventory_down": (pygame.K_s,),
                 "inventory_move": (pygame.K_q,),
                 "pickup": (pygame.K_e,),
-                "drop": (pygame.K_g,),
+                "drop": (pygame.K_g, pygame.K_DELETE, pygame.K_BACKSPACE),
                 "use": (pygame.K_r,),
                 "jump": (pygame.K_SPACE,),
                 "reload": (pygame.K_F5,),
