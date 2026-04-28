@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +23,19 @@ class Camera:
     height: int
 
 
+@dataclass
+class RenderCache:
+    """Memoized surface operations. Not game state — can be discarded at any time."""
+    wall_scale: dict[tuple[object, ...], pygame.Surface] = field(default_factory=dict)
+    floor_shadow: dict[tuple[object, ...], pygame.Surface] = field(default_factory=dict)
+    object_tint: dict[tuple[object, ...], pygame.Surface] = field(default_factory=dict)
+    door_open_occluder: dict[tuple[int, int, int], pygame.Surface] = field(default_factory=dict)
+    spray_scale: dict[tuple[int, int, int], pygame.Surface] = field(default_factory=dict)
+    outside_floor_tile: list[pygame.Surface] | None = None
+    outside_bush: list[pygame.Surface] | None = None
+    outside_bush_layout: dict[tuple[object, ...], list[tuple[int, int, int]]] = field(default_factory=dict)
+
+
 class WorldRenderer:
     def __init__(self, config: GameConfig) -> None:
         self._config = config
@@ -30,14 +43,10 @@ class WorldRenderer:
         self._font = pygame.font.Font(None, 24)
         self._object_label_font = pygame.font.Font(None, 22)
         self._lock_marker_font = pygame.font.Font(None, 16)
-        self._wall_scale_cache: dict[tuple[object, ...], pygame.Surface] = {}
-        self._floor_shadow_cache: dict[tuple[object, ...], pygame.Surface] = {}
-        self._object_tint_cache: dict[tuple[object, ...], pygame.Surface] = {}
-        self._door_open_occluder_cache: dict[tuple[int, int, int], pygame.Surface] = {}
-        self._spray_scale_cache: dict[tuple[int, int, int], pygame.Surface] = {}
-        self._outside_floor_tile_cache: list[pygame.Surface] | None = None
-        self._outside_bush_cache: list[pygame.Surface] | None = None
-        self._outside_bush_layout_cache: dict[tuple[object, ...], list[tuple[int, int, int]]] = {}
+        self._cache = RenderCache()
+
+    def clear_render_cache(self) -> None:
+        self._cache = RenderCache()
 
     def render(
         self,
@@ -99,11 +108,11 @@ class WorldRenderer:
         self._draw_dragged_object_foreground(
             screen=world_layer,
             camera=camera,
-            world=world,
             objects=objects,
             object_sprites=object_sprites,
             dragged_object_id=dragged_object_id,
             player_pos=player_pos,
+            occluders=occluders,
         )
         self._draw_bottom_walls_foreground(world_layer, camera, world, wall_sprites)
         if world.show_object_labels:
@@ -143,8 +152,8 @@ class WorldRenderer:
             self._draw_outside_bushes(screen, camera, world, bush_variants)
 
     def _outside_floor_tiles(self) -> list[pygame.Surface]:
-        if self._outside_floor_tile_cache is not None:
-            return self._outside_floor_tile_cache
+        if self._cache.outside_floor_tile is not None:
+            return self._cache.outside_floor_tile
 
         base = Path(__file__).resolve().parents[3] / "source/textures/floors/outside"
         candidates = [
@@ -157,8 +166,8 @@ class WorldRenderer:
             loaded.append(pygame.image.load(str(p)).convert_alpha())
 
         if not loaded:
-            self._outside_floor_tile_cache = []
-            return self._outside_floor_tile_cache
+            self._cache.outside_floor_tile = []
+            return self._cache.outside_floor_tile
 
         target_w = loaded[0].get_width()
         target_h = loaded[0].get_height()
@@ -168,8 +177,8 @@ class WorldRenderer:
                 tile = pygame.transform.scale(tile, (target_w, target_h))
             normalized.append(tile)
 
-        self._outside_floor_tile_cache = normalized
-        return self._outside_floor_tile_cache
+        self._cache.outside_floor_tile = normalized
+        return self._cache.outside_floor_tile
 
     def _draw_outside_floor_tiles(
         self,
@@ -195,13 +204,13 @@ class WorldRenderer:
                 screen.blit(tile, (x - cam_x, y - cam_y))
 
     def _outside_bush_variants(self) -> list[pygame.Surface]:
-        if self._outside_bush_cache is not None:
-            return self._outside_bush_cache
+        if self._cache.outside_bush is not None:
+            return self._cache.outside_bush
 
         path = Path(__file__).resolve().parents[3] / "source/textures/items/plants/outdoor_bushes_sheet.png"
         if not path.exists():
-            self._outside_bush_cache = []
-            return self._outside_bush_cache
+            self._cache.outside_bush = []
+            return self._cache.outside_bush
 
         sheet = pygame.image.load(str(path)).convert_alpha()
         rgb = pygame.surfarray.pixels3d(sheet)
@@ -227,8 +236,8 @@ class WorldRenderer:
             cropped = sprite.subsurface(tight).copy()
             variants.append(self._fit_bottom_aligned(cropped, (112, 112)))
 
-        self._outside_bush_cache = variants
-        return self._outside_bush_cache
+        self._cache.outside_bush = variants
+        return self._cache.outside_bush
 
     def _draw_outside_bushes(
         self,
@@ -256,7 +265,7 @@ class WorldRenderer:
     def _outside_bush_layout(self, world: WorldMap, variant_count: int) -> list[tuple[int, int, int]]:
         room_sig = tuple((r.x, r.y, r.width, r.height) for r in world.rooms)
         key = (world.width, world.height, room_sig, variant_count)
-        cached = self._outside_bush_layout_cache.get(key)
+        cached = self._cache.outside_bush_layout.get(key)
         if cached is not None:
             return cached
 
@@ -274,7 +283,7 @@ class WorldRenderer:
                     continue
                 result.append((px, py, h % max(1, variant_count)))
 
-        self._outside_bush_layout_cache[key] = result
+        self._cache.outside_bush_layout[key] = result
         return result
 
     def _point_in_or_near_any_room(self, x: int, y: int, world: WorldMap, margin: int) -> bool:
@@ -457,7 +466,7 @@ class WorldRenderer:
         max_alpha: int,
     ) -> pygame.Surface:
         key = ("side_floor_shadow", side, int(width), int(height), int(max_alpha))
-        cached = self._floor_shadow_cache.get(key)
+        cached = self._cache.floor_shadow.get(key)
         if cached is not None:
             return cached
 
@@ -478,7 +487,7 @@ class WorldRenderer:
                     continue
                 gradient.set_at((x, y), (shade_r, shade_g, shade_b, alpha))
 
-        self._floor_shadow_cache[key] = gradient
+        self._cache.floor_shadow[key] = gradient
         return gradient
 
     def _draw_walls(
@@ -1140,12 +1149,12 @@ class WorldRenderer:
             return
 
         key = ("scale", kind, target_w, target_h, int(flip_x))
-        scaled = self._wall_scale_cache.get(key)
+        scaled = self._cache.wall_scale.get(key)
         if scaled is None:
             scaled = pygame.transform.scale(sprite, (target_w, target_h))
             if flip_x:
                 scaled = pygame.transform.flip(scaled, True, False)
-            self._wall_scale_cache[key] = scaled
+            self._cache.wall_scale[key] = scaled
         screen.blit(scaled, (x, y))
 
     def _blit_tiled_preserve_height(
@@ -1165,12 +1174,12 @@ class WorldRenderer:
             return
         tile_w = max(1, int(round(sw * (h / sh))))
         key = ("tile_x", kind, tile_w, h, int(flip_x))
-        tile = self._wall_scale_cache.get(key)
+        tile = self._cache.wall_scale.get(key)
         if tile is None:
             tile = pygame.transform.scale(sprite, (tile_w, h))
             if flip_x:
                 tile = pygame.transform.flip(tile, True, False)
-            self._wall_scale_cache[key] = tile
+            self._cache.wall_scale[key] = tile
         for ox in range(0, w, tile_w):
             draw_w = min(tile_w, w - ox)
             screen.blit(tile, (x + ox, y), pygame.Rect(0, 0, draw_w, h))
@@ -1195,10 +1204,10 @@ class WorldRenderer:
             return
 
         key = ("tile_crop_top", kind, sw, sh, int(flip_x))
-        tile = self._wall_scale_cache.get(key)
+        tile = self._cache.wall_scale.get(key)
         if tile is None:
             tile = pygame.transform.flip(sprite, True, False) if flip_x else sprite
-            self._wall_scale_cache[key] = tile
+            self._cache.wall_scale[key] = tile
         src_h = min(h, sh)
         for ox in range(0, w, sw):
             draw_w = min(sw, w - ox)
@@ -1221,12 +1230,12 @@ class WorldRenderer:
             return
         tile_h = max(1, int(round(sh * (w / sw))))
         key = ("tile_y", kind, w, tile_h, int(flip_x))
-        tile = self._wall_scale_cache.get(key)
+        tile = self._cache.wall_scale.get(key)
         if tile is None:
             tile = pygame.transform.scale(sprite, (w, tile_h))
             if flip_x:
                 tile = pygame.transform.flip(tile, True, False)
-            self._wall_scale_cache[key] = tile
+            self._cache.wall_scale[key] = tile
         for oy in range(0, h, tile_h):
             draw_h = min(tile_h, h - oy)
             screen.blit(tile, (x, y + oy), pygame.Rect(0, 0, w, draw_h))
@@ -1249,12 +1258,12 @@ class WorldRenderer:
         scale_w = max(1, int(w))
         scaled_h = max(1, int(round(sh * (scale_w / sw))))
         key = ("crop_top_width", kind, scale_w, scaled_h, int(flip_x))
-        scaled = self._wall_scale_cache.get(key)
+        scaled = self._cache.wall_scale.get(key)
         if scaled is None:
             scaled = pygame.transform.scale(sprite, (scale_w, scaled_h))
             if flip_x:
                 scaled = pygame.transform.flip(scaled, True, False)
-            self._wall_scale_cache[key] = scaled
+            self._cache.wall_scale[key] = scaled
         if scaled_h <= h:
             self._blit_scaled(screen, scaled, x, y, w, h, kind=f"{kind}_fallback", flip_x=False)
             return
@@ -1279,7 +1288,7 @@ class WorldRenderer:
         scaled_w = max(1, int(round(sw * scale)))
         scaled_h = max(1, int(round(sh * scale)))
         key = ("cover", kind, w, h, scaled_w, scaled_h, int(flip_x))
-        covered = self._wall_scale_cache.get(key)
+        covered = self._cache.wall_scale.get(key)
         if covered is None:
             scaled = pygame.transform.scale(sprite, (scaled_w, scaled_h))
             if flip_x:
@@ -1288,7 +1297,7 @@ class WorldRenderer:
             src_y = max(0, (scaled_h - h) // 2)
             covered = pygame.Surface((w, h), pygame.SRCALPHA)
             covered.blit(scaled, (0, 0), pygame.Rect(src_x, src_y, w, h))
-            self._wall_scale_cache[key] = covered
+            self._cache.wall_scale[key] = covered
         screen.blit(covered, (x, y))
 
     def _opening_span(
@@ -1318,19 +1327,12 @@ class WorldRenderer:
         object_sprites: ObjectSpriteLibrary,
         *,
         dragged_object_id: str | None = None,
-    ) -> list[tuple[pygame.Surface, float, float, int, bool]]:
+    ) -> list[tuple[pygame.Surface, float, float, int, bool, str]]:
         draw_list = sorted(objects, key=lambda obj: obj.y)
-        occluders: list[tuple[pygame.Surface, float, float, int, bool]] = []
+        occluders: list[tuple[pygame.Surface, float, float, int, bool, str]] = []
         for obj in draw_list:
             sprite = self._sprite_for_object(object_sprites, obj)
-            # Avoid double-draw artifacts for dragged plants in doorway area:
-            # they are rendered in dedicated foreground pass with lintel clipping.
-            skip_base_draw = (
-                dragged_object_id is not None
-                and obj.object_id == dragged_object_id
-                and obj.kind != "door"
-                and self._dragged_object_lintel_clip_world_y(obj, sprite, world) is not None
-            )
+            skip_base_draw = False
             occluder_sprite = sprite
             x = obj.x - sprite.get_width() / 2 - camera.x
             y = obj.y - sprite.get_height() / 2 - camera.y
@@ -1361,6 +1363,7 @@ class WorldRenderer:
                             y,
                             split_y,
                             obj.kind == "door" and self._normalize_door_orientation(obj.door_orientation) == "top",
+                            obj.object_id,
                         )
                     )
             else:
@@ -1373,7 +1376,7 @@ class WorldRenderer:
     def _draw_objects_occluder_pass(
         self,
         screen: pygame.Surface,
-        occluders: list[tuple[pygame.Surface, float, float, int, bool]],
+        occluders: list[tuple[pygame.Surface, float, float, int, bool, str]],
         camera: Camera,
         player_pos: tuple[float, float],
         player_frame: pygame.Surface,
@@ -1412,7 +1415,7 @@ class WorldRenderer:
         screen.set_clip(clip_rect)
         door_margin = -8.0
         drew_door_overlay = False
-        for sprite, x, y, split_y, is_door in occluders:
+        for sprite, x, y, split_y, is_door, _owner_id in occluders:
             split_screen_y = y + split_y
             test_y = player_head_screen if is_door else player_bottom_screen
             # Only occlude when player is behind object split line.
@@ -1478,11 +1481,11 @@ class WorldRenderer:
         *,
         screen: pygame.Surface,
         camera: Camera,
-        world: WorldMap,
         objects: list[WorldObject],
         object_sprites: ObjectSpriteLibrary,
         dragged_object_id: str | None,
         player_pos: tuple[float, float],
+        occluders: list[tuple[pygame.Surface, float, float, int, bool, str]],
     ) -> None:
         if not dragged_object_id:
             return
@@ -1492,67 +1495,56 @@ class WorldRenderer:
         sprite = self._sprite_for_object(object_sprites, obj)
         x = obj.x - sprite.get_width() / 2 - camera.x
         y = obj.y - sprite.get_height() / 2 - camera.y
-        lintel_clip_world_y = self._dragged_object_lintel_clip_world_y(obj, sprite, world)
         # Base pass already draws dragged objects with normal Y-sorting.
-        # Foreground redraw is usually needed only when object is in front of player.
-        # Exception: when crossing top doorway opening, force redraw so dragged plant
-        # remains visible inside the aperture (with lintel clip).
-        if obj.y <= player_pos[1] + 2 and lintel_clip_world_y is None:
-            return
-        if lintel_clip_world_y is not None:
-            # Keep dragged object visible inside doorway while preventing it from
-            # drawing above the lintel: clip top part by lintel bottom line.
-            clip_top_px = int(lintel_clip_world_y - (obj.y - sprite.get_height() / 2))
-            clip_top_px = max(0, clip_top_px)
-            if clip_top_px >= sprite.get_height():
-                return
-            src = pygame.Rect(0, clip_top_px, sprite.get_width(), sprite.get_height() - clip_top_px)
-            screen.blit(sprite, (x, y + clip_top_px), src)
-        else:
+        # Foreground redraw is needed only when dragged object is in front of player.
+        if obj.y > player_pos[1] + 2:
             screen.blit(sprite, (x, y))
-        self._draw_object_lock_marker(screen, obj, x, y, sprite)
-
-    def _dragged_object_lintel_clip_world_y(
-        self,
-        obj: WorldObject,
-        sprite: pygame.Surface,
-        world: WorldMap,
-    ) -> int | None:
-        obj_rect = pygame.Rect(
-            int(obj.x - sprite.get_width() / 2),
-            int(obj.y - sprite.get_height() / 2),
-            int(sprite.get_width()),
-            int(sprite.get_height()),
+            self._draw_object_lock_marker(screen, obj, x, y, sprite)
+        self._draw_dragged_object_occluder_pass(
+            screen=screen,
+            occluders=occluders,
+            camera=camera,
+            dragged_object=obj,
+            dragged_sprite=sprite,
         )
-        if obj_rect.width <= 0 or obj_rect.height <= 0:
-            return None
-        clip_y: int | None = None
-        for room in world.rooms:
-            if not room.walls_enabled:
+
+    def _draw_dragged_object_occluder_pass(
+        self,
+        *,
+        screen: pygame.Surface,
+        occluders: list[tuple[pygame.Surface, float, float, int, bool, str]],
+        camera: Camera,
+        dragged_object: WorldObject,
+        dragged_sprite: pygame.Surface,
+    ) -> None:
+        rect_screen = pygame.Rect(
+            int(dragged_object.x - camera.x - dragged_sprite.get_width() / 2),
+            int(dragged_object.y - camera.y - dragged_sprite.get_height() / 2),
+            dragged_sprite.get_width(),
+            dragged_sprite.get_height(),
+        ).inflate(8, 8)
+        view_rect = pygame.Rect(0, 0, camera.width, camera.height)
+        clip_rect = rect_screen.clip(view_rect)
+        if clip_rect.width <= 0 or clip_rect.height <= 0:
+            return
+
+        obj_bottom_screen = dragged_object.y - camera.y + dragged_sprite.get_height() / 2
+        obj_top_screen = dragged_object.y - camera.y - dragged_sprite.get_height() / 2
+        obj_head_screen = obj_top_screen + max(2.0, dragged_sprite.get_height() * 0.03)
+        door_margin = -8.0
+
+        prev_clip = screen.get_clip()
+        screen.set_clip(clip_rect)
+        for sprite, x, y, split_y, is_door, owner_id in occluders:
+            if owner_id == dragged_object.object_id:
                 continue
-            t = max(1, min(room.wall_thickness, room.width // 3, room.height // 3))
-            top_t = max(t, min(room.top_wall_height, room.height // 2)) if room.top_wall_height > 0 else t
-            top_span = self._opening_span(
-                start=room.x + t + 10,
-                length=room.width - (t * 2) - 20,
-                opening_width=room.top_door_width,
-                opening_offset=room.top_door_offset,
-            )
-            if top_span is None:
+            split_screen_y = y + split_y
+            test_y = obj_head_screen if is_door else obj_bottom_screen
+            if test_y > (split_screen_y + (door_margin if is_door else 0.0)):
                 continue
-            l, r = top_span
-            opening_w = max(1, r - l)
-            # Stable doorway-zone check to avoid flicker when plant touches posts/walls:
-            # apply lintel clip while dragged object center is inside aperture and
-            # sprite intersects doorway vertical band.
-            in_opening_x = (l + 2) <= obj_rect.centerx <= (r - 2)
-            zone_bottom = room.y + top_t + max(120, int(top_t * 0.9))
-            in_opening_y = obj_rect.bottom > room.y and obj_rect.top < zone_bottom
-            if in_opening_x and in_opening_y and opening_w > 8:
-                bottom_y = room.y + top_t
-                if clip_y is None or bottom_y > clip_y:
-                    clip_y = bottom_y
-        return clip_y
+            upper_src = pygame.Rect(0, 0, sprite.get_width(), split_y)
+            screen.blit(sprite, (x, y), upper_src)
+        screen.set_clip(prev_clip)
 
     def _draw_player(
         self,
@@ -1710,7 +1702,7 @@ class WorldRenderer:
         draw_h: int,
     ) -> pygame.Surface:
         key = (id(frame), int(draw_w), int(draw_h))
-        cached = self._spray_scale_cache.get(key)
+        cached = self._cache.spray_scale.get(key)
         if cached is not None:
             return cached
         if frame.get_width() == draw_w and frame.get_height() == draw_h:
@@ -1718,7 +1710,7 @@ class WorldRenderer:
         else:
             # Graffiti sheets are high-detail art; smooth scaling keeps curves readable.
             scaled = pygame.transform.smoothscale(frame, (draw_w, draw_h))
-        self._spray_scale_cache[key] = scaled
+        self._cache.spray_scale[key] = scaled
         return scaled
 
     def _draw_message(self, screen: pygame.Surface, message: str) -> None:
@@ -1980,7 +1972,7 @@ class WorldRenderer:
 
     def _open_door_occluder_sprite(self, sprite: pygame.Surface) -> pygame.Surface:
         key = ("door_open_occ", id(sprite), sprite.get_width(), sprite.get_height())
-        cached = self._door_open_occluder_cache.get(key)
+        cached = self._cache.door_open_occluder.get(key)
         if cached is not None:
             return cached
 
@@ -2002,7 +1994,7 @@ class WorldRenderer:
             clear_w = max(1, aperture_right - dyn_left)
             out.fill((0, 0, 0, 0), pygame.Rect(dyn_left, aperture_top + row, clear_w, 1))
 
-        self._door_open_occluder_cache[key] = out
+        self._cache.door_open_occluder[key] = out
         return out
 
     def _tinted_object_sprite(
@@ -2026,7 +2018,7 @@ class WorldRenderer:
             base.get_width(),
             base.get_height(),
         )
-        cached = self._object_tint_cache.get(key)
+        cached = self._cache.object_tint.get(key)
         if cached is not None:
             return cached
 
@@ -2059,5 +2051,5 @@ class WorldRenderer:
                 nb = int(src.b + (recolor.b - src.b) * sr)
                 out.set_at((x, y), pygame.Color(nr, ng, nb, src.a))
 
-        self._object_tint_cache[key] = out
+        self._cache.object_tint[key] = out
         return out

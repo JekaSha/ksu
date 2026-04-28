@@ -42,7 +42,7 @@ presentation/   — drawing: WorldRenderer, renderer.py (inventory/HUD)
 **Key data flow:**
 1. `MapLoader.load()` reads `source/maps/main_map.json` → returns `LoadedMap` (contains `WorldMap` + `FloorAtlasConfig`)
 2. `KsushaGame.run()` owns the pygame loop; it holds `Player`, `Inventory`, `WorldMap`, and all infrastructure instances
-3. `WorldRenderer.render()` takes everything as arguments (stateless draw pass) — no game state lives inside the renderer
+3. `WorldRenderer.render()` takes everything as arguments — no game state lives inside it. It holds a `RenderCache` (memoized surface scaling) that can be discarded at any time without affecting correctness
 4. `FramePreprocessor` strips chroma-green backgrounds from sprite sheets and builds per-frame alpha masks
 
 **`WorldObject` state machine:** objects have an integer `state` field; `cycle_sprites`, `pickup_item_id`, `required_item_id`, `lock_key_sets`, and `transitions` drive all interactive behavior inside `KsushaGame`. No separate state-machine class — logic lives in `game.py`.

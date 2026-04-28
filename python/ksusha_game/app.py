@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ksusha_game.config import DEFAULT_GAME_CONFIG
+from ksusha_game.config import get_default_config
 
 
 def main() -> int:
@@ -13,7 +13,7 @@ def main() -> int:
 
     from ksusha_game.application.game import KsushaGame
 
-    game = KsushaGame(DEFAULT_GAME_CONFIG)
+    game = KsushaGame(get_default_config())
     return game.run()
 
 

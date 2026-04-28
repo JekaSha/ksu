@@ -10,11 +10,10 @@ import pygame
 
 from ksusha_game.application.input_controller import KeyboardInputController
 from ksusha_game.config import GameConfig
-from ksusha_game.domain.direction import Direction
+from ksusha_game.domain.direction import Direction, FACING_VECTOR
 from ksusha_game.domain.inventory import Inventory
 from ksusha_game.domain.player import Player
 from ksusha_game.domain.world import (
-    FACING_VECTOR,
     BalloonObject,
     RoomArea,
     SprayTag,
@@ -28,6 +27,7 @@ from ksusha_game.infrastructure.map_loader import MapLoader
 from ksusha_game.infrastructure.object_sprites import ObjectSpriteLibrary
 from ksusha_game.infrastructure.sprite_sheet_loader import ScaledAnimationCache, SpriteSheetLoader
 from ksusha_game.infrastructure.wall_sprites import WallSpriteLibrary
+from ksusha_game.infrastructure.world_setup import apply_interior_physics, object_collider_metrics
 from ksusha_game.presentation.world_renderer import WorldRenderer
 
 
@@ -157,6 +157,7 @@ class KsushaGame:
                     self._door_overlap_ids.clear()
                     self._spray_spent_slots.clear()
                     self._active_area_id = None
+                    renderer.clear_render_cache()
                     self._set_message("Hot reload: assets/map reloaded")
                 except Exception as exc:
                     self._set_message(f"Hot reload failed: {exc}")
@@ -352,7 +353,7 @@ class KsushaGame:
             self._queue_async_preload("spray_profile", profile_id)
         if not world.spray_profiles:
             self._queue_async_preload("spray_profile", "")
-        self._keep_interior_objects_off_walls(world, object_sprites)
+        apply_interior_physics(world, object_sprites)
         walk_cache = ScaledAnimationCache(loader.load_walk_frames(project_root / self._config.sprite_path))
         backpack_cache = ScaledAnimationCache(
             loader.load_walk_frames(project_root / self._config.backpack_sprite_path)
@@ -410,113 +411,6 @@ class KsushaGame:
         # Crossing between corridor/rooms should always recharge spray items.
         if prev_area != new_area_id and (prev_area is not None or new_area_id is not None):
             self._spray_spent_slots.clear()
-
-    def _keep_interior_objects_off_walls(
-        self,
-        world: WorldMap,
-        object_sprites: ObjectSpriteLibrary,
-    ) -> None:
-        interior_kinds = {"sofa", "plant", "backpack", "key", "ballon"}
-        for obj in world.objects:
-            if obj.kind not in interior_kinds:
-                continue
-            room = self._room_for_point(world, obj.x, obj.y)
-            if room is None or not room.walls_enabled:
-                continue
-            self._clamp_object_inside_room_interior(obj, room, world, object_sprites)
-
-        # Resolve authored overlaps between movable interior blockers (mostly plants near sofas).
-        # Without this, grabbed plants can appear "stuck" because they start intersecting a sofa.
-        for room in world.rooms:
-            if not room.walls_enabled:
-                continue
-            blockers = [
-                obj
-                for obj in world.objects
-                if obj.kind in interior_kinds
-                and obj.blocking
-                and self._room_for_point(world, obj.x, obj.y) is room
-            ]
-            if len(blockers) < 2:
-                continue
-            for _ in range(8):
-                moved = False
-                for obj in blockers:
-                    if obj.kind == "sofa":
-                        continue
-                    rect = self._nominal_object_collider_rect(obj, world, object_sprites)
-                    for other in blockers:
-                        if other.object_id == obj.object_id:
-                            continue
-                        other_rect = self._nominal_object_collider_rect(other, world, object_sprites)
-                        if not rect.colliderect(other_rect):
-                            continue
-                        overlap_x = min(rect.right, other_rect.right) - max(rect.left, other_rect.left)
-                        overlap_y = min(rect.bottom, other_rect.bottom) - max(rect.top, other_rect.top)
-                        if overlap_x <= 0 or overlap_y <= 0:
-                            continue
-                        if overlap_x <= overlap_y:
-                            dir_x = -1.0 if rect.centerx < other_rect.centerx else 1.0
-                            obj.x += dir_x * float(overlap_x + 1)
-                        else:
-                            dir_y = -1.0 if rect.centery < other_rect.centery else 1.0
-                            obj.y += dir_y * float(overlap_y + 1)
-                        self._clamp_object_inside_room_interior(obj, room, world, object_sprites)
-                        rect = self._nominal_object_collider_rect(obj, world, object_sprites)
-                        moved = True
-                if not moved:
-                    break
-
-    def _clamp_object_inside_room_interior(
-        self,
-        obj: WorldObject,
-        room: RoomArea,
-        world: WorldMap,
-        object_sprites: ObjectSpriteLibrary,
-    ) -> None:
-        t = max(1, min(room.wall_thickness, room.width // 3, room.height // 3))
-        top_t = (
-            max(t, min(room.top_wall_height, room.height // 2))
-            if room.top_wall_height > 0
-            else t
-        )
-        interior_left = room.x + t + 4
-        interior_right = room.x + room.width - t - 4
-        interior_top = room.y + top_t + 4
-        interior_bottom = room.y + room.height - t - 4
-        if interior_left >= interior_right or interior_top >= interior_bottom:
-            return
-
-        nominal_w, nominal_h = object_sprites.nominal_world_size(obj.kind, obj)
-        collider_w, collider_h, y_anchor = self._object_collider_metrics_from_size(
-            obj=obj,
-            sprite_w=nominal_w,
-            sprite_h=nominal_h,
-        )
-
-        min_x = interior_left + collider_w / 2
-        max_x = interior_right - collider_w / 2
-        if min_x <= max_x:
-            obj.x = max(min_x, min(max_x, obj.x))
-
-        min_y = interior_top - y_anchor + collider_h / 2
-        max_y = interior_bottom - y_anchor - collider_h / 2
-        if min_y <= max_y:
-            obj.y = max(min_y, min(max_y, obj.y))
-
-    def _nominal_object_collider_rect(self, obj: WorldObject, world: WorldMap, object_sprites: ObjectSpriteLibrary) -> pygame.Rect:
-        nominal_w, nominal_h = object_sprites.nominal_world_size(obj.kind, obj)
-        collider_w, collider_h, y_anchor = self._object_collider_metrics_from_size(
-            obj=obj,
-            sprite_w=nominal_w,
-            sprite_h=nominal_h,
-        )
-        return pygame.Rect(
-            int(obj.x - collider_w / 2),
-            int(obj.y + y_anchor - collider_h / 2),
-            max(8, int(collider_w)),
-            max(8, int(collider_h)),
-        )
 
     def _room_for_point(self, world: WorldMap, x: float, y: float) -> RoomArea | None:
         for room in world.rooms:
@@ -2941,49 +2835,7 @@ class KsushaGame:
         return int(penalty)
 
     def _object_collider_metrics(self, obj: WorldObject, sprite: pygame.Surface) -> tuple[int, int, float]:
-        return self._object_collider_metrics_from_size(
-            obj=obj,
-            sprite_w=sprite.get_width(),
-            sprite_h=sprite.get_height(),
-        )
-
-    def _object_collider_metrics_from_size(
-        self,
-        obj: WorldObject,
-        sprite_w: int,
-        sprite_h: int,
-    ) -> tuple[int, int, float]:
-        collider_w = int(obj.collider_w) if obj.collider_w is not None else int(sprite_w * 0.72)
-        collider_h = int(obj.collider_h) if obj.collider_h is not None else int(sprite_h * 0.32)
-        y_anchor = float(sprite_h) * 0.32
-
-        if obj.kind == "plant":
-            # Expand plant collider upward a bit so player cannot step too deep into the leaves.
-            extra_up = max(12, int(sprite_h * 0.08))
-            collider_h += extra_up
-            y_anchor -= extra_up * 0.5
-        elif obj.kind == "door":
-            # Closed top doors: keep pass blocked, but let player approach from corridor side.
-            # Shift collider down (instead of full centered slab), and widen it to seal side bypass.
-            if obj.blocking and obj.state <= 0:
-                collider_w = max(collider_w, int(sprite_w * 0.66))
-                collider_h = max(collider_h, int(sprite_h * 0.64))
-                y_anchor = float(sprite_h) * 0.18
-            else:
-                collider_w = max(collider_w, int(sprite_w * 0.54))
-                collider_h = max(collider_h, int(sprite_h * 0.48))
-                y_anchor = float(sprite_h) * 0.08
-        elif obj.kind == "sofa":
-            # Make sofa non-passable from sides and earlier from top.
-            side_guard = max(14, int(sprite_w * 0.07))
-            collider_w = max(collider_w, int(sprite_w * 0.96) + side_guard * 2)
-            collider_h = max(collider_h, int(sprite_h * 0.56))
-            y_anchor = min(y_anchor, float(sprite_h) * 0.30)
-            extra_up = max(12, int(sprite_h * 0.07))
-            collider_h += extra_up
-            y_anchor -= extra_up * 0.55
-
-        return max(8, collider_w), max(8, collider_h), float(y_anchor)
+        return object_collider_metrics(obj, sprite.get_width(), sprite.get_height())
 
     def _update_standing_platform(
         self,

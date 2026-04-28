@@ -183,10 +183,8 @@ class ObjectSpriteLibrary:
 
     def ballon_sprite_for_object(self, obj: WorldObject) -> pygame.Surface:
         balloon_id = ""
-        if hasattr(obj, "balloon_id"):
-            raw_id = getattr(obj, "balloon_id")
-            if raw_id is not None:
-                balloon_id = str(raw_id).strip()
+        if isinstance(obj, BalloonObject) and obj.balloon_id:
+            balloon_id = str(obj.balloon_id).strip()
         if balloon_id:
             specs = self._resolved_balloon_specs()
             spec = specs.get(balloon_id)

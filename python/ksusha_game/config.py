@@ -133,10 +133,10 @@ def _resolve_character_config() -> tuple[Path, Path, Path]:
     return skin_pool_dir, sprite_path, backpack_path
 
 
-_SKIN_POOL_DIR, _SPRITE_PATH, _BACKPACK_PATH = _resolve_character_config()
-
-DEFAULT_GAME_CONFIG = GameConfig(
-    skin_pool_dir=_SKIN_POOL_DIR,
-    sprite_path=_SPRITE_PATH,
-    backpack_sprite_path=_BACKPACK_PATH,
-)
+def get_default_config() -> GameConfig:
+    skin_pool_dir, sprite_path, backpack_path = _resolve_character_config()
+    return GameConfig(
+        skin_pool_dir=skin_pool_dir,
+        sprite_path=sprite_path,
+        backpack_sprite_path=backpack_path,
+    )
