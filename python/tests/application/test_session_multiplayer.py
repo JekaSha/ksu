@@ -554,6 +554,40 @@ class TestApplyNetworkSnapshot:
         assert len(session._spray_tags) == 1
         assert session._spray_tags[0].target_id == "door_1"
 
+    def test_snapshot_queues_inventory_icon_preloads(self, session, stats, world):
+        add(session, GameSession._LOCAL_PLAYER_ID, stats)
+        snapshot = {
+            "level": session._config.map_path.stem,
+            "players": [
+                {
+                    "id": "p1",
+                    "x": 0.0,
+                    "y": 0.0,
+                    "facing": "down",
+                    "walk_time": 0.0,
+                    "jump_time_left": 0.0,
+                    "inventory": {
+                        "base_capacity": 5,
+                        "capacity": 5,
+                        "slots": ["backpack", "key", None, "ballon", None],
+                        "active_index": 0,
+                        "open": True,
+                        "move_mode": False,
+                        "move_source_index": None,
+                        "bonus_capacity": 0,
+                        "bonus_weight_limit_kg": 0.0,
+                    },
+                }
+            ],
+        }
+
+        session._apply_network_snapshot(snapshot, world, assigned_local_id=None)
+
+        queued = list(session._async_preload_queue)
+        assert ("item_icon", "backpack") in queued
+        assert ("item_icon", "key") in queued
+        assert ("item_icon", "ballon") in queued
+
 
 class TestPlayerVsPlayerCollision:
     def test_player_collision_blocks_movement(self, session, stats):

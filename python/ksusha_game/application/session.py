@@ -878,6 +878,7 @@ class GameSession:
                 inventory_payload = item.get("inventory")
                 if isinstance(inventory_payload, dict):
                     self._apply_inventory_payload(state.inventory, inventory_payload)
+                    self._queue_inventory_preloads(state.inventory, world)
             except Exception:
                 continue
             seen.add(player_id)
@@ -997,6 +998,17 @@ class GameSession:
             )
         except (TypeError, ValueError):
             inventory.bonus_weight_limit_kg = 0.0
+
+    def _queue_inventory_preloads(self, inventory: Inventory, world: WorldMap) -> None:
+        for item_id in inventory.slots[: max(0, inventory.capacity)]:
+            if item_id is None:
+                continue
+            token = str(item_id).strip()
+            if not token:
+                continue
+            self._queue_async_preload("item_icon", token)
+            if self._is_spray_item(token):
+                self._queue_async_preload("spray_profile", self._spray_profile_for_item(token, world))
 
     def _world_object_payload(self, obj: WorldObject) -> dict[str, object]:
         transitions_payload = {
