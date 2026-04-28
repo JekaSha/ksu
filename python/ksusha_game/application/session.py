@@ -210,6 +210,7 @@ class GameSession:
         }
         static_control_hint_lines = KeyboardInputController.profile_control_hints([self._LOCAL_PLAYER_ID])
         static_control_hint_lines.append("LAN mode: one local player per computer")
+        static_control_hint_lines.append("LAN menu: Ctrl+M")
 
         def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
             raw = os.getenv(name, "").strip()
@@ -220,6 +221,15 @@ class GameSession:
             except ValueError:
                 return default
             return max(min_value, min(max_value, value))
+
+        def _format_session_duration(total_sec: float) -> str:
+            sec = max(0, int(total_sec))
+            h = sec // 3600
+            m = (sec % 3600) // 60
+            s = sec % 60
+            if h > 0:
+                return f"{h:02d}:{m:02d}:{s:02d}"
+            return f"{m:02d}:{s:02d}"
 
         local_player_name = os.getenv("KSU_PLAYER_NAME", "").strip() or os.getenv("USER", "").strip() or "player"
         local_host_name = socket.gethostname().strip() or "computer"
@@ -237,9 +247,13 @@ class GameSession:
         host_started = lan_host.start()
         browser = LanServerBrowser(discovery_port=discovery_port)
         browser.start()
-        show_server_list = True
+        show_server_list = False
         selected_server_idx = 0
         current_servers: list[ServerEntry] = []
+        connect_requested_target: ServerEntry | None = None
+        reconnect_candidate: ServerEntry | None = None
+        connected_since_monotonic: float | None = None
+        connected_host_summary: str | None = None
         was_connected = False
         last_snapshot_sent_at = 0.0
         if host_started:
@@ -260,14 +274,25 @@ class GameSession:
             if connect_result is not None:
                 ok, reason = connect_result
                 if ok:
+                    connected_since_monotonic = now
+                    if connect_requested_target is not None:
+                        connected_host_summary = (
+                            f"{connect_requested_target.host_name} ({connect_requested_target.player_name}) "
+                            f"[{connect_requested_target.level_name}]"
+                        )
                     self._set_message("Connected to host")
                 else:
                     self._set_message(f"Connect failed: {reason}")
+                connect_requested_target = None
             is_connected = browser.is_connected()
             if is_connected and not was_connected:
                 # Joining remote host: keep only local player state until snapshots arrive.
                 for pid in [pid for pid in self._player_states.keys() if pid != self._LOCAL_PLAYER_ID]:
                     self.remove_player(player_id=pid)
+            if (not is_connected) and was_connected:
+                connected_since_monotonic = None
+                connected_host_summary = None
+                reconnect_candidate = None
             was_connected = is_connected
             if not current_servers:
                 selected_server_idx = 0
@@ -277,8 +302,6 @@ class GameSession:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
-                elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                    running = False
                 elif event.type == pygame.KEYUP:
                     for controller in input_controllers.values():
                         controller.on_keyup(event)
@@ -287,27 +310,72 @@ class GameSession:
                     for controller in input_controllers.values():
                         controller.clear_pressed()
                 elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_F6:
+                    ctrl_m_pressed = event.key == pygame.K_m and (event.mod & pygame.KMOD_CTRL)
+                    if ctrl_m_pressed:
                         show_server_list = not show_server_list
+                        if not show_server_list:
+                            reconnect_candidate = None
                         continue
-                    if event.key == pygame.K_F7:
-                        if current_servers:
-                            selected_server_idx = (selected_server_idx + 1) % len(current_servers)
+                    if event.key == pygame.K_ESCAPE:
+                        if reconnect_candidate is not None:
+                            reconnect_candidate = None
+                            self._set_message("Reconnect canceled")
+                            continue
+                        if show_server_list:
+                            show_server_list = False
+                            continue
+                        running = False
                         continue
-                    if event.key == pygame.K_F8:
-                        if current_servers:
+
+                    if show_server_list:
+                        if reconnect_candidate is not None:
+                            if event.key in {pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_y}:
+                                target = reconnect_candidate
+                                reconnect_candidate = None
+                                browser.disconnect()
+                                connected_since_monotonic = None
+                                connected_host_summary = None
+                                browser.connect_async(target, player_name=local_player_name)
+                                connect_requested_target = target
+                                self._set_message(
+                                    f"Reconnecting: {target.host_name} ({target.player_name}) [{target.level_name}]"
+                                )
+                            elif event.key in {pygame.K_n, pygame.K_ESCAPE}:
+                                reconnect_candidate = None
+                                self._set_message("Reconnect canceled")
+                            continue
+
+                        if event.key in {pygame.K_UP, pygame.K_w}:
+                            if current_servers:
+                                selected_server_idx = (selected_server_idx - 1) % len(current_servers)
+                            continue
+                        if event.key in {pygame.K_DOWN, pygame.K_s}:
+                            if current_servers:
+                                selected_server_idx = (selected_server_idx + 1) % len(current_servers)
+                            continue
+                        if event.key in {pygame.K_RETURN, pygame.K_KP_ENTER}:
+                            if not current_servers:
+                                self._set_message("No LAN servers found")
+                                continue
                             target = current_servers[selected_server_idx]
+                            connected_sid = browser.connected_server_id()
+                            if browser.is_connected() and connected_sid == target.server_id:
+                                self._set_message("Already connected to selected host")
+                                continue
+                            if browser.is_connected() and connected_sid is not None and connected_sid != target.server_id:
+                                reconnect_candidate = target
+                                self._set_message(
+                                    "Reconnect to selected host? Enter/Y = yes, Esc/N = no"
+                                )
+                                continue
                             browser.connect_async(target, player_name=local_player_name)
+                            connect_requested_target = target
                             self._set_message(
                                 f"Connecting: {target.host_name} ({target.player_name}) [{target.level_name}]"
                             )
-                        else:
-                            self._set_message("No LAN servers found")
+                            continue
                         continue
-                    if event.key == pygame.K_F9:
-                        browser.disconnect()
-                        self._set_message("Disconnected")
-                        continue
+
                     for controller in input_controllers.values():
                         controller.on_keydown(event, now)
                     local_controller = input_controllers.get(self._LOCAL_PLAYER_ID)
@@ -616,12 +684,27 @@ class GameSession:
             message = self._message if now < self._message_until else ""
             dynamic_hint_lines = list(static_control_hint_lines)
             if show_server_list:
-                dynamic_hint_lines.append("LAN: F6 show/hide | F7 next | F8 connect | F9 disconnect")
+                dynamic_hint_lines.append("LAN: UP/DOWN select | ENTER connect | ESC close")
+                connected_sid = browser.connected_server_id()
+                if browser.is_connected():
+                    host_text = connected_host_summary or f"server:{connected_sid}"
+                    duration = (
+                        _format_session_duration(now - connected_since_monotonic)
+                        if connected_since_monotonic is not None
+                        else "00:00"
+                    )
+                    dynamic_hint_lines.append(f"LAN connected: {host_text}")
+                    dynamic_hint_lines.append(f"Session duration: {duration}")
+                else:
+                    dynamic_hint_lines.append("LAN connected: no")
+                if reconnect_candidate is not None:
+                    dynamic_hint_lines.append(
+                        "Reconnect to selected host? ENTER/Y yes | ESC/N no"
+                    )
                 if not current_servers:
                     dynamic_hint_lines.append("LAN: no servers")
                 else:
-                    connected_sid = browser.connected_server_id()
-                    for idx, entry in enumerate(current_servers[:7]):
+                    for idx, entry in enumerate(current_servers[:10]):
                         mark = ">" if idx == selected_server_idx else " "
                         conn = "*" if connected_sid == entry.server_id else " "
                         dynamic_hint_lines.append(

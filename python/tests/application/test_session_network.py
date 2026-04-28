@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from ksusha_game.application.infrastructure.lan_presence import HostEvent
+from ksusha_game.infrastructure.lan_presence import HostEvent
 from ksusha_game.application.session import GameSession
 from ksusha_game.config import GameConfig
 from ksusha_game.domain.direction import Direction
