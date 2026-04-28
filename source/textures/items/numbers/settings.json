@@ -57,5 +57,24 @@
     "minus",
     "multiply",
     "divide"
-  ]
+  ],
+  "digits": {
+    "file": "digits_0_9_chroma.png",
+    "rows": 2,
+    "cols": 5,
+    "order": "0123456789",
+    "chroma_green_delta": 34,
+    "chroma_green_min": 92
+  },
+  "ops": {
+    "file": "math_ops_chroma.png",
+    "order": [
+      "plus",
+      "minus",
+      "multiply",
+      "divide"
+    ],
+    "chroma_green_delta": 34,
+    "chroma_green_min": 92
+  }
 }

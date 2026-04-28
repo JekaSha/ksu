@@ -242,7 +242,7 @@ class GameSession:
         input_controllers: dict[str, KeyboardInputController] = {
             self._LOCAL_PLAYER_ID: KeyboardInputController(profile_name=self._LOCAL_PLAYER_ID)
         }
-        static_control_hint_lines = KeyboardInputController.profile_control_hints([self._LOCAL_PLAYER_ID])
+        static_control_hint_lines: list[str] = []
         static_control_hint_lines.append("LAN mode: one local player per computer")
         static_control_hint_lines.append("LAN menu: Ctrl+M")
         static_control_hint_lines.append("Tasks menu: Ctrl+Q")
@@ -854,9 +854,9 @@ class GameSession:
                         task_panel_lines.append(f"{mark} Задача {idx + 1}")
                     task_panel_lines.append("E: запуск | Q: назад")
                     if task_menu_selected_task == 0:
-                        task_panel_lines.append("Описание: два числа + найди ответ")
+                        task_panel_lines.append("Описание: сложение, 10 итераций, очередь ответов")
                     elif task_menu_selected_task == 1:
-                        task_panel_lines.append("Описание: вычитание (в разработке)")
+                        task_panel_lines.append("Описание: вычитание, 10 итераций, очередь ответов")
                     elif task_menu_selected_task == 2:
                         task_panel_lines.append("Описание: выбрать + или - (в разработке)")
                     else:
@@ -876,9 +876,31 @@ class GameSession:
                     multiplayer_lines.append(f"{prefix} {self._player_display_name(pid)}")
             if self._math_tasks.active:
                 duration = _format_session_duration(self._math_tasks.session_duration_sec(time.time()))
+                pending = self._math_tasks.pending_count()
+                produced = int(self._math_tasks.produced_count)
+                solved = int(self._math_tasks.solved_count)
+                target = int(self._math_tasks.iterations_target)
+                op = self._math_tasks.task_operation()
                 dynamic_hint_lines.append(
                     f"MATH score: {self._math_tasks.total_solved}/{self._math_tasks.total_attempts} | time {duration}"
                 )
+                dynamic_hint_lines.append(f"MATH task:{self._math_tasks.selected_task} op:{op} | solved {solved}/{target} | made {produced}/{target} | queue {pending}")
+                active_pending = self._math_tasks.active_pending_answer()
+                local_answer_turn = (
+                    active_pending is not None
+                    and (active_pending.assigned_player_id in {None, self._LOCAL_PLAYER_ID})
+                )
+                round_state = self._math_tasks.current_round
+                if local_answer_turn:
+                    dynamic_hint_lines.append("MATH stage: найди результат (или собирай след. пример)")
+                elif round_state is not None:
+                    if round_state.stage == "pick_first":
+                        dynamic_hint_lines.append("MATH stage: найди первое число")
+                    elif round_state.stage == "pick_second":
+                        dynamic_hint_lines.append(f"MATH stage: операция {round_state.operation}, найди второе число")
+                if active_pending is not None:
+                    assignee = active_pending.assigned_player_id or "-"
+                    dynamic_hint_lines.append(f"MATH answer: active -> {assignee}")
             if browser.is_connected():
                 dynamic_hint_lines.append("NET: connected as client (authoritative host sync)")
             elif host_started:
@@ -1839,17 +1861,21 @@ class GameSession:
     ) -> WorldObject | None:
         # Priority:
         # 1) Object under/at player feet.
-        # 2) Object in front.
-        # 3) Nearest pickup object in small close radius.
+        # 2) Nearest pickup object in small close radius.
+        # 3) Object in front (fallback for farther targets).
         under = self._find_pickup_under_player(world, player, object_sprites)
         if under is not None:
             return under
+
+        nearby = self._find_nearby_pickup_target(world, player, object_sprites)
+        if nearby is not None:
+            return nearby
 
         front = self._find_object_in_front(world, player, object_sprites)
         if front is not None and self._is_pickable_target(front):
             return front
 
-        return self._find_nearby_pickup_target(world, player, object_sprites)
+        return None
 
     def _find_pickup_under_player(
         self,
@@ -1884,7 +1910,7 @@ class GameSession:
         object_sprites: ObjectSpriteLibrary,
     ) -> WorldObject | None:
         sprite_w, sprite_h = self._last_player_sprite_size
-        best: tuple[float, WorldObject] | None = None
+        best: tuple[float, float, WorldObject] | None = None
         for obj in world.objects:
             if not self._is_pickable_target(obj):
                 continue
@@ -1897,9 +1923,15 @@ class GameSession:
             )
             if dist > self._NEAR_PICKUP_GAP:
                 continue
-            if best is None or dist < best[0]:
-                best = (dist, obj)
-        return best[1] if best else None
+            score = self._facing_distance_priority(
+                player=player,
+                obj=obj,
+                dist=dist,
+                distance_limit=self._NEAR_PICKUP_GAP,
+            )
+            if best is None or score > best[0] or (abs(score - best[0]) <= 1e-6 and dist < best[1]):
+                best = (score, dist, obj)
+        return best[2] if best else None
 
     def _pickup_or_interact(
         self,
@@ -1914,9 +1946,10 @@ class GameSession:
         if self._try_pickup(world, player, inventory, object_sprites):
             return
 
-        target = self._find_object_in_front(world, player, object_sprites)
+        # E priority: closest reachable target first, then forward/farther target.
+        target = self._find_nearby_interaction_target(world, player, object_sprites)
         if target is None:
-            target = self._find_nearby_interaction_target(world, player, object_sprites)
+            target = self._find_object_in_front(world, player, object_sprites)
         if target is None:
             selected_item = inventory.selected_item()
             if self._is_spray_item(selected_item):
@@ -2028,11 +2061,30 @@ class GameSession:
             except ValueError:
                 self._set_message("Некорректная цифра")
                 return True
+            round_state = self._math_tasks.current_round
+            active_pending = self._math_tasks.active_pending_answer()
+            if (
+                active_pending is not None
+                and not self._has_math_answer_objects(world)
+                and round_state is not None
+                and round_state.stage == "pick_first"
+                and int(active_pending.correct_answer) == int(digit)
+            ):
+                solved_before = int(self._math_tasks.solved_count)
+                outcome = self._math_tasks.pick_answer(
+                    player_id=player_id,
+                    answer_value=digit,
+                )
+                if int(self._math_tasks.solved_count) > solved_before:
+                    world.remove_object(target.object_id)
+                self._apply_math_task_outcome(outcome, world)
+                return True
             world.remove_object(target.object_id)
             outcome = self._math_tasks.pick_digit(
                 player_id=player_id,
                 digit=digit,
                 rng=self._math_rng,
+                online_player_ids=list(self._player_states.keys()),
             )
             self._apply_math_task_outcome(outcome, world)
             return True
@@ -2062,13 +2114,9 @@ class GameSession:
         player: Player,
         object_sprites: ObjectSpriteLibrary,
     ) -> WorldObject | None:
-        front = self._find_object_in_front(world, player, object_sprites)
-        if front is not None and self._is_math_task_object(front):
-            return front
-
         sprite_w, sprite_h = self._last_player_sprite_size
         player_rect = self._player_collider_rect(player.x, player.y, sprite_w, sprite_h).inflate(14, 14)
-        near_best: tuple[float, WorldObject] | None = None
+        near_best: tuple[float, float, WorldObject] | None = None
         for obj in world.objects:
             if not self._is_math_task_object(obj):
                 continue
@@ -2082,9 +2130,21 @@ class GameSession:
                 obj=obj,
                 object_sprites=object_sprites,
             )
-            if near_best is None or dist < near_best[0]:
-                near_best = (dist, obj)
-        return near_best[1] if near_best is not None else None
+            score = self._facing_distance_priority(
+                player=player,
+                obj=obj,
+                dist=dist,
+                distance_limit=max(1.0, self._NEAR_INTERACT_GAP),
+            )
+            if near_best is None or score > near_best[0] or (abs(score - near_best[0]) <= 1e-6 and dist < near_best[1]):
+                near_best = (score, dist, obj)
+        if near_best is not None:
+            return near_best[2]
+
+        front = self._find_object_in_front(world, player, object_sprites)
+        if front is not None and self._is_math_task_object(front):
+            return front
+        return None
 
     def _is_math_task_object(self, obj: WorldObject) -> bool:
         return obj.kind in self._MATH_TASK_OBJECT_KINDS
@@ -2097,17 +2157,107 @@ class GameSession:
         if outcome.spawn_digits:
             self._spawn_math_digits(world, count=12)
         if outcome.spawn_answers:
-            round_state = self._math_tasks.current_round
-            answers = list(round_state.answer_options) if round_state is not None else []
-            self._spawn_math_answers(world, answers)
+            pending = self._math_tasks.active_pending_answer()
+            if pending is not None:
+                correct_value = int(pending.correct_answer)
+                if not self._math_value_exists_on_map(world, correct_value):
+                    candidates = self._answer_spawn_candidates_for_pending(correct_value)
+                    self._spawn_math_answers(world, candidates)
+                if not self._math_value_exists_on_map(world, correct_value):
+                    self._spawn_math_answers(world, [correct_value])
         if outcome.message:
             self._set_message(outcome.message)
 
+    def _answer_spawn_candidates_for_pending(self, correct_value: int) -> list[int]:
+        options = [v for v in self._math_tasks.active_answer_options() if int(v) != int(correct_value)]
+        unique_wrong: list[int] = []
+        seen_wrong: set[int] = set()
+        for item in options:
+            value = int(item)
+            if value in seen_wrong:
+                continue
+            seen_wrong.add(value)
+            unique_wrong.append(value)
+        self._math_rng.shuffle(unique_wrong)
+        wrong_count = int(self._math_rng.randint(1, 5))
+        wrong = unique_wrong[:wrong_count]
+        if len(wrong) < wrong_count:
+            probe = int(correct_value)
+            attempts = 0
+            while len(wrong) < wrong_count and attempts < 40:
+                attempts += 1
+                delta = int(self._math_rng.randint(-9, 9))
+                if delta == 0:
+                    continue
+                candidate = probe + delta
+                if candidate == correct_value or candidate in seen_wrong:
+                    continue
+                seen_wrong.add(candidate)
+                wrong.append(candidate)
+        values = [int(correct_value), *wrong]
+        self._math_rng.shuffle(values)
+        return values
+
+    def _math_value_exists_on_map(self, world: WorldMap, value: int) -> bool:
+        target = int(value)
+        for obj in world.objects:
+            if obj.kind not in {self._MATH_DIGIT_KIND, self._MATH_ANSWER_KIND}:
+                continue
+            try:
+                label_value = int(str(obj.label or "").strip())
+            except ValueError:
+                continue
+            if label_value == target:
+                return True
+        return False
+
+    def _has_math_answer_objects(self, world: WorldMap) -> bool:
+        for obj in world.objects:
+            if obj.kind == self._MATH_ANSWER_KIND:
+                return True
+        return False
+
     def _spawn_math_digits(self, world: WorldMap, *, count: int) -> None:
         amount = max(2, int(count))
-        for _ in range(amount):
-            digit = int(self._math_rng.randint(0, 9))
-            x, y = self._random_math_spawn_point(world)
+        reserved: list[pygame.Rect] = []
+        is_subtraction_task = self._math_tasks.selected_task == 2
+        values: list[int] = []
+        if is_subtraction_task:
+            negatives_target = max(1, amount // 3)
+            negatives_added = 0
+            for idx in range(amount):
+                remaining = amount - idx
+                need_negatives = negatives_target - negatives_added
+                force_negative = need_negatives >= remaining
+                spawn_negative = force_negative or (self._math_rng.random() < 0.42)
+                if spawn_negative:
+                    value = -int(self._math_rng.randint(1, 9))
+                    negatives_added += 1
+                else:
+                    value = int(self._math_rng.randint(0, 9))
+                values.append(value)
+        else:
+            for _ in range(amount):
+                values.append(int(self._math_rng.randint(0, 9)))
+        for digit in values:
+            point = self._find_free_math_spawn_point(
+                world,
+                width=64,
+                height=64,
+                min_gap=10,
+                reserved=reserved,
+            )
+            if point is None:
+                point = self._find_free_math_spawn_point(
+                    world,
+                    width=64,
+                    height=64,
+                    min_gap=0,
+                    reserved=reserved,
+                )
+            if point is None:
+                point = self._random_math_spawn_point(world)
+            x, y = point
             world.add_object(
                 WorldObject(
                     object_id=self._next_math_object_id(prefix="math_digit"),
@@ -2125,12 +2275,31 @@ class GameSession:
                     weight_kg=0.0,
                 )
             )
+            reserved.append(self._math_spawn_rect(x=x, y=y, width=64, height=64))
 
     def _spawn_math_answers(self, world: WorldMap, answers: list[int]) -> None:
         if not answers:
             return
+        reserved: list[pygame.Rect] = []
         for value in answers:
-            x, y = self._random_math_spawn_point(world)
+            point = self._find_free_math_spawn_point(
+                world,
+                width=70,
+                height=70,
+                min_gap=10,
+                reserved=reserved,
+            )
+            if point is None:
+                point = self._find_free_math_spawn_point(
+                    world,
+                    width=70,
+                    height=70,
+                    min_gap=0,
+                    reserved=reserved,
+                )
+            if point is None:
+                point = self._random_math_spawn_point(world)
+            x, y = point
             world.add_object(
                 WorldObject(
                     object_id=self._next_math_object_id(prefix="math_answer"),
@@ -2148,6 +2317,7 @@ class GameSession:
                     weight_kg=0.0,
                 )
             )
+            reserved.append(self._math_spawn_rect(x=x, y=y, width=70, height=70))
 
     def _next_math_object_id(self, *, prefix: str) -> str:
         self._math_spawn_seq += 1
@@ -2157,24 +2327,91 @@ class GameSession:
         world.objects = [obj for obj in world.objects if obj.kind != kind]
 
     def _random_math_spawn_point(self, world: WorldMap) -> tuple[float, float]:
-        rooms = [room for room in world.rooms if room.walls_enabled and room.width > 240 and room.height > 240]
-        if not rooms:
+        candidates: list[tuple[RoomArea, int, int, int, int, int]] = []
+        for room in world.rooms:
+            if not room.walls_enabled or room.width <= 240 or room.height <= 240:
+                continue
+            t = max(10, int(room.wall_thickness))
+            min_x = int(room.x + t + 40)
+            max_x = int(room.x + room.width - t - 40)
+            top_pad = max(t + 40, int(room.top_wall_height) + 50)
+            min_y = int(room.y + top_pad)
+            max_y = int(room.y + room.height - t - 40)
+            if min_x >= max_x or min_y >= max_y:
+                continue
+            weight = max(1, (max_x - min_x + 1) * (max_y - min_y + 1))
+            candidates.append((room, min_x, max_x, min_y, max_y, weight))
+
+        if not candidates:
             return float(world.spawn_x + self._math_rng.randint(-120, 120)), float(
                 world.spawn_y + self._math_rng.randint(-80, 80)
             )
-        room = rooms[self._math_rng.randrange(len(rooms))]
-        t = max(10, int(room.wall_thickness))
-        min_x = room.x + t + 40
-        max_x = room.x + room.width - t - 40
-        top_pad = max(t + 40, int(room.top_wall_height) + 50)
-        min_y = room.y + top_pad
-        max_y = room.y + room.height - t - 40
-        if min_x >= max_x or min_y >= max_y:
-            return float(room.x + room.width * 0.5), float(room.y + room.height * 0.65)
+
+        total_weight = sum(item[5] for item in candidates)
+        pick = self._math_rng.randint(1, total_weight)
+        acc = 0
+        room: RoomArea | None = None
+        min_x = max_x = min_y = max_y = 0
+        for candidate_room, cmin_x, cmax_x, cmin_y, cmax_y, weight in candidates:
+            acc += weight
+            if pick <= acc:
+                room = candidate_room
+                min_x, max_x, min_y, max_y = cmin_x, cmax_x, cmin_y, cmax_y
+                break
+        if room is None:
+            room, min_x, max_x, min_y, max_y, _ = candidates[-1]
+
         return (
             float(self._math_rng.randint(int(min_x), int(max_x))),
             float(self._math_rng.randint(int(min_y), int(max_y))),
         )
+
+    def _math_spawn_rect(self, *, x: float, y: float, width: int, height: int) -> pygame.Rect:
+        w = max(1, int(width))
+        h = max(1, int(height))
+        left = int(round(float(x) - (w * 0.5)))
+        top = int(round(float(y) - (h * 0.5)))
+        return pygame.Rect(left, top, w, h)
+
+    def _find_free_math_spawn_point(
+        self,
+        world: WorldMap,
+        *,
+        width: int,
+        height: int,
+        min_gap: int,
+        reserved: list[pygame.Rect],
+    ) -> tuple[float, float] | None:
+        pad = max(0, int(min_gap))
+        for _ in range(160):
+            x, y = self._random_math_spawn_point(world)
+            candidate = self._math_spawn_rect(x=x, y=y, width=width, height=height)
+            expanded = candidate.inflate(pad * 2, pad * 2)
+
+            blocked = False
+            for rect in reserved:
+                if expanded.colliderect(rect):
+                    blocked = True
+                    break
+            if blocked:
+                continue
+
+            for obj in world.objects:
+                if obj.kind not in self._MATH_TASK_OBJECT_KINDS:
+                    continue
+                obj_rect = self._math_spawn_rect(
+                    x=obj.x,
+                    y=obj.y,
+                    width=max(1, int(obj.width)),
+                    height=max(1, int(obj.height)),
+                )
+                if expanded.colliderect(obj_rect):
+                    blocked = True
+                    break
+            if blocked:
+                continue
+            return (x, y)
+        return None
 
     def _find_nearby_interaction_target(
         self,
@@ -2183,7 +2420,7 @@ class GameSession:
         object_sprites: ObjectSpriteLibrary,
     ) -> WorldObject | None:
         sprite_w, sprite_h = self._last_player_sprite_size
-        best: tuple[float, WorldObject] | None = None
+        best: tuple[float, float, WorldObject] | None = None
         for obj in world.objects:
             # Fallback for close-range interaction: for physical blockers/doors only.
             if not obj.blocking and obj.kind != "door":
@@ -2197,9 +2434,38 @@ class GameSession:
             )
             if dist > self._NEAR_INTERACT_GAP:
                 continue
-            if best is None or dist < best[0]:
-                best = (dist, obj)
-        return best[1] if best else None
+            score = self._facing_distance_priority(
+                player=player,
+                obj=obj,
+                dist=dist,
+                distance_limit=self._NEAR_INTERACT_GAP,
+            )
+            if best is None or score > best[0] or (abs(score - best[0]) <= 1e-6 and dist < best[1]):
+                best = (score, dist, obj)
+        return best[2] if best else None
+
+    def _facing_distance_priority(
+        self,
+        *,
+        player: Player,
+        obj: WorldObject,
+        dist: float,
+        distance_limit: float,
+    ) -> float:
+        facing = FACING_VECTOR[player.facing]
+        px = player.x + self._interaction_anchor_offset[0]
+        py = player.y + self._interaction_anchor_offset[1]
+        vx = float(obj.x) - float(px)
+        vy = float(obj.y) - float(py)
+        direct_dist = math.hypot(vx, vy)
+        if direct_dist <= 1e-6:
+            facing_dot = 1.0
+        else:
+            facing_dot = ((vx / direct_dist) * facing[0]) + ((vy / direct_dist) * facing[1])
+        facing_dot = max(-1.0, min(1.0, facing_dot))
+        norm_dist = min(1.0, max(0.0, float(dist) / max(1e-6, float(distance_limit))))
+        # Combined priority: orientation is primary, proximity refines target choice.
+        return (facing_dot * 0.68) - (norm_dist * 0.32)
 
     def _drop_selected(
         self,

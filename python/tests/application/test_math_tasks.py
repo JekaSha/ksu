@@ -5,79 +5,12 @@ import random
 from ksusha_game.application.math_tasks import MathTaskEngineState
 
 
-def test_select_task_one_starts_round_and_requests_digits() -> None:
-    state = MathTaskEngineState()
+def _start_task(state: MathTaskEngineState, task_no: int = 1) -> None:
     state.unlock_math_quest()
     state.open_menu("p1")
-    outcome = state.select_task(player_id="p1", task_no=1, now_ts=100.0)
-    assert state.active is True
-    assert state.selected_task == 1
-    assert state.current_round is not None
-    assert state.current_round.stage == "pick_first"
+    outcome = state.select_task(player_id="p1", task_no=task_no, now_ts=100.0)
     assert outcome.spawn_digits is True
-    assert outcome.clear_digits is True
-    assert outcome.clear_answers is True
-
-
-def test_pick_second_digit_spawns_answers() -> None:
-    state = MathTaskEngineState()
-    state.unlock_math_quest()
-    state.open_menu("p1")
-    state.select_task(player_id="p1", task_no=1, now_ts=100.0)
-    rng = random.Random(7)
-    out1 = state.pick_digit(player_id="p1", digit=4, rng=rng)
-    assert out1.spawn_answers is False
-    assert state.current_round is not None
-    assert state.current_round.stage == "pick_second"
-    out2 = state.pick_digit(player_id="p1", digit=3, rng=rng)
-    assert out2.spawn_answers is True
-    assert out2.clear_digits is True
-    assert state.current_round is not None
-    assert state.current_round.stage == "pick_answer"
-    assert state.current_round.correct_answer == 7
-    assert len(state.current_round.answer_options) == 10
-    assert 7 in state.current_round.answer_options
-
-
-def test_wrong_answer_then_correct_answer_updates_global_score() -> None:
-    state = MathTaskEngineState()
-    state.unlock_math_quest()
-    state.open_menu("p1")
-    state.select_task(player_id="p1", task_no=1, now_ts=100.0)
-    rng = random.Random(1)
-    state.pick_digit(player_id="p1", digit=2, rng=rng)
-    state.pick_digit(player_id="p1", digit=5, rng=rng)
-    assert state.current_round is not None
-    correct = int(state.current_round.correct_answer or 0)
-    wrong = correct + 1
-    if wrong == correct:
-        wrong += 2
-    out_wrong = state.pick_answer(player_id="p1", answer_value=wrong)
-    assert "Неверный" in (out_wrong.message or "")
-    assert state.total_solved == 0
-    out_ok = state.pick_answer(player_id="p1", answer_value=correct)
-    assert "Верно" in (out_ok.message or "")
-    assert state.total_solved == 1
-    assert state.total_attempts == 2
-    assert out_ok.spawn_digits is True
-    assert out_ok.clear_answers is True
-
-
-def test_payload_roundtrip_preserves_state() -> None:
-    state = MathTaskEngineState()
-    state.unlock_math_quest()
-    state.open_menu("p2")
-    state.select_task(player_id="p2", task_no=1, now_ts=55.0)
-    payload = state.to_payload()
-    restored = MathTaskEngineState.from_payload(payload)
-    assert restored.menu_open == state.menu_open
-    assert restored.menu_owner_player_id == state.menu_owner_player_id
-    assert restored.selected_task == state.selected_task
-    assert restored.active == state.active
-    assert restored.round_index == state.round_index
-    assert restored.current_round is not None
-    assert restored.current_round.stage == "pick_first"
-    assert restored.has_math_quest is True
+    assert state.active is True
 
 
 def test_select_task_requires_math_quest_unlock() -> None:
@@ -86,3 +19,94 @@ def test_select_task_requires_math_quest_unlock() -> None:
     assert state.active is False
     assert state.current_round is None
     assert "книгу математики" in (outcome.message or "").lower()
+
+
+def test_task1_starts_as_addition_with_ten_iterations() -> None:
+    state = MathTaskEngineState()
+    _start_task(state, task_no=1)
+    assert state.selected_task == 1
+    assert state.iterations_target == 10
+    assert state.current_round is not None
+    assert state.current_round.operation == "+"
+    assert state.current_round.stage == "pick_first"
+    assert state.pending_count() == 0
+
+
+def test_task2_starts_as_subtraction() -> None:
+    state = MathTaskEngineState()
+    _start_task(state, task_no=2)
+    assert state.selected_task == 2
+    assert state.current_round is not None
+    assert state.current_round.operation == "-"
+    assert state.current_round.stage == "pick_first"
+
+
+def test_second_digit_creates_pending_answer_and_spawns_answers() -> None:
+    state = MathTaskEngineState()
+    _start_task(state, task_no=1)
+    rng = random.Random(7)
+    out1 = state.pick_digit(player_id="p1", digit=4, rng=rng, online_player_ids=["p1", "p2"])
+    assert "второе число" in (out1.message or "")
+    out2 = state.pick_digit(player_id="p1", digit=3, rng=rng, online_player_ids=["p1", "p2"])
+    assert out2.spawn_answers is True
+    assert out2.clear_answers is True
+    assert state.produced_count == 1
+    assert state.pending_count() == 1
+    pending = state.active_pending_answer()
+    assert pending is not None
+    assert pending.correct_answer == 7
+    assert pending.assigned_player_id == "p2"
+    assert len(pending.answer_options) == 10
+    assert 7 in pending.answer_options
+    assert state.current_round is not None
+    assert state.current_round.stage == "pick_first"
+
+
+def test_assigned_player_must_solve_answer() -> None:
+    state = MathTaskEngineState()
+    _start_task(state, task_no=1)
+    rng = random.Random(3)
+    state.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
+    state.pick_digit(player_id="p1", digit=5, rng=rng, online_player_ids=["p1", "p2"])
+    pending = state.active_pending_answer()
+    assert pending is not None
+    wrong_player = state.pick_answer(player_id="p1", answer_value=pending.correct_answer)
+    assert "назначен" in (wrong_player.message or "")
+    right_player = state.pick_answer(player_id="p2", answer_value=pending.correct_answer)
+    assert "Верно" in (right_player.message or "")
+    assert state.solved_count == 1
+    assert state.total_solved == 1
+
+
+def test_payload_roundtrip_preserves_queue_state() -> None:
+    state = MathTaskEngineState()
+    _start_task(state, task_no=1)
+    rng = random.Random(1)
+    state.pick_digit(player_id="p1", digit=1, rng=rng, online_player_ids=["p1", "p2"])
+    state.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
+    payload = state.to_payload()
+    restored = MathTaskEngineState.from_payload(payload)
+    assert restored.selected_task == 1
+    assert restored.active is True
+    assert restored.produced_count == 1
+    assert restored.pending_count() == 1
+    pending = restored.active_pending_answer()
+    assert pending is not None
+    assert pending.correct_answer == 3
+    assert pending.assigned_player_id == "p2"
+
+
+def test_task2_accepts_negative_numbers_for_operands() -> None:
+    state = MathTaskEngineState()
+    _start_task(state, task_no=2)
+    rng = random.Random(13)
+    out1 = state.pick_digit(player_id="p1", digit=-5, rng=rng, online_player_ids=["p1"])
+    assert "второе число" in (out1.message or "")
+    out2 = state.pick_digit(player_id="p1", digit=3, rng=rng, online_player_ids=["p1"])
+    assert out2.spawn_answers is True
+    pending = state.active_pending_answer()
+    assert pending is not None
+    assert pending.operation == "-"
+    assert pending.first_digit == -5
+    assert pending.second_digit == 3
+    assert pending.correct_answer == -8

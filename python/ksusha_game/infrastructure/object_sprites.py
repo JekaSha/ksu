@@ -380,6 +380,12 @@ class ObjectSpriteLibrary:
         cached = self._cache.get(key)
         if cached is not None:
             return cached.get(0)
+        from_assets = self._math_token_from_assets(normalized)
+        if from_assets is not None:
+            fitted = self._fit_to_target(from_assets, (70, 70))
+            result = ObjectSpriteSet(variants=[fitted])
+            self._cache[key] = result
+            return fitted
         size = (70, 70)
         surface = pygame.Surface(size, pygame.SRCALPHA)
         bg = (74, 134, 255) if answer else (239, 188, 77)
@@ -394,6 +400,378 @@ class ObjectSpriteLibrary:
         result = ObjectSpriteSet(variants=[surface])
         self._cache[key] = result
         return surface
+
+    def _math_token_from_assets(self, token: str) -> pygame.Surface | None:
+        normalized = str(token).strip()
+        if not normalized:
+            return None
+        number_sprite = self._math_number_sprite_from_assets(normalized)
+        if number_sprite is not None:
+            return number_sprite
+        op_map = {
+            "+": "plus",
+            "-": "minus",
+            "*": "multiply",
+            "x": "multiply",
+            "X": "multiply",
+            "×": "multiply",
+            "/": "divide",
+            "\\": "divide",
+            "÷": "divide",
+        }
+        op_id = op_map.get(normalized)
+        if op_id is None:
+            return None
+        return self._math_operator_sprite_from_assets(op_id)
+
+    def _math_number_sprite_from_assets(self, token: str) -> pygame.Surface | None:
+        normalized = str(token).strip()
+        if not normalized:
+            return None
+        negative = normalized.startswith("-")
+        digits = normalized[1:] if negative else normalized
+        if not digits.isdigit():
+            return None
+        digit_map = self._math_digit_sprites_from_sheet()
+        if not negative and len(digits) == 1:
+            single = digit_map.get(digits)
+            if single is not None:
+                return single
+
+        digit_parts: list[pygame.Surface] = []
+        for ch in digits:
+            sprite = digit_map.get(ch)
+            if sprite is None:
+                return None
+            digit_parts.append(self._tight_visible_sprite(sprite, min_alpha=6))
+
+        parts: list[pygame.Surface] = []
+        if negative:
+            minus = self._math_operator_sprite_from_assets("minus")
+            if minus is not None:
+                minus_tight = self._tight_visible_sprite(minus, min_alpha=6)
+                ref_h = max((s.get_height() for s in digit_parts), default=minus_tight.get_height())
+                target_h = max(6, int(ref_h * 0.42))
+                aspect = minus_tight.get_width() / max(1, minus_tight.get_height())
+                target_w = max(8, int(target_h * aspect))
+                minus_tight = pygame.transform.smoothscale(minus_tight, (target_w, target_h))
+                parts.append(minus_tight)
+        parts.extend(digit_parts)
+
+        if not parts:
+            return None
+        if len(parts) == 1:
+            return parts[0]
+        spacing = 6
+        width = sum(s.get_width() for s in parts) + spacing * max(0, len(parts) - 1)
+        height = max(s.get_height() for s in parts)
+        out = pygame.Surface((width, height), pygame.SRCALPHA)
+        x = 0
+        for sprite in parts:
+            y = (height - sprite.get_height()) // 2
+            out.blit(sprite, (x, y))
+            x += sprite.get_width() + spacing
+        return out
+
+    def _tight_visible_sprite(self, sprite: pygame.Surface, *, min_alpha: int = 6) -> pygame.Surface:
+        rect = sprite.get_bounding_rect(min_alpha=min_alpha)
+        if rect.width <= 0 or rect.height <= 0:
+            return sprite
+        return sprite.subsurface(rect).copy()
+
+    def _math_operator_sprite_from_assets(self, op_id: str) -> pygame.Surface | None:
+        configured = self._math_operator_sprites_from_settings()
+        configured_sprite = configured.get(op_id)
+        if configured_sprite is not None:
+            return configured_sprite
+
+        key = f"math_op:{op_id}"
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached.get(0)
+        file_map = {
+            "plus": "plus.png",
+            "minus": "minus.png",
+            "multiply": "multiply.png",
+            "divide": "divide.png",
+        }
+        file_name = file_map.get(op_id)
+        if file_name is None:
+            return None
+        path = self._project_root / "source/textures/items/numbers" / file_name
+        if not path.exists():
+            return None
+        sprite = pygame.image.load(str(path)).convert_alpha()
+        sprite = self._strip_grayscale_edge_background(sprite)
+        sprite = self._trim_sparse_edges(sprite, alpha_cutoff=8)
+        self._sanitize_alpha_edges(sprite, alpha_cutoff=8)
+        fitted = self._fit_to_target(sprite, (70, 70))
+        result = ObjectSpriteSet(variants=[fitted])
+        self._cache[key] = result
+        return fitted
+
+    def _math_operator_sprites_from_settings(self) -> dict[str, pygame.Surface]:
+        key = "math_ops_map"
+        cached = self._cache.get(key)
+        if cached is not None and len(cached.variants) >= 4:
+            names = ["plus", "minus", "multiply", "divide"]
+            return {name: cached.variants[idx] for idx, name in enumerate(names)}
+
+        numbers_dir = self._project_root / "source/textures/items/numbers"
+        settings_path = numbers_dir / "settings.json"
+        if not settings_path.exists():
+            return {}
+        try:
+            raw = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        ops_cfg = raw.get("ops")
+        if not isinstance(ops_cfg, dict):
+            return {}
+
+        file_name = str(ops_cfg.get("file", "")).strip()
+        if not file_name:
+            return {}
+        order_raw = ops_cfg.get("order", [])
+        order: list[str] = []
+        if isinstance(order_raw, list):
+            for item in order_raw:
+                token = str(item).strip().lower()
+                if token:
+                    order.append(token)
+        if not order:
+            order = ["plus", "minus", "multiply", "divide"]
+        try:
+            chroma_green_delta = int(ops_cfg.get("chroma_green_delta", 34))
+        except (TypeError, ValueError):
+            chroma_green_delta = 34
+        try:
+            chroma_green_min = int(ops_cfg.get("chroma_green_min", 92))
+        except (TypeError, ValueError):
+            chroma_green_min = 92
+
+        path = numbers_dir / file_name
+        if not path.exists():
+            return {}
+        sheet = pygame.image.load(str(path)).convert_alpha()
+        if "chroma" in path.name.lower():
+            self._chroma_to_alpha(sheet, green_delta=chroma_green_delta, green_min=chroma_green_min)
+        sheet = self._trim_sparse_edges(sheet, alpha_cutoff=8)
+        self._sanitize_alpha_edges(sheet, alpha_cutoff=8)
+        components = self._extract_components(sheet, alpha_cutoff=8, min_area=800)
+        if len(components) < len(order):
+            return {}
+        largest = sorted(components, key=lambda r: r.width * r.height, reverse=True)[: len(order)]
+        ordered_rects = sorted(largest, key=lambda r: r.centerx)
+        variants: list[pygame.Surface] = []
+        mapping: dict[str, pygame.Surface] = {}
+        for idx, rect in enumerate(ordered_rects):
+            if idx >= len(order):
+                break
+            sprite = self._sprite_from_rect(sheet, rect)
+            sprite = self._trim_sparse_edges(sprite, alpha_cutoff=6)
+            self._sanitize_alpha_edges(sprite, alpha_cutoff=6)
+            fitted = self._fit_to_target(sprite, (70, 70))
+            name = order[idx]
+            variants.append(fitted)
+            mapping[name] = fitted
+        if not mapping:
+            return {}
+        self._cache[key] = ObjectSpriteSet(variants=variants)
+        return mapping
+
+    def _math_digit_sprites_from_sheet(self) -> dict[str, pygame.Surface]:
+        key = "math_digits_map"
+        cached = self._cache.get(key)
+        if cached is not None and len(cached.variants) >= 10:
+            return {str(i): cached.variants[i] for i in range(10)}
+        numbers_dir = self._project_root / "source/textures/items/numbers"
+        settings_path = numbers_dir / "settings.json"
+        rows = 2
+        cols = 5
+        order = "0123456789"
+        chroma_green_delta = 34
+        chroma_green_min = 92
+        sheet_path = numbers_dir / "digits_0_9_chroma.png"
+
+        if settings_path.exists():
+            try:
+                raw = json.loads(settings_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                raw = None
+            if isinstance(raw, dict):
+                digits_cfg = raw.get("digits")
+                if isinstance(digits_cfg, dict):
+                    sheet_file = str(digits_cfg.get("file", "")).strip()
+                    if sheet_file:
+                        sheet_path = numbers_dir / sheet_file
+                    try:
+                        rows = max(1, int(digits_cfg.get("rows", rows)))
+                    except (TypeError, ValueError):
+                        rows = 2
+                    try:
+                        cols = max(1, int(digits_cfg.get("cols", cols)))
+                    except (TypeError, ValueError):
+                        cols = 5
+                    raw_order = str(digits_cfg.get("order", order)).strip()
+                    if len(raw_order) >= 10:
+                        order = raw_order
+                    try:
+                        chroma_green_delta = int(digits_cfg.get("chroma_green_delta", chroma_green_delta))
+                    except (TypeError, ValueError):
+                        chroma_green_delta = 34
+                    try:
+                        chroma_green_min = int(digits_cfg.get("chroma_green_min", chroma_green_min))
+                    except (TypeError, ValueError):
+                        chroma_green_min = 92
+
+        if not sheet_path.exists():
+            fallback = numbers_dir / "digits_0_9.png"
+            if not fallback.exists():
+                return {}
+            sheet_path = fallback
+
+        sheet = pygame.image.load(str(sheet_path)).convert_alpha()
+        if "chroma" in sheet_path.name.lower():
+            self._chroma_to_alpha(sheet, green_delta=chroma_green_delta, green_min=chroma_green_min)
+            sheet = self._trim_sparse_edges(sheet, alpha_cutoff=8)
+            self._sanitize_alpha_edges(sheet, alpha_cutoff=8)
+        else:
+            sheet = self._strip_grayscale_edge_background(sheet)
+
+        variants = self._extract_digits_from_grid(sheet=sheet, rows=rows, cols=cols, order=order)
+        if len(variants) != 10:
+            return {}
+
+        result = ObjectSpriteSet(variants=variants)
+        self._cache[key] = result
+        return {str(i): variants[i] for i in range(10)}
+
+    def _extract_digits_from_grid(
+        self,
+        *,
+        sheet: pygame.Surface,
+        rows: int,
+        cols: int,
+        order: str,
+    ) -> list[pygame.Surface]:
+        bbox = sheet.get_bounding_rect(min_alpha=6)
+        if bbox.width <= 0 or bbox.height <= 0:
+            return []
+        row_count = max(1, int(rows))
+        col_count = max(1, int(cols))
+        cells = self._sheet_grid_cells(bbox.width, bbox.height, cols=col_count, rows=row_count)
+        ordered_cells = []
+        for cell in cells:
+            ordered_cells.append(
+                pygame.Rect(
+                    bbox.x + cell.x,
+                    bbox.y + cell.y,
+                    cell.width,
+                    cell.height,
+                )
+            )
+        if len(ordered_cells) < 10:
+            return []
+        variants: dict[str, pygame.Surface] = {}
+        for idx, rect in enumerate(ordered_cells):
+            if idx >= len(order):
+                break
+            token = str(order[idx])
+            if token not in {str(i) for i in range(10)}:
+                continue
+            digit = self._sprite_from_rect(sheet, rect)
+            digit = self._strip_grayscale_edge_background(digit)
+            digit = self._trim_sparse_edges(digit, alpha_cutoff=6)
+            self._sanitize_alpha_edges(digit, alpha_cutoff=6)
+            variants[token] = self._fit_to_target(digit, (70, 70))
+        out: list[pygame.Surface] = []
+        for d in "0123456789":
+            sprite = variants.get(d)
+            if sprite is None:
+                return []
+            out.append(sprite)
+        return out
+
+    def _strip_grayscale_edge_background(self, surface: pygame.Surface) -> pygame.Surface:
+        out = surface.copy()
+        rgb = pygame.surfarray.pixels3d(out)
+        alpha = pygame.surfarray.pixels_alpha(out)
+        w, h = out.get_size()
+        r = rgb[:, :, 0].astype(np.int32)
+        g = rgb[:, :, 1].astype(np.int32)
+        b = rgb[:, :, 2].astype(np.int32)
+        maxc = np.maximum(np.maximum(r, g), b)
+        minc = np.minimum(np.minimum(r, g), b)
+        chroma = maxc - minc
+        luma = (r + g + b) // 3
+        # Handles checkerboard/no-alpha assets:
+        # remove near-black / near-white / low-saturation edge background.
+        mask = (alpha > 0) & (
+            (luma <= 52)
+            | (luma >= 214)
+            | ((chroma <= 30) & ((luma <= 110) | (luma >= 150)))
+        )
+        visited = np.zeros((w, h), dtype=bool)
+        queue: deque[tuple[int, int]] = deque()
+
+        def _enqueue(x: int, y: int) -> None:
+            if 0 <= x < w and 0 <= y < h and (not visited[x, y]) and mask[x, y]:
+                visited[x, y] = True
+                queue.append((x, y))
+
+        for x in range(w):
+            _enqueue(x, 0)
+            _enqueue(x, h - 1)
+        for y in range(h):
+            _enqueue(0, y)
+            _enqueue(w - 1, y)
+
+        while queue:
+            x, y = queue.popleft()
+            _enqueue(x - 1, y)
+            _enqueue(x + 1, y)
+            _enqueue(x, y - 1)
+            _enqueue(x, y + 1)
+
+        alpha[visited] = 0
+        rgb[visited] = 0
+        del rgb, alpha
+        out = self._remove_neutral_fringe_pixels(out)
+        return out
+
+    def _remove_neutral_fringe_pixels(self, sprite: pygame.Surface) -> pygame.Surface:
+        out = sprite.copy()
+        rgb = pygame.surfarray.pixels3d(out)
+        alpha = pygame.surfarray.pixels_alpha(out)
+        r = rgb[:, :, 0].astype(np.int32)
+        g = rgb[:, :, 1].astype(np.int32)
+        b = rgb[:, :, 2].astype(np.int32)
+        maxc = np.maximum(np.maximum(r, g), b)
+        minc = np.minimum(np.minimum(r, g), b)
+        chroma = maxc - minc
+        solid = alpha > 0
+        neutral = chroma <= 24
+
+        solid_u8 = solid.astype(np.uint8)
+        padded = np.pad(solid_u8, ((1, 1), (1, 1)), mode="constant")
+        neighbors = (
+            padded[:-2, :-2]
+            + padded[:-2, 1:-1]
+            + padded[:-2, 2:]
+            + padded[1:-1, :-2]
+            + padded[1:-1, 2:]
+            + padded[2:, :-2]
+            + padded[2:, 1:-1]
+            + padded[2:, 2:]
+        )
+        fringe = solid & neutral & (neighbors <= 2)
+        alpha[fringe] = 0
+        rgb[fringe] = 0
+        del rgb, alpha
+        return out
 
     def icon_for_item(self, item_id: str) -> pygame.Surface:
         cached = self._icon_cache.get(item_id)
