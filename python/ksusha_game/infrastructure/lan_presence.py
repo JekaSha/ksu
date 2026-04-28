@@ -79,6 +79,7 @@ class LanPresenceHost:
         self._stop = threading.Event()
         self._udp_thread: threading.Thread | None = None
         self._tcp_thread: threading.Thread | None = None
+        self._broadcast_thread: threading.Thread | None = None
         self._server_socket: socket.socket | None = None
         self._active_clients: dict[str, _ClientSession] = {}
         self._next_remote_id = 2
@@ -87,6 +88,13 @@ class LanPresenceHost:
         self._remote_inputs: dict[str, tuple[int, int, bool, float]] = {}
         self._remote_actions: list[tuple[str, str]] = []
         self._enabled = False
+        self._joinable = True
+        # Pending outbound data for the background broadcast thread.
+        # _pending_positions: pre-serialized bytes (main thread encodes, bg sends).
+        # _pending_snapshot: dict (bg thread serializes + sends — heavier JSON).
+        self._pending_positions: bytes | None = None
+        self._pending_snapshot: dict | None = None
+        self._broadcast_event = threading.Event()
 
     @property
     def enabled(self) -> bool:
@@ -98,6 +106,14 @@ class LanPresenceHost:
 
     def total_players(self) -> int:
         return 1 + self.connected_clients()
+
+    def set_joinable(self, enabled: bool) -> None:
+        with self._lock:
+            self._joinable = bool(enabled)
+
+    def is_joinable(self) -> bool:
+        with self._lock:
+            return self._joinable
 
     def start(self) -> bool:
         if self._enabled:
@@ -120,8 +136,10 @@ class LanPresenceHost:
         self._stop.clear()
         self._udp_thread = threading.Thread(target=self._run_udp_broadcast, daemon=True)
         self._tcp_thread = threading.Thread(target=self._run_tcp_server, daemon=True)
+        self._broadcast_thread = threading.Thread(target=self._run_broadcast, daemon=True)
         self._udp_thread.start()
         self._tcp_thread.start()
+        self._broadcast_thread.start()
         self._enabled = True
         return True
 
@@ -129,6 +147,7 @@ class LanPresenceHost:
         if not self._enabled:
             return
         self._stop.set()
+        self._broadcast_event.set()  # wake up broadcast thread so it can exit
 
         try:
             if self._server_socket is not None:
@@ -149,8 +168,7 @@ class LanPresenceHost:
 
     def poll_events(self) -> list[HostEvent]:
         with self._lock:
-            out = list(self._events)
-            self._events.clear()
+            out, self._events = self._events, []
         return out
 
     def poll_remote_inputs(self) -> list[tuple[str, int, int, bool, float]]:
@@ -161,31 +179,62 @@ class LanPresenceHost:
 
     def poll_remote_actions(self) -> list[tuple[str, str]]:
         with self._lock:
-            items = list(self._remote_actions)
-            self._remote_actions.clear()
-        return items
+            out, self._remote_actions = self._remote_actions, []
+        return out
 
-    def broadcast_snapshot(self, snapshot: dict) -> None:
+    def broadcast_positions(self, payload_bytes: bytes) -> None:
+        """Queue pre-serialized per-frame position bytes. Background thread sends immediately."""
         if not self._enabled:
             return
-        payload = self._encode_line({"type": "snapshot", "snapshot": snapshot})
-        stale_ids: list[str] = []
         with self._lock:
-            for client_id, client in self._active_clients.items():
-                try:
-                    client.conn.sendall(payload)
-                except OSError:
-                    stale_ids.append(client_id)
-            for client_id in stale_ids:
-                client = self._active_clients.pop(client_id, None)
-                if client is None:
-                    continue
-                self._remote_inputs.pop(client.player_id, None)
-                self._events.append(HostEvent(type="leave", player_id=client.player_id, player_name=client.player_name))
-                try:
-                    client.conn.close()
-                except Exception:
-                    pass
+            self._pending_positions = payload_bytes
+        self._broadcast_event.set()
+
+    def broadcast_snapshot(self, snapshot: dict) -> None:
+        """Queue full-state snapshot dict. Background thread serializes JSON then sends."""
+        if not self._enabled:
+            return
+        with self._lock:
+            self._pending_snapshot = snapshot
+        self._broadcast_event.set()
+
+    def _run_broadcast(self) -> None:
+        while not self._stop.is_set():
+            self._broadcast_event.wait(timeout=0.01)
+            self._broadcast_event.clear()
+            with self._lock:
+                pos = self._pending_positions
+                self._pending_positions = None
+                snap = self._pending_snapshot
+                self._pending_snapshot = None
+            if pos is not None:
+                self._send_to_all(pos)
+            if snap is not None:
+                self._send_to_all(self._encode_line({"type": "snapshot", "snapshot": snap}))
+
+    def _send_to_all(self, payload: bytes) -> None:
+        with self._lock:
+            clients = list(self._active_clients.items())
+        stale_ids: list[str] = []
+        for client_id, client in clients:
+            try:
+                client.conn.sendall(payload)
+            except OSError:
+                stale_ids.append(client_id)
+        if stale_ids:
+            with self._lock:
+                for client_id in stale_ids:
+                    client = self._active_clients.pop(client_id, None)
+                    if client is None:
+                        continue
+                    self._remote_inputs.pop(client.player_id, None)
+                    self._events.append(
+                        HostEvent(type="leave", player_id=client.player_id, player_name=client.player_name)
+                    )
+                    try:
+                        client.conn.close()
+                    except Exception:
+                        pass
 
     def _announcement_payload(self) -> bytes:
         payload = {
@@ -237,6 +286,8 @@ class LanPresenceHost:
         client_player_name = ""
         recv_buffer = bytearray()
         try:
+            # Disable Nagle: inputs are tiny and latency matters more than throughput.
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             conn.settimeout(2.0)
             first = _recv_json_line(conn, recv_buffer)
             is_join = isinstance(first, dict) and first.get("type") == "join_request"
@@ -245,7 +296,7 @@ class LanPresenceHost:
                 client_player_name = "player"
 
             with self._lock:
-                can_join = len(self._active_clients) < max(0, self.max_players - 1)
+                can_join = self._joinable and len(self._active_clients) < max(0, self.max_players - 1)
                 if is_join and can_join:
                     client_player_id = f"r{self._next_remote_id}"
                     self._next_remote_id += 1
@@ -270,7 +321,11 @@ class LanPresenceHost:
                     "player_id": client_player_id,
                 }
             else:
-                resp = {"type": "join_reject", "reason": "server_full_or_bad_request"}
+                reject_reason = "server_full_or_bad_request"
+                with self._lock:
+                    if not self._joinable:
+                        reject_reason = "host_in_client_mode"
+                resp = {"type": "join_reject", "reason": reject_reason}
             conn.sendall(self._encode_line(resp))
 
             if not accepted:
@@ -323,6 +378,7 @@ class LanPresenceHost:
     def _encode_line(payload: dict) -> bytes:
         return (json.dumps(payload, ensure_ascii=True) + "\n").encode("utf-8")
 
+
 class LanServerBrowser:
     def __init__(self, *, discovery_port: int = 45891, ttl_sec: float = 3.2) -> None:
         self.discovery_port = int(discovery_port)
@@ -336,11 +392,15 @@ class LanServerBrowser:
         self._send_lock = threading.Lock()
         self._connected_server_id: str | None = None
         self._assigned_player_id: str | None = None
-        self._snapshot_queue: list[dict] = []
+        # Latest received snapshot and position update (only most-recent matters).
+        self._latest_snapshot: dict | None = None
+        self._latest_pos_update: dict | None = None
         self._rx_thread: threading.Thread | None = None
 
         self._connect_thread: threading.Thread | None = None
         self._connect_result: tuple[bool, str] | None = None
+        # Track last sent input to avoid sending identical packets every frame.
+        self._last_sent_input: tuple[int, int, bool, float] | None = None
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -372,9 +432,13 @@ class LanServerBrowser:
     def is_connected(self) -> bool:
         return self._active_connection is not None and self._connected_server_id is not None
 
+    def is_connecting(self) -> bool:
+        return self._connect_thread is not None and self._connect_thread.is_alive()
+
     def disconnect(self) -> None:
         self._connected_server_id = None
         self._assigned_player_id = None
+        self._last_sent_input = None  # force re-send current input after reconnect
         with self._send_lock:
             conn = self._active_connection
             self._active_connection = None
@@ -407,12 +471,16 @@ class LanServerBrowser:
     def send_input_update(self, *, dx: int, dy: int, holding_pickup: bool, run_multiplier: float) -> None:
         if not self.is_connected():
             return
+        new_input = (int(dx), int(dy), bool(holding_pickup), float(run_multiplier))
+        if new_input == self._last_sent_input:
+            return  # deduplicate: skip identical frames
+        self._last_sent_input = new_input
         payload = {
             "type": "input",
-            "dx": int(dx),
-            "dy": int(dy),
-            "holding_pickup": bool(holding_pickup),
-            "run_multiplier": float(run_multiplier),
+            "dx": new_input[0],
+            "dy": new_input[1],
+            "holding_pickup": new_input[2],
+            "run_multiplier": new_input[3],
             "ts": time.time(),
         }
         self._send_json(payload)
@@ -425,11 +493,17 @@ class LanServerBrowser:
             return
         self._send_json({"type": "action", "action": token, "ts": time.time()})
 
-    def poll_snapshots(self) -> list[dict]:
+    def poll_snapshot(self) -> dict | None:
+        """Return the latest full-state snapshot received from host, or None."""
         with self._lock:
-            snaps = list(self._snapshot_queue)
-            self._snapshot_queue.clear()
-        return snaps
+            snap, self._latest_snapshot = self._latest_snapshot, None
+        return snap
+
+    def poll_pos_update(self) -> dict | None:
+        """Return the latest position-only update received from host, or None."""
+        with self._lock:
+            pos, self._latest_pos_update = self._latest_pos_update, None
+        return pos
 
     def _connect_worker(self, entry: ServerEntry, player_name: str, timeout_sec: float) -> None:
         self.disconnect()
@@ -438,6 +512,8 @@ class LanServerBrowser:
         try:
             sock.settimeout(max(0.35, float(timeout_sec)))
             sock.connect((entry.host, int(entry.port)))
+            # Disable Nagle: inputs are tiny; we care about latency, not throughput.
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             req = {"type": "join_request", "player_name": player_name, "ts": time.time()}
             sock.sendall(self._encode_line(req))
             data = _recv_json_line(sock, recv_buffer)
@@ -481,11 +557,17 @@ class LanServerBrowser:
                 break
             if data is None or not isinstance(data, dict):
                 continue
-            if str(data.get("type", "")).strip().lower() == "snapshot":
+            msg_type = str(data.get("type", "")).strip().lower()
+            if msg_type == "snapshot":
                 snap = data.get("snapshot")
                 if isinstance(snap, dict):
                     with self._lock:
-                        self._snapshot_queue.append(snap)
+                        self._latest_snapshot = snap  # keep only latest
+            elif msg_type == "pos":
+                pos = data.get("pos")
+                if isinstance(pos, dict):
+                    with self._lock:
+                        self._latest_pos_update = pos  # keep only latest
 
     def _send_json(self, payload: dict) -> None:
         with self._send_lock:

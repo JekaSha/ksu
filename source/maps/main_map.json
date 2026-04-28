@@ -415,6 +415,12 @@
       "pickup_item_id": "backpack",
       "weight_kg": 4.0
     },
+    "math_book": {
+      "blocking": false,
+      "cycle_sprites": false,
+      "occlude_top": false,
+      "weight_kg": 0.8
+    },
     "sofa": {
       "blocking": true,
       "collider": [
@@ -724,6 +730,14 @@
       "x": 400,
       "y": 1510,
       "state": 0
+    },
+    {
+      "id": "math_book_main",
+      "kind": "math_book",
+      "x": 700,
+      "y": 1512,
+      "state": 0,
+      "label": "MATH"
     },
     {
       "id": "ballon_main",

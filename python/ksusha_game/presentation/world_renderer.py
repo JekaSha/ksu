@@ -43,6 +43,8 @@ class WorldRenderer:
         self._font = pygame.font.Font(None, 24)
         self._object_label_font = pygame.font.Font(None, 22)
         self._lock_marker_font = pygame.font.Font(None, 16)
+        self._menu_title_font = pygame.font.Font(None, 54)
+        self._menu_body_font = pygame.font.Font(None, 36)
         self._cache = RenderCache()
 
     def clear_render_cache(self) -> None:
@@ -66,6 +68,9 @@ class WorldRenderer:
         dragged_object_id: str | None = None,
         extra_players: list[tuple[tuple[float, float], pygame.Surface, float, bool]] | None = None,
         control_hints: list[str] | None = None,
+        task_panel_lines: list[str] | None = None,
+        multiplayer_lines: list[str] | None = None,
+        lan_menu_lines: list[str] | None = None,
     ) -> None:
         width, height = screen.get_size()
         camera = self._build_camera(world, width, height, player_pos)
@@ -135,8 +140,15 @@ class WorldRenderer:
         world_layer = self._apply_fog(world_layer, world, fog_center)
         screen.blit(world_layer, (0, 0))
         self._draw_inventory(screen, inventory, object_sprites)
+        control_hints_top = 54
+        if task_panel_lines:
+            control_hints_top = max(control_hints_top, self._draw_task_panel(screen, task_panel_lines) + 8)
         if control_hints:
-            self._draw_control_hints(screen, control_hints)
+            self._draw_control_hints(screen, control_hints, top=control_hints_top)
+        if multiplayer_lines:
+            self._draw_right_panel(screen, multiplayer_lines)
+        if lan_menu_lines:
+            self._draw_lan_center_menu(screen, lan_menu_lines)
         if message:
             self._draw_message(screen, message)
 
@@ -1735,7 +1747,28 @@ class WorldRenderer:
         screen.blit(bg, (16, 14))
         screen.blit(label, (24, 20))
 
-    def _draw_control_hints(self, screen: pygame.Surface, lines: list[str]) -> None:
+    def _draw_task_panel(self, screen: pygame.Surface, lines: list[str]) -> int:
+        rendered = [self._lock_marker_font.render(line, True, (242, 243, 245)) for line in lines if line]
+        if not rendered:
+            return 10
+        max_w = max(surf.get_width() for surf in rendered)
+        line_h = max(surf.get_height() for surf in rendered)
+        pad_x = 10
+        pad_y = 8
+        panel_w = max_w + pad_x * 2
+        panel_h = len(rendered) * line_h + pad_y * 2 + max(0, len(rendered) - 1) * 3
+        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        panel.fill((10, 16, 24, 205))
+        x = 10
+        y = 54
+        screen.blit(panel, (x, y))
+        cy = y + pad_y
+        for surf in rendered:
+            screen.blit(surf, (x + pad_x, cy))
+            cy += line_h + 3
+        return y + panel_h
+
+    def _draw_control_hints(self, screen: pygame.Surface, lines: list[str], *, top: int = 54) -> None:
         rendered = [self._lock_marker_font.render(line, True, (226, 232, 240)) for line in lines if line]
         if not rendered:
             return
@@ -1748,12 +1781,65 @@ class WorldRenderer:
         panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
         panel.fill((8, 12, 18, 165))
         x = 10
+        y = int(top)
+        screen.blit(panel, (x, y))
+        cy = y + pad_y
+        for surf in rendered:
+            screen.blit(surf, (x + pad_x, cy))
+            cy += line_h + 3
+
+    def _draw_right_panel(self, screen: pygame.Surface, lines: list[str]) -> None:
+        rendered = [self._lock_marker_font.render(line, True, (235, 240, 244)) for line in lines if line]
+        if not rendered:
+            return
+        max_w = max(surf.get_width() for surf in rendered)
+        line_h = max(surf.get_height() for surf in rendered)
+        pad_x = 10
+        pad_y = 8
+        panel_w = max_w + pad_x * 2
+        panel_h = len(rendered) * line_h + pad_y * 2 + max(0, len(rendered) - 1) * 3
+        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        panel.fill((8, 12, 18, 170))
+        x = max(8, screen.get_width() - panel_w - 10)
         y = 54
         screen.blit(panel, (x, y))
         cy = y + pad_y
         for surf in rendered:
             screen.blit(surf, (x + pad_x, cy))
             cy += line_h + 3
+
+    def _draw_lan_center_menu(self, screen: pygame.Surface, lines: list[str]) -> None:
+        normalized = [line for line in lines if line]
+        if not normalized:
+            return
+        title_text = normalized[0]
+        body_lines = normalized[1:]
+        title = self._menu_title_font.render(title_text, True, (248, 234, 184))
+        rendered_body = [self._menu_body_font.render(line, True, (240, 244, 248)) for line in body_lines]
+        body_max_w = max((surf.get_width() for surf in rendered_body), default=0)
+        body_line_h = max((surf.get_height() for surf in rendered_body), default=0)
+        pad_x = 26
+        pad_y = 20
+        title_gap = 14 if rendered_body else 0
+        body_gap = 6
+        panel_w = max(title.get_width(), body_max_w) + pad_x * 2
+        body_total_h = (len(rendered_body) * body_line_h) + max(0, len(rendered_body) - 1) * body_gap
+        panel_h = pad_y * 2 + title.get_height() + title_gap + body_total_h
+        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        panel.fill((4, 8, 14, 210))
+        border = pygame.Rect(0, 0, panel_w, panel_h)
+        pygame.draw.rect(panel, (220, 190, 112, 235), border, width=3)
+        x = (screen.get_width() - panel_w) // 2
+        y = (screen.get_height() - panel_h) // 2
+        screen.blit(panel, (x, y))
+        tx = x + (panel_w - title.get_width()) // 2
+        ty = y + pad_y
+        screen.blit(title, (tx, ty))
+        cy = ty + title.get_height() + title_gap
+        for surf in rendered_body:
+            sx = x + (panel_w - surf.get_width()) // 2
+            screen.blit(surf, (sx, cy))
+            cy += body_line_h + body_gap
 
     def _apply_fog(
         self,
@@ -1929,6 +2015,12 @@ class WorldRenderer:
             base = object_sprites.key_set().get(obj.state)
         elif obj.kind == "door":
             base = object_sprites.door_set(obj.door_orientation).get(obj.state)
+        elif obj.kind == "math_book":
+            base = object_sprites.math_book_sprite()
+        elif obj.kind == "math_digit":
+            base = object_sprites.math_token_sprite(str(obj.label or "?"), answer=False)
+        elif obj.kind == "math_answer":
+            base = object_sprites.math_token_sprite(str(obj.label or "?"), answer=True)
         else:
             raise KeyError(f"Unknown world object kind: {obj.kind}")
 

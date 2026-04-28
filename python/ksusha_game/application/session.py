@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections import deque
+import json
 import math
 import os
+import random
 import socket
 import time
 from pathlib import Path
@@ -11,6 +13,7 @@ import pygame
 
 from ksusha_game.application.commands import PlayerActionCommand
 from ksusha_game.application.input_controller import KeyboardInputController
+from ksusha_game.application.math_tasks import MathTaskEngineState, MathTaskOutcome
 from ksusha_game.application.session_state import SessionPlayerState
 from ksusha_game.config import GameConfig
 from ksusha_game.domain.direction import Direction, FACING_VECTOR
@@ -47,6 +50,14 @@ class GameSession:
     _NEAR_INTERACT_GAP = 14.0
     _NEAR_PICKUP_GAP = 18.0
     _LOCAL_PLAYER_ID = "p1"
+    _MATH_BOOK_KIND = "math_book"
+    _MATH_DIGIT_KIND = "math_digit"
+    _MATH_ANSWER_KIND = "math_answer"
+    _MATH_TASK_OBJECT_KINDS: tuple[str, ...] = (
+        _MATH_BOOK_KIND,
+        _MATH_DIGIT_KIND,
+        _MATH_ANSWER_KIND,
+    )
     _ACTION_PROCESSING_ORDER: tuple[str, ...] = (
         "inventory_move",
         "inventory_up",
@@ -68,6 +79,7 @@ class GameSession:
         self._drop_counter = 0
         self._interaction_anchor_offset = (44.0, 58.0)
         self._player_states: dict[str, SessionPlayerState] = {}
+        self._player_display_names: dict[str, str] = {}
         self._spray_tags: list[SprayTag] = []
         self._spray_frame_interval = 0.055
         self._room_item_use_counts: dict[tuple[str, str], int] = {}
@@ -78,6 +90,14 @@ class GameSession:
         self._command_queue: deque[PlayerActionCommand] = deque()
         self._movement_inputs: dict[str, tuple[int, int, bool, float]] = {}
         self._active_player_context_id: str = self._LOCAL_PLAYER_ID
+        self._math_tasks = MathTaskEngineState()
+        self._math_spawn_seq = 0
+        self._math_rng = random.Random()
+        # Per-frame caches: rebuilt once per frame after world mutations, before physics.
+        self._frame_blocking_objects: list[WorldObject] = []
+        self._frame_door_objects: list[WorldObject] = []
+        self._frame_platform_objects: list[WorldObject] = []
+        self._frame_objects_by_id: dict[str, WorldObject] = {}
 
     def _player_state(self, player_id: str) -> SessionPlayerState | None:
         return self._player_states.get(player_id)
@@ -93,6 +113,19 @@ class GameSession:
         if state is None:
             raise RuntimeError(f"No player state for context id {self._active_player_context_id!r}")
         return state
+
+    def _set_player_display_name(self, player_id: str, name: str | None) -> None:
+        token = str(name or "").strip()
+        if not token:
+            token = str(player_id).strip() or "player"
+        self._player_display_names[player_id] = token[:32]
+
+    def _player_display_name(self, player_id: str) -> str:
+        token = self._player_display_names.get(player_id)
+        if token is not None and token.strip():
+            return token
+        fallback = str(player_id).strip() or "player"
+        return fallback[:32]
 
     @property
     def _standing_on_object_id(self) -> str | None:
@@ -191,6 +224,7 @@ class GameSession:
         ) = self._load_runtime_resources(project_root, loader, cache)
         renderer = WorldRenderer(self._config)
         self._player_states = {}
+        self._player_display_names = {}
         self.add_player(
             player_id=self._LOCAL_PLAYER_ID,
             spawn_x=float(world.spawn_x),
@@ -211,6 +245,7 @@ class GameSession:
         static_control_hint_lines = KeyboardInputController.profile_control_hints([self._LOCAL_PLAYER_ID])
         static_control_hint_lines.append("LAN mode: one local player per computer")
         static_control_hint_lines.append("LAN menu: Ctrl+M")
+        static_control_hint_lines.append("Tasks menu: Ctrl+Q")
 
         def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
             raw = os.getenv(name, "").strip()
@@ -232,6 +267,7 @@ class GameSession:
             return f"{m:02d}:{s:02d}"
 
         local_player_name = os.getenv("KSU_PLAYER_NAME", "").strip() or os.getenv("USER", "").strip() or "player"
+        self._set_player_display_name(self._LOCAL_PLAYER_ID, local_player_name)
         local_host_name = socket.gethostname().strip() or "computer"
         local_level_name = self._config.map_path.stem
         discovery_port = _env_int("KSU_DISCOVERY_PORT", 45891, min_value=1024, max_value=65535)
@@ -254,12 +290,19 @@ class GameSession:
         reconnect_candidate: ServerEntry | None = None
         connected_since_monotonic: float | None = None
         connected_host_summary: str | None = None
+        connected_host_name: str | None = None
+        connected_host_player_name: str | None = None
+        show_task_menu = False
+        task_menu_section = "quests"
+        task_menu_selected_quest = 0
+        task_menu_selected_task = 0
         was_connected = False
         last_snapshot_sent_at = 0.0
         if host_started:
             self._set_message(f"LAN server visible: {local_host_name}:{server_port}")
         else:
             self._set_message("LAN server disabled: port busy")
+        self._math_rng.seed(int(time.time() * 1000) & 0xFFFFFFFF)
 
         snapshot = self._resource_snapshot(project_root) if dev_hot_enabled else None
         next_hot_check = 0.0
@@ -269,6 +312,7 @@ class GameSession:
             dt = clock.tick(self._config.window.fps) / 1000.0
             now = time.monotonic()
             reload_requested = False
+            lan_host.set_joinable(not (browser.is_connected() or browser.is_connecting()))
             current_servers = [s for s in browser.servers() if s.server_id != lan_host.server_id]
             connect_result = browser.poll_connect_result()
             if connect_result is not None:
@@ -276,6 +320,8 @@ class GameSession:
                 if ok:
                     connected_since_monotonic = now
                     if connect_requested_target is not None:
+                        connected_host_name = str(connect_requested_target.host_name).strip() or None
+                        connected_host_player_name = str(connect_requested_target.player_name).strip() or None
                         connected_host_summary = (
                             f"{connect_requested_target.host_name} ({connect_requested_target.player_name}) "
                             f"[{connect_requested_target.level_name}]"
@@ -292,6 +338,8 @@ class GameSession:
             if (not is_connected) and was_connected:
                 connected_since_monotonic = None
                 connected_host_summary = None
+                connected_host_name = None
+                connected_host_player_name = None
                 reconnect_candidate = None
             was_connected = is_connected
             if not current_servers:
@@ -311,10 +359,26 @@ class GameSession:
                         controller.clear_pressed()
                 elif event.type == pygame.KEYDOWN:
                     ctrl_m_pressed = event.key == pygame.K_m and (event.mod & pygame.KMOD_CTRL)
+                    ctrl_q_pressed = event.key == pygame.K_q and (event.mod & pygame.KMOD_CTRL)
                     if ctrl_m_pressed:
+                        if show_task_menu:
+                            show_task_menu = False
+                            task_menu_section = "quests"
                         show_server_list = not show_server_list
                         if not show_server_list:
                             reconnect_candidate = None
+                        for controller in input_controllers.values():
+                            controller.clear_pressed()
+                        continue
+                    if ctrl_q_pressed:
+                        if show_server_list:
+                            show_server_list = False
+                            reconnect_candidate = None
+                        show_task_menu = not show_task_menu
+                        if show_task_menu:
+                            task_menu_section = "quests"
+                        for controller in input_controllers.values():
+                            controller.clear_pressed()
                         continue
                     if event.key == pygame.K_ESCAPE:
                         if reconnect_candidate is not None:
@@ -323,6 +387,10 @@ class GameSession:
                             continue
                         if show_server_list:
                             show_server_list = False
+                            continue
+                        if show_task_menu:
+                            show_task_menu = False
+                            task_menu_section = "quests"
                             continue
                         running = False
                         continue
@@ -376,6 +444,54 @@ class GameSession:
                             continue
                         continue
 
+                    if show_task_menu:
+                        has_math_quest = self._math_tasks.has_math_quest
+                        if task_menu_section == "quests":
+                            if event.key in {pygame.K_w, pygame.K_a, pygame.K_UP, pygame.K_LEFT}:
+                                task_menu_selected_quest = max(0, task_menu_selected_quest - 1)
+                                continue
+                            if event.key in {pygame.K_s, pygame.K_d, pygame.K_DOWN, pygame.K_RIGHT}:
+                                task_menu_selected_quest = min(0, task_menu_selected_quest + 1)
+                                continue
+                            if event.key == pygame.K_q:
+                                if not has_math_quest:
+                                    self._set_message("Сначала найди книгу математики")
+                                else:
+                                    task_menu_section = "tasks"
+                                continue
+                            if event.key in {pygame.K_e, pygame.K_RETURN, pygame.K_KP_ENTER}:
+                                if not has_math_quest:
+                                    self._set_message("Сначала найди книгу математики")
+                                else:
+                                    self._set_message("Открой раздел кнопкой Q")
+                                continue
+                        else:
+                            if event.key in {pygame.K_w, pygame.K_a, pygame.K_UP, pygame.K_LEFT}:
+                                task_menu_selected_task = (task_menu_selected_task - 1) % 9
+                                continue
+                            if event.key in {pygame.K_s, pygame.K_d, pygame.K_DOWN, pygame.K_RIGHT}:
+                                task_menu_selected_task = (task_menu_selected_task + 1) % 9
+                                continue
+                            if event.key == pygame.K_q:
+                                task_menu_section = "quests"
+                                continue
+                            if event.key in {pygame.K_e, pygame.K_RETURN, pygame.K_KP_ENTER}:
+                                if not has_math_quest:
+                                    self._set_message("Сначала найди книгу математики")
+                                    continue
+                                action = f"task_select_{task_menu_selected_task + 1}"
+                                if browser.is_connected():
+                                    browser.send_action(action=action)
+                                else:
+                                    self.queue_player_action(
+                                        player_id=self._LOCAL_PLAYER_ID,
+                                        action=action,
+                                        issued_at=now,
+                                    )
+                                self._set_message(f"Запуск задачи {task_menu_selected_task + 1}")
+                                continue
+                        continue
+
                     for controller in input_controllers.values():
                         controller.on_keydown(event, now)
                     local_controller = input_controllers.get(self._LOCAL_PLAYER_ID)
@@ -412,13 +528,13 @@ class GameSession:
                     self.queue_player_action(player_id=pid, action=action)
 
             if browser.is_connected():
-                snapshots = browser.poll_snapshots()
-                if snapshots:
-                    self._apply_network_snapshot(
-                        snapshots[-1],
-                        world,
-                        assigned_local_id=browser.connected_player_id(),
-                    )
+                assigned_local = browser.connected_player_id()
+                pos_update = browser.poll_pos_update()
+                if pos_update is not None:
+                    self._apply_position_update(pos_update, world, assigned_local_id=assigned_local)
+                snapshot = browser.poll_snapshot()
+                if snapshot is not None:
+                    self._apply_network_snapshot(snapshot, world, assigned_local_id=assigned_local)
 
             self._process_async_preloads(world, object_sprites, budget_ms=1.8, max_jobs=1)
             if not browser.is_connected():
@@ -462,13 +578,20 @@ class GameSession:
                 except Exception as exc:
                     self._set_message(f"Hot reload failed: {exc}")
 
+            self._rebuild_frame_caches(world)
+
             width, height = screen.get_size()
             target_h = max(28, int(height * self._config.sprite_sheet.target_height_ratio))
             keys = pygame.key.get_pressed()
             for player_id, controller in input_controllers.items():
-                dx, dy = controller.read_direction(keys)
-                holding_pickup = controller.is_action_pressed(keys, "pickup")
-                run_boost = controller.speed_multiplier(now, dx, dy)
+                if show_task_menu and player_id == self._LOCAL_PLAYER_ID:
+                    dx, dy = 0, 0
+                    holding_pickup = False
+                    run_boost = 1.0
+                else:
+                    dx, dy = controller.read_direction(keys)
+                    holding_pickup = controller.is_action_pressed(keys, "pickup")
+                    run_boost = controller.speed_multiplier(now, dx, dy)
                 if player_id == self._LOCAL_PLAYER_ID and browser.is_connected():
                     browser.send_input_update(
                         dx=dx,
@@ -683,8 +806,11 @@ class GameSession:
             self._active_player_context_id = self._LOCAL_PLAYER_ID
             message = self._message if now < self._message_until else ""
             dynamic_hint_lines = list(static_control_hint_lines)
+            task_panel_lines: list[str] | None = None
+            multiplayer_lines: list[str] | None = None
+            lan_menu_lines: list[str] | None = None
             if show_server_list:
-                dynamic_hint_lines.append("LAN: UP/DOWN select | ENTER connect | ESC close")
+                lan_menu_lines = ["LAN HOSTS", "W/S or UP/DOWN: select | ENTER: connect | ESC: close"]
                 connected_sid = browser.connected_server_id()
                 if browser.is_connected():
                     host_text = connected_host_summary or f"server:{connected_sid}"
@@ -693,27 +819,73 @@ class GameSession:
                         if connected_since_monotonic is not None
                         else "00:00"
                     )
-                    dynamic_hint_lines.append(f"LAN connected: {host_text}")
-                    dynamic_hint_lines.append(f"Session duration: {duration}")
+                    lan_menu_lines.append(f"CONNECTED: {host_text}")
+                    lan_menu_lines.append(f"SESSION: {duration}")
                 else:
-                    dynamic_hint_lines.append("LAN connected: no")
+                    lan_menu_lines.append("CONNECTED: no")
                 if reconnect_candidate is not None:
-                    dynamic_hint_lines.append(
-                        "Reconnect to selected host? ENTER/Y yes | ESC/N no"
-                    )
+                    lan_menu_lines.append("RECONNECT TO SELECTED HOST?")
+                    lan_menu_lines.append("ENTER/Y: yes | ESC/N: no")
                 if not current_servers:
-                    dynamic_hint_lines.append("LAN: no servers")
+                    lan_menu_lines.append("NO SERVERS FOUND")
                 else:
                     for idx, entry in enumerate(current_servers[:10]):
                         mark = ">" if idx == selected_server_idx else " "
                         conn = "*" if connected_sid == entry.server_id else " "
-                        dynamic_hint_lines.append(
+                        lan_menu_lines.append(
                             f"{mark}{conn} {entry.host_name} | {entry.player_name} | {entry.level_name} | {entry.players}/{entry.max_players}"
                         )
+            if show_task_menu:
+                task_panel_lines = ["TASKS (Ctrl+Q close)"]
+                if task_menu_section == "quests":
+                    task_panel_lines.append("Разделы:")
+                    if self._math_tasks.has_math_quest:
+                        mark = ">" if task_menu_selected_quest == 0 else " "
+                        task_panel_lines.append(f"{mark} Математика")
+                        task_panel_lines.append("Q: открыть раздел")
+                    else:
+                        task_panel_lines.append("Квестов пока нет")
+                        task_panel_lines.append("Найди книгу математики")
+                    task_panel_lines.append("W/A/S/D: выбор")
+                else:
+                    task_panel_lines.append("Математика:")
+                    for idx in range(9):
+                        mark = ">" if idx == task_menu_selected_task else " "
+                        task_panel_lines.append(f"{mark} Задача {idx + 1}")
+                    task_panel_lines.append("E: запуск | Q: назад")
+                    if task_menu_selected_task == 0:
+                        task_panel_lines.append("Описание: два числа + найди ответ")
+                    elif task_menu_selected_task == 1:
+                        task_panel_lines.append("Описание: вычитание (в разработке)")
+                    elif task_menu_selected_task == 2:
+                        task_panel_lines.append("Описание: выбрать + или - (в разработке)")
+                    else:
+                        task_panel_lines.append("Описание: в разработке")
+            if browser.is_connected():
+                host_title = connected_host_name or connected_host_player_name or "unknown"
+            else:
+                host_title = local_host_name or local_player_name
+            if self._player_states:
+                player_ids = list(self._player_states.keys())
+                player_ids.sort(
+                    key=lambda pid: (0 if pid == self._LOCAL_PLAYER_ID else 1, self._player_display_name(pid).lower())
+                )
+                multiplayer_lines = [f"HOST: {host_title}", f"ONLINE: {len(player_ids)}/{self._MAX_PLAYERS}"]
+                for pid in player_ids[:10]:
+                    prefix = ">" if pid == self._LOCAL_PLAYER_ID else "-"
+                    multiplayer_lines.append(f"{prefix} {self._player_display_name(pid)}")
+            if self._math_tasks.active:
+                duration = _format_session_duration(self._math_tasks.session_duration_sec(time.time()))
+                dynamic_hint_lines.append(
+                    f"MATH score: {self._math_tasks.total_solved}/{self._math_tasks.total_attempts} | time {duration}"
+                )
             if browser.is_connected():
                 dynamic_hint_lines.append("NET: connected as client (authoritative host sync)")
             elif host_started:
-                dynamic_hint_lines.append("NET: host mode (accepting players)")
+                if lan_host.is_joinable():
+                    dynamic_hint_lines.append("NET: host mode (accepting players)")
+                else:
+                    dynamic_hint_lines.append("NET: host paused (client/connect mode)")
             renderer.render(
                 screen=screen,
                 world=world,
@@ -731,6 +903,9 @@ class GameSession:
                 dragged_object_id=self._grabbed_object_id,
                 extra_players=extra_renders,
                 control_hints=dynamic_hint_lines,
+                task_panel_lines=task_panel_lines,
+                multiplayer_lines=multiplayer_lines,
+                lan_menu_lines=lan_menu_lines,
             )
 
             pygame.display.set_caption(
@@ -738,9 +913,13 @@ class GameSession:
             )
             pygame.display.flip()
 
-            if host_started and (now - last_snapshot_sent_at) >= 0.05:
-                lan_host.broadcast_snapshot(self._build_network_snapshot(world))
-                last_snapshot_sent_at = now
+            if host_started and lan_host.connected_clients() > 0:
+                # Per-frame position update: tiny payload, pre-encoded in main thread, sent by bg thread.
+                lan_host.broadcast_positions(self._build_position_update())
+                # Full state sync at 5 Hz: objects, inventory, spray tags, world events.
+                if now - last_snapshot_sent_at >= 0.20:
+                    lan_host.broadcast_snapshot(self._build_network_snapshot(world))
+                    last_snapshot_sent_at = now
 
         browser.stop()
         lan_host.stop()
@@ -844,12 +1023,14 @@ class GameSession:
             player=Player(x=float(spawn_x), y=float(spawn_y), stats=stats),
             inventory=Inventory(base_capacity=base_inventory_capacity, capacity=base_inventory_capacity),
         )
+        self._set_player_display_name(player_id, player_id)
         self._movement_inputs[player_id] = (0, 0, False, 1.0)
 
     def remove_player(self, *, player_id: str) -> None:
         if player_id == self._LOCAL_PLAYER_ID:
             return
         self._player_states.pop(player_id, None)
+        self._player_display_names.pop(player_id, None)
         self._movement_inputs.pop(player_id, None)
 
     def _apply_host_event(self, host_event: HostEvent, world: WorldMap) -> None:
@@ -865,11 +1046,70 @@ class GameSession:
                 spawn_y=spawn_y,
                 stats=world.player_stats,
             )
+            self._set_player_display_name(host_event.player_id, host_event.player_name)
             self._set_message(f"Joined: {host_event.player_name}")
             return
         if host_event.type == "leave":
             self.remove_player(player_id=host_event.player_id)
             self._set_message(f"Left: {host_event.player_name}")
+
+    def _remap_player_id(self, raw_id: str, assigned_remote_id: str | None) -> str:
+        """Map server-assigned player id to the local id used in this session."""
+        if assigned_remote_id and raw_id == assigned_remote_id:
+            return self._LOCAL_PLAYER_ID
+        if (
+            assigned_remote_id
+            and assigned_remote_id != self._LOCAL_PLAYER_ID
+            and raw_id == self._LOCAL_PLAYER_ID
+        ):
+            return "host:p1"
+        return raw_id
+
+    def _build_position_update(self) -> bytes:
+        """Build a compact per-frame position-only payload, pre-serialized to bytes."""
+        players = [
+            {
+                "id": pid,
+                "x": round(float(s.player.x), 2),
+                "y": round(float(s.player.y), 2),
+                "f": s.player.facing.value,
+                "wt": round(float(s.player.walk_time), 3),
+                "jt": round(float(s.player.jump_time_left), 3),
+            }
+            for pid, s in self._player_states.items()
+        ]
+        raw: dict[str, object] = {"type": "pos", "pos": {"players": players, "ts": time.time()}}
+        return (json.dumps(raw, ensure_ascii=True) + "\n").encode("utf-8")
+
+    def _apply_position_update(
+        self,
+        update: dict,
+        world: WorldMap,
+        *,
+        assigned_local_id: str | None = None,
+    ) -> None:
+        players = update.get("players")
+        if not isinstance(players, list):
+            return
+        assigned_remote_id = str(assigned_local_id).strip() if assigned_local_id else None
+        for item in players:
+            if not isinstance(item, dict):
+                continue
+            raw_id = str(item.get("id", "")).strip()
+            if not raw_id:
+                continue
+            player_id = self._remap_player_id(raw_id, assigned_remote_id)
+            state = self._player_state(player_id)
+            if state is None:
+                continue
+            try:
+                state.player.x = float(item.get("x", state.player.x))
+                state.player.y = float(item.get("y", state.player.y))
+                state.player.facing = Direction(str(item.get("f", state.player.facing.value)))
+                state.player.walk_time = float(item.get("wt", state.player.walk_time))
+                state.player.jump_time_left = max(0.0, float(item.get("jt", state.player.jump_time_left)))
+            except Exception:
+                continue
 
     def _build_network_snapshot(self, world: WorldMap) -> dict:
         players: list[dict[str, object]] = []
@@ -877,6 +1117,7 @@ class GameSession:
             players.append(
                 {
                     "id": player_id,
+                    "name": self._player_display_name(player_id),
                     "x": float(state.player.x),
                     "y": float(state.player.y),
                     "facing": state.player.facing.value,
@@ -895,6 +1136,7 @@ class GameSession:
             "objects": [self._world_object_payload(obj) for obj in world.objects],
             "spray_tags": [self._spray_tag_payload(tag) for tag in self._spray_tags],
             "room_item_use_counts": room_item_use_counts,
+            "math_tasks": self._math_tasks.to_payload(),
             "ts": time.time(),
             "world": {"width": int(world.width), "height": int(world.height)},
         }
@@ -948,6 +1190,7 @@ class GameSession:
                     spawn_y=float(item.get("y", world.spawn_y)),
                     stats=world.player_stats,
                 )
+            self._set_player_display_name(player_id, item.get("name"))
             state = self._player_state(player_id)
             if state is None:
                 continue
@@ -980,14 +1223,13 @@ class GameSession:
                 obj = self._world_object_from_payload(raw_obj)
                 if obj is not None:
                     restored_objects.append(obj)
-            if restored_objects:
-                world.objects = restored_objects
-                known_object_ids = {obj.object_id for obj in world.objects}
-                for state in self._player_states.values():
-                    if state.grabbed_object_id and state.grabbed_object_id not in known_object_ids:
-                        state.grabbed_object_id = None
-                    if state.standing_on_object_id and state.standing_on_object_id not in known_object_ids:
-                        state.standing_on_object_id = None
+            world.objects = restored_objects
+            known_object_ids = {obj.object_id for obj in world.objects}
+            for state in self._player_states.values():
+                if state.grabbed_object_id and state.grabbed_object_id not in known_object_ids:
+                    state.grabbed_object_id = None
+                if state.standing_on_object_id and state.standing_on_object_id not in known_object_ids:
+                    state.standing_on_object_id = None
 
         spray_tags_payload = snapshot.get("spray_tags")
         if isinstance(spray_tags_payload, list):
@@ -1017,6 +1259,10 @@ class GameSession:
                 if count > 0:
                     restored_room_use[(room_id, item_id)] = count
             self._room_item_use_counts = restored_room_use
+
+        math_payload = snapshot.get("math_tasks")
+        if isinstance(math_payload, dict):
+            self._math_tasks = MathTaskEngineState.from_payload(math_payload)
 
     def _inventory_payload(self, inventory: Inventory) -> dict[str, object]:
         return {
@@ -1344,6 +1590,14 @@ class GameSession:
         inventory = state.inventory
         player = state.player
 
+        if action.startswith("task_select_"):
+            self._handle_math_task_select_action(
+                action=action,
+                player_id=player_id,
+                world=world,
+            )
+            return
+
         if action == "inventory_move":
             self._toggle_inventory_move_mode(inventory, world)
             return
@@ -1495,9 +1749,7 @@ class GameSession:
     ) -> None:
         player_rect = self._player_collider_rect(player.x, player.y, sprite_w, sprite_h)
         current_overlap: set[str] = set()
-        for obj in world.objects:
-            if obj.kind != "door":
-                continue
+        for obj in self._frame_door_objects:
             if not self._is_door_open(obj):
                 continue
             sprite = self._object_sprite(obj, object_sprites)
@@ -1656,6 +1908,9 @@ class GameSession:
         inventory: Inventory,
         object_sprites: ObjectSpriteLibrary,
     ) -> None:
+        if self._try_handle_math_task_interaction(world, player, object_sprites):
+            return
+
         if self._try_pickup(world, player, inventory, object_sprites):
             return
 
@@ -1724,6 +1979,202 @@ class GameSession:
             return
 
         self._set_message("Тач выполнен")
+
+    def _handle_math_task_select_action(
+        self,
+        *,
+        action: str,
+        player_id: str,
+        world: WorldMap,
+    ) -> None:
+        token = str(action).strip().lower()
+        if not token.startswith("task_select_"):
+            return
+        num_raw = token[len("task_select_") :]
+        try:
+            task_no = int(num_raw)
+        except ValueError:
+            return
+        outcome = self._math_tasks.select_task(
+            player_id=player_id,
+            task_no=task_no,
+            now_ts=time.time(),
+        )
+        self._apply_math_task_outcome(outcome, world)
+
+    def _try_handle_math_task_interaction(
+        self,
+        world: WorldMap,
+        player: Player,
+        object_sprites: ObjectSpriteLibrary,
+    ) -> bool:
+        target = self._find_math_task_target(world, player, object_sprites)
+        if target is None:
+            return False
+        player_id = self._active_player_context_id
+
+        if target.kind == self._MATH_BOOK_KIND:
+            outcome = self._math_tasks.unlock_math_quest()
+            world.remove_object(target.object_id)
+            self._apply_math_task_outcome(outcome, world)
+            return True
+
+        if target.kind == self._MATH_DIGIT_KIND:
+            if not self._math_tasks.active:
+                self._set_message("Сначала активируй задачу (Ctrl+Q)")
+                return True
+            try:
+                digit = int(str(target.label or "").strip())
+            except ValueError:
+                self._set_message("Некорректная цифра")
+                return True
+            world.remove_object(target.object_id)
+            outcome = self._math_tasks.pick_digit(
+                player_id=player_id,
+                digit=digit,
+                rng=self._math_rng,
+            )
+            self._apply_math_task_outcome(outcome, world)
+            return True
+
+        if target.kind == self._MATH_ANSWER_KIND:
+            if not self._math_tasks.active:
+                self._set_message("Сначала активируй задачу (Ctrl+Q)")
+                return True
+            try:
+                answer_value = int(str(target.label or "").strip())
+            except ValueError:
+                self._set_message("Некорректный ответ")
+                return True
+            world.remove_object(target.object_id)
+            outcome = self._math_tasks.pick_answer(
+                player_id=player_id,
+                answer_value=answer_value,
+            )
+            self._apply_math_task_outcome(outcome, world)
+            return True
+
+        return False
+
+    def _find_math_task_target(
+        self,
+        world: WorldMap,
+        player: Player,
+        object_sprites: ObjectSpriteLibrary,
+    ) -> WorldObject | None:
+        front = self._find_object_in_front(world, player, object_sprites)
+        if front is not None and self._is_math_task_object(front):
+            return front
+
+        sprite_w, sprite_h = self._last_player_sprite_size
+        player_rect = self._player_collider_rect(player.x, player.y, sprite_w, sprite_h).inflate(14, 14)
+        near_best: tuple[float, WorldObject] | None = None
+        for obj in world.objects:
+            if not self._is_math_task_object(obj):
+                continue
+            obj_rect = self._object_collider_rect(obj, object_sprites)
+            if not player_rect.colliderect(obj_rect):
+                continue
+            dist = self._distance_to_object_from_player(
+                player=player,
+                sprite_w=sprite_w,
+                sprite_h=sprite_h,
+                obj=obj,
+                object_sprites=object_sprites,
+            )
+            if near_best is None or dist < near_best[0]:
+                near_best = (dist, obj)
+        return near_best[1] if near_best is not None else None
+
+    def _is_math_task_object(self, obj: WorldObject) -> bool:
+        return obj.kind in self._MATH_TASK_OBJECT_KINDS
+
+    def _apply_math_task_outcome(self, outcome: MathTaskOutcome, world: WorldMap) -> None:
+        if outcome.clear_digits:
+            self._clear_math_objects(world, kind=self._MATH_DIGIT_KIND)
+        if outcome.clear_answers:
+            self._clear_math_objects(world, kind=self._MATH_ANSWER_KIND)
+        if outcome.spawn_digits:
+            self._spawn_math_digits(world, count=12)
+        if outcome.spawn_answers:
+            round_state = self._math_tasks.current_round
+            answers = list(round_state.answer_options) if round_state is not None else []
+            self._spawn_math_answers(world, answers)
+        if outcome.message:
+            self._set_message(outcome.message)
+
+    def _spawn_math_digits(self, world: WorldMap, *, count: int) -> None:
+        amount = max(2, int(count))
+        for _ in range(amount):
+            digit = int(self._math_rng.randint(0, 9))
+            x, y = self._random_math_spawn_point(world)
+            world.add_object(
+                WorldObject(
+                    object_id=self._next_math_object_id(prefix="math_digit"),
+                    kind=self._MATH_DIGIT_KIND,
+                    x=x,
+                    y=y,
+                    state=0,
+                    blocking=False,
+                    cycle_sprites=False,
+                    label=str(digit),
+                    collider_w=44,
+                    collider_h=34,
+                    width=64,
+                    height=64,
+                    weight_kg=0.0,
+                )
+            )
+
+    def _spawn_math_answers(self, world: WorldMap, answers: list[int]) -> None:
+        if not answers:
+            return
+        for value in answers:
+            x, y = self._random_math_spawn_point(world)
+            world.add_object(
+                WorldObject(
+                    object_id=self._next_math_object_id(prefix="math_answer"),
+                    kind=self._MATH_ANSWER_KIND,
+                    x=x,
+                    y=y,
+                    state=0,
+                    blocking=False,
+                    cycle_sprites=False,
+                    label=str(int(value)),
+                    collider_w=48,
+                    collider_h=34,
+                    width=70,
+                    height=70,
+                    weight_kg=0.0,
+                )
+            )
+
+    def _next_math_object_id(self, *, prefix: str) -> str:
+        self._math_spawn_seq += 1
+        return f"{prefix}_{self._math_spawn_seq}"
+
+    def _clear_math_objects(self, world: WorldMap, *, kind: str) -> None:
+        world.objects = [obj for obj in world.objects if obj.kind != kind]
+
+    def _random_math_spawn_point(self, world: WorldMap) -> tuple[float, float]:
+        rooms = [room for room in world.rooms if room.walls_enabled and room.width > 240 and room.height > 240]
+        if not rooms:
+            return float(world.spawn_x + self._math_rng.randint(-120, 120)), float(
+                world.spawn_y + self._math_rng.randint(-80, 80)
+            )
+        room = rooms[self._math_rng.randrange(len(rooms))]
+        t = max(10, int(room.wall_thickness))
+        min_x = room.x + t + 40
+        max_x = room.x + room.width - t - 40
+        top_pad = max(t + 40, int(room.top_wall_height) + 50)
+        min_y = room.y + top_pad
+        max_y = room.y + room.height - t - 40
+        if min_x >= max_x or min_y >= max_y:
+            return float(room.x + room.width * 0.5), float(room.y + room.height * 0.65)
+        return (
+            float(self._math_rng.randint(int(min_x), int(max_x))),
+            float(self._math_rng.randint(int(min_y), int(max_y))),
+        )
 
     def _find_nearby_interaction_target(
         self,
@@ -2801,6 +3252,12 @@ class GameSession:
             return sprites.key_set().get(obj.state)
         if obj.kind == "door":
             return sprites.door_set(obj.door_orientation).get(obj.state)
+        if obj.kind == self._MATH_BOOK_KIND:
+            return sprites.math_book_sprite()
+        if obj.kind == self._MATH_DIGIT_KIND:
+            return sprites.math_token_sprite(str(obj.label or "?"), answer=False)
+        if obj.kind == self._MATH_ANSWER_KIND:
+            return sprites.math_token_sprite(str(obj.label or "?"), answer=True)
         return sprites.backpack_set().get(0)
 
     def _set_message(self, text: str) -> None:
@@ -3016,7 +3473,7 @@ class GameSession:
 
         grabbed_valid = False
         if self._grabbed_object_id is not None:
-            obj = next((o for o in world.objects if o.object_id == self._grabbed_object_id), None)
+            obj = self._frame_objects_by_id.get(self._grabbed_object_id)
             if obj is None or not obj.blocking or obj.kind == "door":
                 self._grabbed_object_id = None
             else:
@@ -3105,7 +3562,7 @@ class GameSession:
         inventory: Inventory,
     ) -> WorldObject | None:
         if self._grabbed_object_id is not None:
-            grabbed = next((o for o in world.objects if o.object_id == self._grabbed_object_id), None)
+            grabbed = self._frame_objects_by_id.get(self._grabbed_object_id)
             if (
                 grabbed is not None
                 and grabbed.blocking
@@ -3535,6 +3992,18 @@ class GameSession:
         left = max(opening_left, right - pass_w)
         return left, right
 
+    def _rebuild_frame_caches(self, world: WorldMap) -> None:
+        self._frame_blocking_objects = [
+            o for o in world.objects
+            if o.blocking or (o.kind == "door" and not o.blocking and o.state > 0)
+        ]
+        self._frame_door_objects = [o for o in world.objects if o.kind == "door"]
+        self._frame_platform_objects = [
+            o for o in world.objects
+            if o.kind != "sofa" and o.jump_platform_w is not None and o.jump_platform_h is not None
+        ]
+        self._frame_objects_by_id = {o.object_id: o for o in world.objects}
+
     def _collides_with_blocking(
         self,
         player_rect: pygame.Rect,
@@ -3551,9 +4020,7 @@ class GameSession:
         *,
         ignore_object_id: str | None = None,
     ) -> WorldObject | None:
-        for obj in world.objects:
-            if not obj.blocking and not self._is_open_door_leaf_blocking(obj):
-                continue
+        for obj in self._frame_blocking_objects:
             if ignore_object_id is not None and obj.object_id == ignore_object_id:
                 continue
             if self._standing_on_object_id is not None and obj.object_id == self._standing_on_object_id:
@@ -3672,7 +4139,7 @@ class GameSession:
             return
         if not holding_pickup:
             return
-        obj = next((o for o in world.objects if o.object_id == self._grabbed_object_id), None)
+        obj = self._frame_objects_by_id.get(self._grabbed_object_id)
         if obj is None or not obj.blocking:
             self._grabbed_object_id = None
             return
@@ -3849,7 +4316,7 @@ class GameSession:
         if self._standing_on_object_id is None:
             return
         player_rect = self._player_collider_rect(player.x, player.y, sprite_w, sprite_h)
-        obj = next((o for o in world.objects if o.object_id == self._standing_on_object_id), None)
+        obj = self._frame_objects_by_id.get(self._standing_on_object_id)
         if obj is None:
             self._standing_on_object_id = None
             return
@@ -3870,7 +4337,7 @@ class GameSession:
     ) -> None:
         player_rect = self._player_collider_rect(player.x, player.y, sprite_w, sprite_h)
         best: tuple[float, WorldObject] | None = None
-        for obj in world.objects:
+        for obj in self._frame_platform_objects:
             platform = self._object_platform_rect(obj, object_sprites)
             if platform is None:
                 continue

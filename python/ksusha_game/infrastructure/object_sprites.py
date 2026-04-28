@@ -351,6 +351,50 @@ class ObjectSpriteLibrary:
         self._cache[key] = result
         return result
 
+    def math_book_sprite(self) -> pygame.Surface:
+        key = "math_book"
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached.get(0)
+        candidates = [
+            self._project_root / "source/textures/items/books/math/book_math.png",
+            self._project_root / "source/textures/items/books/math/book.png",
+        ]
+        sprite: pygame.Surface | None = None
+        for path in candidates:
+            if not path.exists():
+                continue
+            sprite = pygame.image.load(str(path)).convert_alpha()
+            break
+        if sprite is None:
+            sprite = self.math_token_sprite("M", answer=False)
+        else:
+            sprite = self._fit_to_target(sprite, (104, 104))
+        result = ObjectSpriteSet(variants=[sprite])
+        self._cache[key] = result
+        return sprite
+
+    def math_token_sprite(self, token: str, *, answer: bool) -> pygame.Surface:
+        normalized = str(token).strip() or "?"
+        key = f"math_token:{'a' if answer else 'd'}:{normalized}"
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached.get(0)
+        size = (70, 70)
+        surface = pygame.Surface(size, pygame.SRCALPHA)
+        bg = (74, 134, 255) if answer else (239, 188, 77)
+        border = (228, 234, 246) if answer else (252, 240, 204)
+        pygame.draw.circle(surface, (*bg, 235), (size[0] // 2, size[1] // 2), 31)
+        pygame.draw.circle(surface, (*border, 250), (size[0] // 2, size[1] // 2), 31, width=3)
+        font = pygame.font.Font(None, 38)
+        glyph = font.render(normalized, True, (18, 20, 26))
+        gx = (size[0] - glyph.get_width()) // 2
+        gy = (size[1] - glyph.get_height()) // 2
+        surface.blit(glyph, (gx, gy))
+        result = ObjectSpriteSet(variants=[surface])
+        self._cache[key] = result
+        return surface
+
     def icon_for_item(self, item_id: str) -> pygame.Surface:
         cached = self._icon_cache.get(item_id)
         if cached is not None:
@@ -394,9 +438,19 @@ class ObjectSpriteLibrary:
             return len(self.ballon_set().variants)
         if object_kind == "door":
             return len(self.door_set("top").variants)
+        if object_kind == "math_book":
+            return 1
+        if object_kind == "math_digit":
+            return 1
+        if object_kind == "math_answer":
+            return 1
         return 1
 
     def nominal_world_size(self, kind: str, obj: WorldObject | None = None) -> tuple[int, int]:
+        if kind == "math_book":
+            return (104, 104)
+        if kind in {"math_digit", "math_answer"}:
+            return (70, 70)
         if kind == "ballon":
             specs = self._resolved_balloon_specs()
             if isinstance(obj, BalloonObject) and obj.balloon_id:
