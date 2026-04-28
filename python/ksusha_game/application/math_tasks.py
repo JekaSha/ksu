@@ -385,11 +385,23 @@ class MathTaskEngineState:
         self.active_answer_id = None
 
     def _resolve_answer_assignee(self, *, producer_player_id: str, online_player_ids: list[str]) -> str:
-        candidates = [pid for pid in online_player_ids if pid and pid != producer_player_id]
-        if candidates:
-            candidates.sort()
-            return candidates[0]
-        return producer_player_id
+        roster: list[str] = []
+        seen: set[str] = set()
+        for pid in online_player_ids:
+            token = str(pid).strip()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            roster.append(token)
+        producer = str(producer_player_id).strip()
+        if producer and producer not in seen:
+            roster.append(producer)
+            seen.add(producer)
+        if not roster:
+            return producer or "p1"
+        roster.sort()
+        idx = max(0, int(self.next_answer_id) - 1) % len(roster)
+        return roster[idx]
 
     def _generate_answer_options(self, correct: int, *, operation: str, rng: random.Random) -> list[int]:
         correct_value = int(correct)
@@ -408,3 +420,24 @@ class MathTaskEngineState:
         options = [correct_value, *wrong[:9]]
         rng.shuffle(options)
         return options
+
+    def remap_player_ids(self, id_map: dict[str, str]) -> None:
+        if not id_map:
+            return
+
+        def _remap(value: str | None) -> str | None:
+            if value is None:
+                return None
+            token = str(value).strip()
+            if not token:
+                return None
+            return id_map.get(token, token)
+
+        self.menu_owner_player_id = _remap(self.menu_owner_player_id)
+
+        if self.current_round is not None:
+            for stage, owner in list(self.current_round.assignments.items()):
+                self.current_round.assignments[stage] = _remap(owner)
+
+        for pending in self.pending_answers:
+            pending.assigned_player_id = _remap(pending.assigned_player_id)

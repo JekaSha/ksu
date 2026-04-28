@@ -891,16 +891,24 @@ class GameSession:
                     and (active_pending.assigned_player_id in {None, self._LOCAL_PLAYER_ID})
                 )
                 round_state = self._math_tasks.current_round
-                if local_answer_turn:
-                    dynamic_hint_lines.append("MATH stage: найди результат (или собирай след. пример)")
+                if active_pending is not None:
+                    assignee_id = active_pending.assigned_player_id
+                    if assignee_id:
+                        assignee_name = self._player_display_name(assignee_id)
+                        if assignee_id == self._LOCAL_PLAYER_ID:
+                            dynamic_hint_lines.append("MATH stage: найди результат (или собирай след. пример)")
+                        else:
+                            dynamic_hint_lines.append(f"MATH stage: Пользователь {assignee_name} ищет результат")
+                        dynamic_hint_lines.append(f"MATH answer: Пользователь {assignee_name} ищет ответ")
+                    else:
+                        if local_answer_turn:
+                            dynamic_hint_lines.append("MATH stage: найди результат (или собирай след. пример)")
+                        dynamic_hint_lines.append("MATH answer: ответ без назначения")
                 elif round_state is not None:
                     if round_state.stage == "pick_first":
                         dynamic_hint_lines.append("MATH stage: найди первое число")
                     elif round_state.stage == "pick_second":
                         dynamic_hint_lines.append(f"MATH stage: операция {round_state.operation}, найди второе число")
-                if active_pending is not None:
-                    assignee = active_pending.assigned_player_id or "-"
-                    dynamic_hint_lines.append(f"MATH answer: active -> {assignee}")
             if browser.is_connected():
                 dynamic_hint_lines.append("NET: connected as client (authoritative host sync)")
             elif host_started:
@@ -1188,6 +1196,7 @@ class GameSession:
                     break
 
         seen: set[str] = set()
+        player_id_map: dict[str, str] = {}
         for item in payload:
             if not isinstance(item, dict):
                 continue
@@ -1205,6 +1214,7 @@ class GameSession:
             ):
                 # Avoid collision between local p1 and host's authoritative p1.
                 player_id = "host:p1"
+            player_id_map[raw_id] = player_id
             if self._player_state(player_id) is None:
                 self.add_player(
                     player_id=player_id,
@@ -1285,6 +1295,7 @@ class GameSession:
         math_payload = snapshot.get("math_tasks")
         if isinstance(math_payload, dict):
             self._math_tasks = MathTaskEngineState.from_payload(math_payload)
+            self._math_tasks.remap_player_ids(player_id_map)
 
     def _inventory_payload(self, inventory: Inventory) -> dict[str, object]:
         return {

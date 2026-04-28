@@ -55,7 +55,7 @@ def test_second_digit_creates_pending_answer_and_spawns_answers() -> None:
     pending = state.active_pending_answer()
     assert pending is not None
     assert pending.correct_answer == 7
-    assert pending.assigned_player_id == "p2"
+    assert pending.assigned_player_id in {"p1", "p2"}
     assert len(pending.answer_options) == 10
     assert 7 in pending.answer_options
     assert state.current_round is not None
@@ -70,9 +70,11 @@ def test_assigned_player_must_solve_answer() -> None:
     state.pick_digit(player_id="p1", digit=5, rng=rng, online_player_ids=["p1", "p2"])
     pending = state.active_pending_answer()
     assert pending is not None
-    wrong_player = state.pick_answer(player_id="p1", answer_value=pending.correct_answer)
+    assignee = pending.assigned_player_id or "p1"
+    wrong_assignee = "p2" if assignee == "p1" else "p1"
+    wrong_player = state.pick_answer(player_id=wrong_assignee, answer_value=pending.correct_answer)
     assert "назначен" in (wrong_player.message or "")
-    right_player = state.pick_answer(player_id="p2", answer_value=pending.correct_answer)
+    right_player = state.pick_answer(player_id=assignee, answer_value=pending.correct_answer)
     assert "Верно" in (right_player.message or "")
     assert state.solved_count == 1
     assert state.total_solved == 1
@@ -93,7 +95,20 @@ def test_payload_roundtrip_preserves_queue_state() -> None:
     pending = restored.active_pending_answer()
     assert pending is not None
     assert pending.correct_answer == 3
-    assert pending.assigned_player_id == "p2"
+    assert pending.assigned_player_id in {"p1", "p2"}
+
+
+def test_assignee_rotates_between_online_players() -> None:
+    state = MathTaskEngineState()
+    _start_task(state, task_no=1)
+    rng = random.Random(17)
+    state.pick_digit(player_id="p1", digit=1, rng=rng, online_player_ids=["p1", "p2"])
+    state.pick_digit(player_id="p1", digit=1, rng=rng, online_player_ids=["p1", "p2"])
+    state.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
+    state.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
+    assert len(state.pending_answers) == 2
+    assignments = [item.assigned_player_id for item in state.pending_answers]
+    assert assignments == ["p1", "p2"]
 
 
 def test_task2_accepts_negative_numbers_for_operands() -> None:
