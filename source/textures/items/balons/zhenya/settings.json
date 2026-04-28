@@ -1,0 +1,10 @@
+{
+  "id": "zhenya",
+  "item_id": "ballon_zhenya",
+  "sprite_path": "source/textures/items/ballon/ballon_zhenya.png",
+  "world_size": [78, 110],
+  "icon_size": [30, 42],
+  "chroma_green_delta": 34,
+  "chroma_green_min": 92,
+  "default_graffiti_id": "zhenya"
+}

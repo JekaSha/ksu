@@ -1,0 +1,61 @@
+{
+  "name": "math_ops",
+  "atlas": "math_ops.png",
+  "transparent_background_removed": true,
+  "symbols": [
+    {
+      "id": "plus",
+      "char": "+",
+      "index": 0,
+      "atlas_rect": {
+        "x": 0,
+        "y": 5,
+        "w": 253,
+        "h": 263
+      },
+      "file": "plus.png"
+    },
+    {
+      "id": "minus",
+      "char": "-",
+      "index": 1,
+      "atlas_rect": {
+        "x": 310,
+        "y": 90,
+        "w": 228,
+        "h": 110
+      },
+      "file": "minus.png"
+    },
+    {
+      "id": "multiply",
+      "char": "x",
+      "index": 2,
+      "atlas_rect": {
+        "x": 583,
+        "y": 10,
+        "w": 247,
+        "h": 264
+      },
+      "file": "multiply.png"
+    },
+    {
+      "id": "divide",
+      "char": "÷",
+      "index": 3,
+      "atlas_rect": {
+        "x": 877,
+        "y": 0,
+        "w": 231,
+        "h": 287
+      },
+      "file": "divide.png"
+    }
+  ],
+  "order": [
+    "plus",
+    "minus",
+    "multiply",
+    "divide"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "lisa",
+  "item_id": "ballon_lisa",
+  "sprite_path": "ballon_lisa.png",
+  "world_size": [78, 110],
+  "icon_size": [30, 42],
+  "chroma_green_delta": 999,
+  "chroma_green_min": 999,
+  "default_graffiti_id": "lisa"
+}

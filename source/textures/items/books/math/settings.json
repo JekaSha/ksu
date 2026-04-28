@@ -1,0 +1,14 @@
+{
+  "id": "book_math",
+  "name": "Математика",
+  "kind": "book",
+  "sprite": "book_math.png",
+  "size": {
+    "w": 680,
+    "h": 694
+  },
+  "collider": {
+    "w": 489,
+    "h": 277
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "character": {
+    "id": "ksu",
+    "sheets": {
+      "walk": "walk/ksu.png",
+      "walk_with_bag": "walk/ksu_with_bag.png",
+      "backpack": "backpack/ksu_with_bag.png"
+    },
+    "default_sheet": "walk",
+    "backpack_sheet": "backpack",
+    "skin_pool_subdir": "walk"
+  },
+  "defaults": {
+    "columns": 5,
+    "rows": 8,
+    "detect_content_rect": true,
+    "alignment_mode": "rect_center",
+    "component_pick": "largest",
+    "normalize_canvas": true,
+    "output_size": [172, 125],
+    "body_height": 118,
+    "bbox_padding": 0,
+    "foot_margin": 0,
+    "row_by_direction": {
+      "down": 0,
+      "up": 1,
+      "left": 2,
+      "right": 3,
+      "up_left": 4,
+      "up_right": 5,
+      "down_right": 6,
+      "down_left": 7
+    },
+    "mirror_directions": {
+      "up_right": "up_left"
+    }
+  },
+  "files": {
+    "walk/ksu.png": {},
+    "walk/ksu_with_bag.png": {},
+    "backpack/ksu_with_bag.png": {}
+  }
+}

@@ -1,0 +1,845 @@
+{
+  "world": {
+    "width": 7120,
+    "height": 1950,
+    "spawn": [
+      460,
+      1330
+    ],
+    "show_object_labels": false,
+    "player_stats": {
+      "speed": 1.1,
+      "vision": 1.0,
+      "jump_power": 1.0,
+      "weight_kg": 25.0,
+      "height_cm": 120.0
+    },
+    "fog": {
+      "enabled": false,
+      "near_radius": 255,
+      "mid_radius": 360,
+      "far_radius": 520,
+      "dark_radius": 720,
+      "medium_blur_scale": 0.42,
+      "far_blur_scale": 0.2,
+      "mid_dark_alpha": 34,
+      "far_dark_alpha": 106,
+      "outer_dark_alpha": 224,
+      "transition": 56,
+      "color": [
+        8,
+        10,
+        16
+      ]
+    }
+  },
+  "floors": {
+    "atlas_path": "source/textures/room_data/walls/brown_parquet_tile.png",
+    "columns": 1,
+    "rows": 1,
+    "textures": {
+      "brown_parquet": [
+        0,
+        0
+      ]
+    }
+  },
+  "asset_settings": {
+    "balloons_root": "source/textures/items/balons",
+    "graffity_root": "source/textures/graffity"
+  },
+  "rooms": [
+    {
+      "id": "corridor_1",
+      "x": 140,
+      "y": 140,
+      "width": 1100,
+      "height": 620,
+      "floor_texture": "brown_parquet",
+      "walls_enabled": true,
+      "wall_thickness": 31,
+      "top_wall_height": 316,
+      "top_door_width": 0,
+      "top_door_offset": 0,
+      "left_opening_width": 0,
+      "left_opening_offset": 0,
+      "right_opening_width": 538,
+      "right_opening_offset": 0,
+      "bottom_opening_width": 296,
+      "bottom_opening_offset": 0,
+      "top_left_notch_width": 0,
+      "top_left_notch_height": 0,
+      "top_partition_offset": 0,
+      "top_partition_width": 0
+    },
+    {
+      "id": "corridor_link_1",
+      "x": 1240,
+      "y": 140,
+      "width": 320,
+      "height": 620,
+      "floor_texture": "brown_parquet",
+      "walls_enabled": true,
+      "wall_thickness": 31,
+      "top_wall_height": 316,
+      "top_door_width": 0,
+      "top_door_offset": 0,
+      "left_opening_width": 538,
+      "left_opening_offset": 0,
+      "right_opening_width": 538,
+      "right_opening_offset": 0,
+      "bottom_opening_width": 0,
+      "bottom_opening_offset": 0,
+      "top_left_notch_width": 0,
+      "top_left_notch_height": 0,
+      "top_partition_offset": 0,
+      "top_partition_width": 0
+    },
+    {
+      "id": "corridor_2",
+      "x": 1560,
+      "y": 140,
+      "width": 1100,
+      "height": 620,
+      "floor_texture": "brown_parquet",
+      "walls_enabled": true,
+      "wall_thickness": 31,
+      "top_wall_height": 316,
+      "top_door_width": 0,
+      "top_door_offset": 0,
+      "left_opening_width": 538,
+      "left_opening_offset": 0,
+      "right_opening_width": 538,
+      "right_opening_offset": 0,
+      "bottom_opening_width": 296,
+      "bottom_opening_offset": 0,
+      "top_left_notch_width": 0,
+      "top_left_notch_height": 0,
+      "top_partition_offset": 0,
+      "top_partition_width": 0
+    },
+    {
+      "id": "corridor_link_2",
+      "x": 2660,
+      "y": 140,
+      "width": 320,
+      "height": 620,
+      "floor_texture": "brown_parquet",
+      "walls_enabled": true,
+      "wall_thickness": 31,
+      "top_wall_height": 316,
+      "top_door_width": 0,
+      "top_door_offset": 0,
+      "left_opening_width": 538,
+      "left_opening_offset": 0,
+      "right_opening_width": 538,
+      "right_opening_offset": 0,
+      "bottom_opening_width": 0,
+      "bottom_opening_offset": 0,
+      "top_left_notch_width": 0,
+      "top_left_notch_height": 0,
+      "top_partition_offset": 0,
+      "top_partition_width": 0
+    },
+    {
+      "id": "corridor_3",
+      "x": 2980,
+      "y": 140,
+      "width": 1100,
+      "height": 620,
+      "floor_texture": "brown_parquet",
+      "walls_enabled": true,
+      "wall_thickness": 31,
+      "top_wall_height": 316,
+      "top_door_width": 0,
+      "top_door_offset": 0,
+      "left_opening_width": 538,
+      "left_opening_offset": 0,
+      "right_opening_width": 538,
+      "right_opening_offset": 0,
+      "bottom_opening_width": 296,
+      "bottom_opening_offset": 0,
+      "top_left_notch_width": 0,
+      "top_left_notch_height": 0,
+      "top_partition_offset": 0,
+      "top_partition_width": 0
+    },
+    {
+      "id": "corridor_link_3",
+      "x": 4080,
+      "y": 140,
+      "width": 320,
+      "height": 620,
+      "floor_texture": "brown_parquet",
+      "walls_enabled": true,
+      "wall_thickness": 31,
+      "top_wall_height": 316,
+      "top_door_width": 0,
+      "top_door_offset": 0,
+      "left_opening_width": 538,
+      "left_opening_offset": 0,
+      "right_opening_width": 538,
+      "right_opening_offset": 0,
+      "bottom_opening_width": 0,
+      "bottom_opening_offset": 0,
+      "top_left_notch_width": 0,
+      "top_left_notch_height": 0,
+      "top_partition_offset": 0,
+      "top_partition_width": 0
+    },
+    {
+      "id": "corridor_4",
+      "x": 4400,
+      "y": 140,
+      "width": 1100,
+      "height": 620,
+      "floor_texture": "brown_parquet",
+      "walls_enabled": true,
+      "wall_thickness": 31,
+      "top_wall_height": 316,
+      "top_door_width": 0,
+      "top_door_offset": 0,
+      "left_opening_width": 538,
+      "left_opening_offset": 0,
+      "right_opening_width": 538,
+      "right_opening_offset": 0,
+      "bottom_opening_width": 296,
+      "bottom_opening_offset": 0,
+      "top_left_notch_width": 0,
+      "top_left_notch_height": 0,
+      "top_partition_offset": 0,
+      "top_partition_width": 0
+    },
+    {
+      "id": "corridor_link_4",
+      "x": 5500,
+      "y": 140,
+      "width": 320,
+      "height": 620,
+      "floor_texture": "brown_parquet",
+      "walls_enabled": true,
+      "wall_thickness": 31,
+      "top_wall_height": 316,
+      "top_door_width": 0,
+      "top_door_offset": 0,
+      "left_opening_width": 538,
+      "left_opening_offset": 0,
+      "right_opening_width": 538,
+      "right_opening_offset": 0,
+      "bottom_opening_width": 0,
+      "bottom_opening_offset": 0,
+      "top_left_notch_width": 0,
+      "top_left_notch_height": 0,
+      "top_partition_offset": 0,
+      "top_partition_width": 0
+    },
+    {
+      "id": "corridor_5",
+      "x": 5820,
+      "y": 140,
+      "width": 1100,
+      "height": 620,
+      "floor_texture": "brown_parquet",
+      "walls_enabled": true,
+      "wall_thickness": 31,
+      "top_wall_height": 316,
+      "top_door_width": 0,
+      "top_door_offset": 0,
+      "left_opening_width": 538,
+      "left_opening_offset": 0,
+      "right_opening_width": 0,
+      "right_opening_offset": 0,
+      "bottom_opening_width": 296,
+      "bottom_opening_offset": 0,
+      "top_left_notch_width": 0,
+      "top_left_notch_height": 0,
+      "top_partition_offset": 0,
+      "top_partition_width": 0
+    },
+    {
+      "id": "room_1",
+      "x": 140,
+      "y": 760,
+      "width": 1100,
+      "height": 1000,
+      "floor_texture": "brown_parquet",
+      "walls_enabled": true,
+      "wall_thickness": 31,
+      "top_wall_height": 316,
+      "top_door_width": 296,
+      "top_door_offset": 0,
+      "left_opening_width": 0,
+      "left_opening_offset": 0,
+      "right_opening_width": 0,
+      "right_opening_offset": 0,
+      "bottom_opening_width": 0,
+      "bottom_opening_offset": 0,
+      "top_left_notch_width": 0,
+      "top_left_notch_height": 0,
+      "top_partition_offset": 0,
+      "top_partition_width": 0,
+      "top_opening_layered": true,
+      "top_opening_floor_offset": 95,
+      "top_opening_floor_height": 222,
+      "top_opening_pass_width": 188,
+      "top_opening_pass_offset": 0,
+      "top_opening_hard_height": 316,
+      "top_opening_occlude_depth": 70
+    },
+    {
+      "id": "room_2",
+      "x": 1560,
+      "y": 760,
+      "width": 1100,
+      "height": 1000,
+      "floor_texture": "brown_parquet",
+      "walls_enabled": true,
+      "wall_thickness": 31,
+      "top_wall_height": 316,
+      "top_door_width": 296,
+      "top_door_offset": 0,
+      "left_opening_width": 0,
+      "left_opening_offset": 0,
+      "right_opening_width": 0,
+      "right_opening_offset": 0,
+      "bottom_opening_width": 0,
+      "bottom_opening_offset": 0,
+      "top_left_notch_width": 0,
+      "top_left_notch_height": 0,
+      "top_partition_offset": 0,
+      "top_partition_width": 0,
+      "top_opening_layered": true,
+      "top_opening_floor_offset": 95,
+      "top_opening_floor_height": 222,
+      "top_opening_pass_width": 188,
+      "top_opening_pass_offset": 0,
+      "top_opening_hard_height": 316,
+      "top_opening_occlude_depth": 70
+    },
+    {
+      "id": "room_3",
+      "x": 2980,
+      "y": 760,
+      "width": 1100,
+      "height": 1000,
+      "floor_texture": "brown_parquet",
+      "walls_enabled": true,
+      "wall_thickness": 31,
+      "top_wall_height": 316,
+      "top_door_width": 296,
+      "top_door_offset": 0,
+      "left_opening_width": 0,
+      "left_opening_offset": 0,
+      "right_opening_width": 0,
+      "right_opening_offset": 0,
+      "bottom_opening_width": 0,
+      "bottom_opening_offset": 0,
+      "top_left_notch_width": 0,
+      "top_left_notch_height": 0,
+      "top_partition_offset": 0,
+      "top_partition_width": 0,
+      "top_opening_layered": true,
+      "top_opening_floor_offset": 95,
+      "top_opening_floor_height": 222,
+      "top_opening_pass_width": 188,
+      "top_opening_pass_offset": 0,
+      "top_opening_hard_height": 316,
+      "top_opening_occlude_depth": 70
+    },
+    {
+      "id": "room_4",
+      "x": 4400,
+      "y": 760,
+      "width": 1100,
+      "height": 1000,
+      "floor_texture": "brown_parquet",
+      "walls_enabled": true,
+      "wall_thickness": 31,
+      "top_wall_height": 316,
+      "top_door_width": 296,
+      "top_door_offset": 0,
+      "left_opening_width": 0,
+      "left_opening_offset": 0,
+      "right_opening_width": 0,
+      "right_opening_offset": 0,
+      "bottom_opening_width": 0,
+      "bottom_opening_offset": 0,
+      "top_left_notch_width": 0,
+      "top_left_notch_height": 0,
+      "top_partition_offset": 0,
+      "top_partition_width": 0,
+      "top_opening_layered": true,
+      "top_opening_floor_offset": 95,
+      "top_opening_floor_height": 222,
+      "top_opening_pass_width": 188,
+      "top_opening_pass_offset": 0,
+      "top_opening_hard_height": 316,
+      "top_opening_occlude_depth": 70
+    },
+    {
+      "id": "room_5",
+      "x": 5820,
+      "y": 760,
+      "width": 1100,
+      "height": 1000,
+      "floor_texture": "brown_parquet",
+      "walls_enabled": true,
+      "wall_thickness": 31,
+      "top_wall_height": 316,
+      "top_door_width": 296,
+      "top_door_offset": 0,
+      "left_opening_width": 0,
+      "left_opening_offset": 0,
+      "right_opening_width": 0,
+      "right_opening_offset": 0,
+      "bottom_opening_width": 0,
+      "bottom_opening_offset": 0,
+      "top_left_notch_width": 0,
+      "top_left_notch_height": 0,
+      "top_partition_offset": 0,
+      "top_partition_width": 0,
+      "top_opening_layered": true,
+      "top_opening_floor_offset": 95,
+      "top_opening_floor_height": 222,
+      "top_opening_pass_width": 188,
+      "top_opening_pass_offset": 0,
+      "top_opening_hard_height": 316,
+      "top_opening_occlude_depth": 70
+    }
+  ],
+  "object_kinds": {
+    "backpack": {
+      "blocking": false,
+      "cycle_sprites": true,
+      "occlude_top": false,
+      "pickup_item_id": "backpack",
+      "weight_kg": 4.0
+    },
+    "sofa": {
+      "blocking": true,
+      "collider": [
+        128,
+        72
+      ],
+      "cycle_sprites": true,
+      "occlude_top": true,
+      "occlude_split": 0.56,
+      "jump_platform": [
+        108,
+        44,
+        -24
+      ],
+      "weight_kg": 70.0
+    },
+    "plant": {
+      "blocking": true,
+      "collider": [
+        56,
+        40
+      ],
+      "cycle_sprites": false,
+      "occlude_top": true,
+      "occlude_split": 0.62,
+      "weight_kg": 12.0
+    },
+    "key": {
+      "blocking": false,
+      "cycle_sprites": true,
+      "occlude_top": false,
+      "pickup_item_id": "key",
+      "weight_kg": 0.3
+    },
+    "ballon": {
+      "blocking": false,
+      "cycle_sprites": false,
+      "occlude_top": false,
+      "pickup_item_id": "ballon",
+      "weight_kg": 1.2
+    },
+    "door": {
+      "blocking": true,
+      "height": 316,
+      "spray_zoom_coef": 1.0,
+      "cycle_sprites": false,
+      "occlude_top": true,
+      "transitions": {
+        "unlock": {
+          "state": 1,
+          "blocking": false
+        }
+      },
+      "weight_kg": 120.0,
+      "occlude_split": 0.74
+    }
+  },
+  "objects": [
+    {
+      "id": "door_room_1",
+      "kind": "door",
+      "x": 690,
+      "y": 918,
+      "state": 0,
+      "lock_key_sets": [
+        [
+          "key_yellow"
+        ]
+      ],
+      "lock_marker_rgb": [
+        226,
+        188,
+        66
+      ],
+      "lock_marker_text": "Y"
+    },
+    {
+      "id": "sofa_room_1",
+      "kind": "sofa",
+      "x": 690,
+      "y": 1540,
+      "state": 0
+    },
+    {
+      "id": "plant_r1_1",
+      "kind": "plant",
+      "x": 310,
+      "y": 1180,
+      "state": 3,
+      "weight_kg": 12.0
+    },
+    {
+      "id": "plant_r1_2",
+      "kind": "plant",
+      "x": 1000,
+      "y": 1210,
+      "state": 4,
+      "weight_kg": 13.0
+    },
+    {
+      "id": "plant_r1_3",
+      "kind": "plant",
+      "x": 580,
+      "y": 1460,
+      "state": 5,
+      "weight_kg": 10.0
+    },
+    {
+      "id": "door_room_2",
+      "kind": "door",
+      "x": 2110,
+      "y": 918,
+      "state": 0,
+      "lock_key_sets": [
+        [
+          "key_blue"
+        ]
+      ],
+      "lock_marker_rgb": [
+        84,
+        140,
+        255
+      ],
+      "lock_marker_text": "B"
+    },
+    {
+      "id": "sofa_room_2",
+      "kind": "sofa",
+      "x": 2110,
+      "y": 1540,
+      "state": 1
+    },
+    {
+      "id": "plant_r2_1",
+      "kind": "plant",
+      "x": 1730,
+      "y": 1180,
+      "state": 5,
+      "weight_kg": 13.0
+    },
+    {
+      "id": "plant_r2_2",
+      "kind": "plant",
+      "x": 2420,
+      "y": 1210,
+      "state": 6,
+      "weight_kg": 10.0
+    },
+    {
+      "id": "plant_r2_3",
+      "kind": "plant",
+      "x": 2000,
+      "y": 1460,
+      "state": 0,
+      "weight_kg": 11.0
+    },
+    {
+      "id": "door_room_3",
+      "kind": "door",
+      "x": 3530,
+      "y": 918,
+      "state": 0,
+      "lock_key_sets": [
+        [
+          "key_green"
+        ]
+      ],
+      "lock_marker_rgb": [
+        72,
+        186,
+        92
+      ],
+      "lock_marker_text": "G"
+    },
+    {
+      "id": "sofa_room_3",
+      "kind": "sofa",
+      "x": 3530,
+      "y": 1540,
+      "state": 2
+    },
+    {
+      "id": "plant_r3_1",
+      "kind": "plant",
+      "x": 3150,
+      "y": 1180,
+      "state": 0,
+      "weight_kg": 10.0
+    },
+    {
+      "id": "plant_r3_2",
+      "kind": "plant",
+      "x": 3840,
+      "y": 1210,
+      "state": 1,
+      "weight_kg": 11.0
+    },
+    {
+      "id": "plant_r3_3",
+      "kind": "plant",
+      "x": 3420,
+      "y": 1460,
+      "state": 2,
+      "weight_kg": 12.0
+    },
+    {
+      "id": "door_room_4",
+      "kind": "door",
+      "x": 4950,
+      "y": 918,
+      "state": 0,
+      "lock_key_sets": [
+        [
+          "key_red"
+        ]
+      ],
+      "lock_marker_rgb": [
+        220,
+        64,
+        62
+      ],
+      "lock_marker_text": "R"
+    },
+    {
+      "id": "sofa_room_4",
+      "kind": "sofa",
+      "x": 4950,
+      "y": 1540,
+      "state": 3
+    },
+    {
+      "id": "plant_r4_1",
+      "kind": "plant",
+      "x": 4570,
+      "y": 1180,
+      "state": 2,
+      "weight_kg": 11.0
+    },
+    {
+      "id": "plant_r4_2",
+      "kind": "plant",
+      "x": 5260,
+      "y": 1210,
+      "state": 3,
+      "weight_kg": 12.0
+    },
+    {
+      "id": "plant_r4_3",
+      "kind": "plant",
+      "x": 4840,
+      "y": 1460,
+      "state": 4,
+      "weight_kg": 13.0
+    },
+    {
+      "id": "door_room_5",
+      "kind": "door",
+      "x": 6370,
+      "y": 918,
+      "state": 0,
+      "lock_key_sets": [
+        [
+          "key_purple"
+        ]
+      ],
+      "lock_marker_rgb": [
+        170,
+        98,
+        228
+      ],
+      "lock_marker_text": "P"
+    },
+    {
+      "id": "sofa_room_5",
+      "kind": "sofa",
+      "x": 6370,
+      "y": 1540,
+      "state": 0
+    },
+    {
+      "id": "plant_r5_1",
+      "kind": "plant",
+      "x": 5990,
+      "y": 1180,
+      "state": 4,
+      "weight_kg": 12.0
+    },
+    {
+      "id": "plant_r5_2",
+      "kind": "plant",
+      "x": 6680,
+      "y": 1210,
+      "state": 5,
+      "weight_kg": 13.0
+    },
+    {
+      "id": "plant_r5_3",
+      "kind": "plant",
+      "x": 6260,
+      "y": 1460,
+      "state": 6,
+      "weight_kg": 10.0
+    },
+    {
+      "id": "backpack_main",
+      "kind": "backpack",
+      "x": 400,
+      "y": 1510,
+      "state": 0
+    },
+    {
+      "id": "ballon_main",
+      "kind": "ballon",
+      "x": 520,
+      "y": 1512,
+      "state": 0,
+      "balloon_id": "default"
+    },
+    {
+      "id": "ballon_zhenya_main",
+      "kind": "ballon",
+      "x": 620,
+      "y": 1512,
+      "state": 0,
+      "balloon_id": "zhenya",
+      "pickup_item_id": "ballon_zhenya"
+    },
+    {
+      "id": "key_yellow_obj",
+      "kind": "key",
+      "x": 440,
+      "y": 1320,
+      "state": 0,
+      "pickup_item_id": "key_yellow",
+      "tint_rgb": [
+        226,
+        188,
+        66
+      ],
+      "tint_strength": 1.0
+    },
+    {
+      "id": "key_blue_obj",
+      "kind": "key",
+      "x": 1040,
+      "y": 520,
+      "state": 0,
+      "pickup_item_id": "key_blue",
+      "tint_rgb": [
+        84,
+        140,
+        255
+      ],
+      "tint_strength": 1.0
+    },
+    {
+      "id": "key_green_obj",
+      "kind": "key",
+      "x": 1860,
+      "y": 1320,
+      "state": 0,
+      "pickup_item_id": "key_green",
+      "tint_rgb": [
+        72,
+        186,
+        92
+      ],
+      "tint_strength": 1.0
+    },
+    {
+      "id": "key_red_obj",
+      "kind": "key",
+      "x": 3280,
+      "y": 1320,
+      "state": 0,
+      "pickup_item_id": "key_red",
+      "tint_rgb": [
+        220,
+        64,
+        62
+      ],
+      "tint_strength": 1.0
+    },
+    {
+      "id": "key_purple_obj",
+      "kind": "key",
+      "x": 4700,
+      "y": 1320,
+      "state": 0,
+      "pickup_item_id": "key_purple",
+      "tint_rgb": [
+        170,
+        98,
+        228
+      ],
+      "tint_strength": 1.0
+    },
+    {
+      "id": "ballon_lisa_main",
+      "kind": "ballon",
+      "x": 500,
+      "y": 1400,
+      "state": 0,
+      "balloon_id": "lisa",
+      "pickup_item_id": "ballon_lisa"
+    }
+  ],
+  "item_weights": {
+    "backpack": 4.0,
+    "ballon": 1.2,
+    "ballon_zhenya": 1.2,
+    "key": 0.3,
+    "key_yellow": 0.3,
+    "key_blue": 0.3,
+    "key_green": 0.3,
+    "key_red": 0.3,
+    "key_purple": 0.3,
+    "ballon_lisa": 1.2
+  },
+  "item_room_use_limits": {
+    "ballon": 1
+  },
+  "balloon_graffiti_profiles": {
+    "ballon": "default",
+    "ballon_zhenya": "zhenya",
+    "ballon_lisa": "lisa"
+  }
+}

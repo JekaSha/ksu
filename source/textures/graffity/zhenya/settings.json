@@ -1,0 +1,11 @@
+{
+  "id": "zhenya",
+  "sheet_paths": [
+    "source/textures/items/ballon/spray_reveal_sheet_zhenya.png"
+  ],
+  "render": {
+    "preserve_aspect": true,
+    "char_width_mult": 2.8,
+    "size_mul": 1.0
+  }
+}

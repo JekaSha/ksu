@@ -1,0 +1,10 @@
+{
+  "id": "character_id",
+  "sheets": {
+    "walk": "walk/character_walk.png",
+    "backpack": "backpack/character_walk_with_backpack.png"
+  },
+  "default_sheet": "walk",
+  "backpack_sheet": "backpack",
+  "skin_pool_subdir": "walk"
+}

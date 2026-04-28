@@ -1,0 +1,34 @@
+{
+  "defaults": {
+    "columns": 5,
+    "rows": 8,
+    "cell_size": [307, 128],
+    "offset": [0, 0],
+    "spacing": [9, 0],
+    "detect_content_rect": false,
+    "alignment_mode": "rect_center",
+    "frame_columns": [1, 2, 3],
+    "component_pick": "none",
+    "normalize_canvas": true,
+    "output_size": [100, 120],
+    "bbox_padding": 0,
+    "body_height": 104,
+    "foot_margin": 2,
+    "step_x": 120,
+    "step_y": 120,
+    "row_by_direction": {
+      "down": 0,
+      "up": 1,
+      "left": 2,
+      "right": 3,
+      "up_left": 4,
+      "up_right": 5,
+      "down_right": 6,
+      "down_left": 7
+    }
+  },
+  "files": {
+    "walk/character_walk.png": {},
+    "backpack/character_walk_with_backpack.png": {}
+  }
+}

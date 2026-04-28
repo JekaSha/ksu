@@ -3,6 +3,7 @@ from __future__ import annotations
 import pygame
 
 from ksusha_game.config import GameConfig
+from ksusha_game.domain.direction import Direction
 from ksusha_game.domain.player import Player
 
 
@@ -12,7 +13,8 @@ class GameRenderer:
 
     def render(self, screen: pygame.Surface, player: Player, frame: pygame.Surface, bob: float) -> None:
         screen.fill(self._config.window.background_color)
-        direction = 1 if player.facing.value == "right" else -1 if player.facing.value == "left" else 1
+        left_dirs = {Direction.LEFT, Direction.UP_LEFT, Direction.DOWN_LEFT}
+        direction = -1 if player.facing in left_dirs else 1
         self._draw_shadow(
             screen=screen,
             x_center=player.x + frame.get_width() / 2,

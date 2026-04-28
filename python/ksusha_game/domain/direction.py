@@ -8,3 +8,7 @@ class Direction(str, Enum):
     UP = "up"
     LEFT = "left"
     RIGHT = "right"
+    UP_RIGHT = "up_right"
+    UP_LEFT = "up_left"
+    DOWN_LEFT = "down_left"
+    DOWN_RIGHT = "down_right"

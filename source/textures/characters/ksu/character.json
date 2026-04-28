@@ -1,0 +1,11 @@
+{
+  "id": "ksu",
+  "sheets": {
+    "walk": "walk/ksu.png",
+    "walk_with_bag": "walk/ksu_with_bag.png",
+    "backpack": "backpack/ksu_with_bag.png"
+  },
+  "default_sheet": "walk",
+  "backpack_sheet": "backpack",
+  "skin_pool_subdir": "walk"
+}
