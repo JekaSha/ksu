@@ -132,25 +132,27 @@ class TestRemovePlayer:
     def test_remove_player_releases_math_assignments(self, session, stats):
         add(session, "p1", stats)
         add(session, "p2", stats)
+        add(session, "p3", stats)
         session._math_tasks.unlock_math_quest()
         session._math_tasks.select_task(player_id="p1", task_no=1, now_ts=1.0, team_id="A")
         rng = random.Random(123)
-        session._math_tasks.pick_digit(player_id="p1", digit=4, rng=rng, online_player_ids=["p1", "p2"])
-        session._math_tasks.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
+        session._math_tasks.pick_digit(player_id="p1", digit=4, rng=rng, online_player_ids=["p1", "p2", "p3"])
+        session._math_tasks.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2", "p3"])
         session._math_tasks.reassign_round_stage(
             stage="pick_first",
-            assignee_player_id="p2",
+            assignee_player_id="p3",
             requested_by_player_id="p1",
-            online_player_ids=["p1", "p2"],
+            online_player_ids=["p1", "p2", "p3"],
         )
         pending = session._math_tasks.active_pending_answer()
         assert pending is not None
         assert pending.assigned_player_id == "p2"
+        session.remove_player(player_id="p3")
+        assert session._math_tasks.current_round is not None
+        assert session._math_tasks.current_round.assignments["pick_first"] is None
         session.remove_player(player_id="p2")
         assert pending.assigned_player_id is None
         assert pending.accepted is True
-        assert session._math_tasks.current_round is not None
-        assert session._math_tasks.current_round.assignments["pick_first"] is None
 
     def test_remove_player_reelects_dispatcher_from_same_team(self, session, stats):
         add(session, "p1", stats)

@@ -576,7 +576,14 @@ class GameSession:
                             continue
                         continue
 
-                    if show_task_menu:
+                    if show_task_menu and event.key not in {
+                        pygame.K_e,
+                        pygame.K_r,
+                        pygame.K_g,
+                        pygame.K_DELETE,
+                        pygame.K_BACKSPACE,
+                        pygame.K_SPACE,
+                    }:
                         has_math_quest = self._math_tasks.has_math_quest
                         dispatcher_team = self._math_tasks.dispatcher_team_id or self._player_team(self._LOCAL_PLAYER_ID)
                         inbox_rows = self._build_math_inbox_rows(player_id=self._LOCAL_PLAYER_ID)

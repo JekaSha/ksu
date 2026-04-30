@@ -148,8 +148,15 @@ def test_can_reassign_pending_answer_to_another_online_player() -> None:
     state = MathTaskEngineState()
     _start_task(state, task_no=1)
     rng = random.Random(21)
-    state.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
-    state.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
+    state.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2", "p3"])
+    state.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2", "p3"])
+    stage_msg = state.reassign_round_stage(
+        stage="pick_first",
+        assignee_player_id="p3",
+        requested_by_player_id="p1",
+        online_player_ids=["p1", "p2", "p3"],
+    )
+    assert "назначен" in stage_msg
     pending = state.active_pending_answer()
     assert pending is not None
     assert pending.assigned_player_id == "p2"
@@ -157,11 +164,29 @@ def test_can_reassign_pending_answer_to_another_online_player() -> None:
         answer_id=pending.answer_id,
         assignee_player_id="p1",
         requested_by_player_id="p1",
-        online_player_ids=["p1", "p2"],
+        online_player_ids=["p1", "p2", "p3"],
     )
     assert "назначен игроку p1" in msg
     assert pending.assigned_player_id == "p1"
     assert pending.accepted is True
+
+
+def test_cannot_reassign_pending_answer_to_busy_player() -> None:
+    state = MathTaskEngineState()
+    _start_task(state, task_no=1)
+    rng = random.Random(24)
+    state.pick_digit(player_id="p1", digit=3, rng=rng, online_player_ids=["p1", "p2"])
+    state.pick_digit(player_id="p1", digit=4, rng=rng, online_player_ids=["p1", "p2"])
+    pending = state.active_pending_answer()
+    assert pending is not None
+    msg = state.reassign_pending_answer(
+        answer_id=pending.answer_id,
+        assignee_player_id="p1",
+        requested_by_player_id="p1",
+        online_player_ids=["p1", "p2"],
+    )
+    assert "занят" in msg.lower()
+    assert pending.assigned_player_id == "p2"
 
 
 def test_non_dispatcher_cannot_reassign_pending_answer() -> None:
@@ -241,6 +266,32 @@ def test_next_round_assignments_return_to_producer() -> None:
     assert state.current_round.assignments["pick_second"] == "p1"
 
 
+def test_when_both_players_have_pending_answers_next_stage_is_unassigned() -> None:
+    state = MathTaskEngineState()
+    _start_task(state, task_no=1)
+    rng = random.Random(51)
+    state.pick_digit(player_id="p1", digit=1, rng=rng, online_player_ids=["p1", "p2"])
+    state.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
+    state.pick_digit(player_id="p1", digit=4, rng=rng, online_player_ids=["p1", "p2"])
+    out2 = state.pick_digit(player_id="p1", digit=1, rng=rng, online_player_ids=["p1", "p2"])
+    assert "ответ у тебя" in (out2.message or "").lower()
+    assert state.pending_count() == 2
+    assert state.current_round is not None
+    assert state.current_round.assignments["pick_first"] is None
+    assert state.current_round.assignments["pick_second"] is None
+
+
+def test_player_with_pending_answer_cannot_pick_next_digit() -> None:
+    state = MathTaskEngineState()
+    _start_task(state, task_no=1)
+    rng = random.Random(77)
+    state.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
+    out = state.pick_digit(player_id="p1", digit=3, rng=rng, online_player_ids=["p1", "p2"])
+    assert "делегирован" in (out.message or "").lower()
+    blocked = state.pick_digit(player_id="p2", digit=4, rng=rng, online_player_ids=["p1", "p2"])
+    assert "сначала реши" in (blocked.message or "").lower()
+
+
 def test_can_reassign_round_stage() -> None:
     state = MathTaskEngineState()
     _start_task(state, task_no=1)
@@ -312,24 +363,31 @@ def test_player_leave_releases_stage_and_pending_answer_assignment() -> None:
     state = MathTaskEngineState()
     _start_task(state, task_no=1)
     rng = random.Random(99)
-    state.pick_digit(player_id="p1", digit=4, rng=rng, online_player_ids=["p1", "p2"])
-    state.pick_digit(player_id="p1", digit=1, rng=rng, online_player_ids=["p1", "p2"])
-    state.reassign_round_stage(
+    state.pick_digit(player_id="p1", digit=4, rng=rng, online_player_ids=["p1", "p2", "p3"])
+    state.pick_digit(player_id="p1", digit=1, rng=rng, online_player_ids=["p1", "p2", "p3"])
+    stage_msg = state.reassign_round_stage(
         stage="pick_first",
-        assignee_player_id="p2",
+        assignee_player_id="p3",
         requested_by_player_id="p1",
-        online_player_ids=["p1", "p2"],
+        online_player_ids=["p1", "p2", "p3"],
     )
+    assert "назначен" in stage_msg
     pending = state.active_pending_answer()
     assert pending is not None
+    assert pending.assigned_player_id == "p2"
+    state.on_player_left(
+        player_id="p3",
+        online_player_ids=["p1"],
+        online_team_player_ids=["p1"],
+    )
+    assert state.current_round is not None
+    assert state.current_round.assignments["pick_first"] is None
     assert pending.assigned_player_id == "p2"
     state.on_player_left(
         player_id="p2",
         online_player_ids=["p1"],
         online_team_player_ids=["p1"],
     )
-    assert state.current_round is not None
-    assert state.current_round.assignments["pick_first"] is None
     assert pending.assigned_player_id is None
     assert pending.accepted is True
     solved = state.pick_answer(player_id="p1", answer_value=pending.correct_answer)
