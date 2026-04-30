@@ -499,13 +499,9 @@ class GameSession:
                         if show_server_list:
                             show_server_list = False
                             continue
-                        if show_task_menu:
-                            show_task_menu = False
-                            task_menu_section = "quests"
-                            task_menu_assignment_targets.clear()
+                        if not show_task_menu:
+                            self._set_message("Esc: меню закрыто")
                             continue
-                        self._set_message("Esc: меню закрыто")
-                        continue
                     if show_server_list:
                         if reconnect_candidate is not None:
                             if event.key in {pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_y}:
@@ -567,6 +563,17 @@ class GameSession:
                         has_math_quest = self._math_tasks.has_math_quest
                         dispatcher_team = self._math_tasks.dispatcher_team_id or self._player_team(self._LOCAL_PLAYER_ID)
                         inbox_rows = self._build_math_inbox_rows(player_id=self._LOCAL_PLAYER_ID)
+                        if event.key == pygame.K_ESCAPE:
+                            if task_menu_section == "quests":
+                                show_task_menu = False
+                                task_menu_section = "quests"
+                                task_menu_assignment_targets.clear()
+                            elif task_menu_section == "tasks":
+                                task_menu_section = "quests"
+                                task_menu_assignment_targets.clear()
+                            else:
+                                task_menu_section = "tasks"
+                            continue
                         if event.key == pygame.K_1:
                             task_menu_section = "quests"
                             continue
@@ -594,11 +601,6 @@ class GameSession:
                                 task_menu_selected_quest = min(0, task_menu_selected_quest + 1)
                                 continue
                             if event.key == pygame.K_q:
-                                show_task_menu = False
-                                task_menu_section = "quests"
-                                task_menu_assignment_targets.clear()
-                                continue
-                            if event.key in {pygame.K_f, pygame.K_d, pygame.K_RIGHT, pygame.K_RETURN, pygame.K_KP_ENTER}:
                                 if not has_math_quest:
                                     self._set_message("Сначала найди книгу математики")
                                 else:
@@ -617,10 +619,6 @@ class GameSession:
                             if event.key == pygame.K_d:
                                 task_menu_selected_task = (task_menu_selected_task + 1) % 9
                                 continue
-                            if event.key == pygame.K_q:
-                                task_menu_section = "quests"
-                                task_menu_assignment_targets.clear()
-                                continue
                             if event.key == pygame.K_r:
                                 if not self._math_tasks.active:
                                     self._set_message("Сначала запусти задачу 1 или 2")
@@ -631,7 +629,7 @@ class GameSession:
                                     task_menu_selected_assignment = 0
                                     task_menu_assignment_targets.clear()
                                 continue
-                            if event.key in {pygame.K_f, pygame.K_RETURN, pygame.K_KP_ENTER}:
+                            if event.key == pygame.K_q:
                                 if not has_math_quest:
                                     self._set_message("Сначала найди книгу математики")
                                     continue
@@ -649,8 +647,6 @@ class GameSession:
                         elif task_menu_section == "inbox":
                             if not inbox_rows:
                                 if event.key == pygame.K_q:
-                                    task_menu_section = "tasks"
-                                else:
                                     self._set_message("Для тебя пока нет новых задач")
                                 continue
                             task_menu_selected_inbox = max(0, min(task_menu_selected_inbox, len(inbox_rows) - 1))
@@ -661,9 +657,6 @@ class GameSession:
                                 task_menu_selected_inbox = (task_menu_selected_inbox + 1) % len(inbox_rows)
                                 continue
                             if event.key == pygame.K_q:
-                                task_menu_section = "tasks"
-                                continue
-                            if event.key in {pygame.K_f, pygame.K_RETURN, pygame.K_KP_ENTER}:
                                 row_key, row_title, _assigned_by, _details = inbox_rows[task_menu_selected_inbox]
                                 if row_key.startswith("stage:"):
                                     stage_key = row_key.split(":", 1)[1]
@@ -704,8 +697,6 @@ class GameSession:
                             }
                             if not assignment_rows:
                                 if event.key == pygame.K_q:
-                                    task_menu_section = "tasks"
-                                else:
                                     self._set_message("Нет задач для делегирования")
                                 continue
                             dispatcher_team = self._math_tasks.dispatcher_team_id or self._player_team(self._LOCAL_PLAYER_ID)
@@ -723,9 +714,6 @@ class GameSession:
                                 continue
                             if event.key == pygame.K_s:
                                 task_menu_selected_assignment = (task_menu_selected_assignment + 1) % len(assignment_rows)
-                                continue
-                            if event.key == pygame.K_q:
-                                task_menu_section = "tasks"
                                 continue
                             selected_row_key, selected_row_label = assignment_rows[task_menu_selected_assignment]
                             if event.key in {pygame.K_a, pygame.K_d}:
@@ -750,9 +738,12 @@ class GameSession:
                                 base_idx = team_player_ids.index(preview_assignee)
                                 next_assignee = team_player_ids[(base_idx + shift) % len(team_player_ids)]
                                 task_menu_assignment_targets[selected_row_key] = next_assignee
-                                self._set_message(f"{selected_row_label} -> {self._player_caption(next_assignee)}")
+                                self._set_message(
+                                    f"{selected_row_label} -> {self._player_caption(next_assignee)}",
+                                    duration_sec=3.2,
+                                )
                                 continue
-                            if event.key in {pygame.K_f, pygame.K_RETURN, pygame.K_KP_ENTER}:
+                            if event.key == pygame.K_q:
                                 target_assignee = task_menu_assignment_targets.get(selected_row_key)
                                 if not target_assignee or target_assignee not in team_player_ids:
                                     target_assignee = team_player_ids[0]
@@ -778,7 +769,10 @@ class GameSession:
                                         action=action,
                                         issued_at=now,
                                 )
-                                self._set_message(f"{selected_row_label} -> {self._player_caption(target_assignee)}")
+                                self._set_message(
+                                    f"{selected_row_label} -> {self._player_caption(target_assignee)}",
+                                    duration_sec=3.2,
+                                )
                                 continue
 
                     for controller in input_controllers.values():
@@ -1125,25 +1119,25 @@ class GameSession:
                             f"{mark}{conn} {entry.host_name} | {entry.player_name} | {entry.level_name} | {entry.players}/{entry.max_players}"
                         )
             if show_task_menu:
-                task_panel_lines = ["TASKS DISPATCHER (TAB close)"]
+                task_panel_lines = ["TASKS DISPATCHER (Esc back)"]
                 if task_menu_section == "quests":
                     task_panel_lines.append("Разделы (1/2/3/4):")
                     if self._math_tasks.has_math_quest:
                         mark = ">" if task_menu_selected_quest == 0 else " "
                         task_panel_lines.append(f"{mark} Математика")
-                        task_panel_lines.append("F/D: открыть")
+                        task_panel_lines.append("Q: открыть")
                     else:
                         task_panel_lines.append("Квестов пока нет")
                         task_panel_lines.append("Найди книгу математики")
                     task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
-                    task_panel_lines.append("W/S: выбор | Q: закрыть")
+                    task_panel_lines.append("W/S: выбор | Q: подтвердить | Esc: назад")
                 elif task_menu_section == "tasks":
                     task_panel_lines.append("Математика:")
                     for idx in range(9):
                         mark = ">" if idx == task_menu_selected_task else " "
                         task_panel_lines.append(f"{mark} Задача {idx + 1}")
                     task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
-                    task_panel_lines.append("W/S/A/D: выбор | F: запуск | R: диспетчер | Q: назад")
+                    task_panel_lines.append("W/S/A/D: выбор | Q: запуск | R: диспетчер | Esc: назад")
                     if task_menu_selected_task == 0:
                         task_panel_lines.append("Описание: сложение, 10 итераций, очередь ответов")
                     elif task_menu_selected_task == 1:
@@ -1171,7 +1165,7 @@ class GameSession:
                         selected_details = selected_row[3]
                         if selected_details:
                             task_panel_lines.append(f"Описание: {selected_details}")
-                    task_panel_lines.append("W/S: выбор | F: принять | Q: назад")
+                    task_panel_lines.append("W/S: выбор | Q: принять | Esc: назад")
                 else:
                     task_panel_lines.append("TASK ASSIGN (этапы/ответы):")
                     round_state = self._math_tasks.current_round
@@ -1197,23 +1191,37 @@ class GameSession:
                         ]
                         for idx, (row_key, row_label) in enumerate(assignment_rows[:10]):
                             mark = ">" if idx == task_menu_selected_assignment else " "
-                            selected_assignee = task_menu_assignment_targets.get(row_key)
-                            if not selected_assignee or selected_assignee not in self._player_states:
-                                if row_key.startswith("stage:") and round_state is not None:
-                                    stage_key = row_key.split(":", 1)[1]
-                                    selected_assignee = round_state.assignments.get(stage_key)
-                                elif row_key.startswith("answer:"):
-                                    try:
-                                        answer_id = int(row_key.split(":", 1)[1])
-                                    except ValueError:
-                                        answer_id = 0
-                                    pending_item = next((item for item in pending_items if item.answer_id == answer_id), None)
-                                    selected_assignee = pending_item.assigned_player_id if pending_item is not None else None
-                            if not selected_assignee or selected_assignee not in self._player_states:
-                                selected_assignee = team_player_ids[0] if team_player_ids else self._LOCAL_PLAYER_ID
-                            task_panel_lines.append(f"{mark} {row_label} -> {self._player_caption(selected_assignee)}")
+                            current_assignee: str | None = None
+                            current_accepted = True
+                            if row_key.startswith("stage:") and round_state is not None:
+                                stage_key = row_key.split(":", 1)[1]
+                                current_assignee = round_state.assignments.get(stage_key)
+                                current_accepted = bool(round_state.assignment_accepted.get(stage_key, True))
+                            elif row_key.startswith("answer:"):
+                                try:
+                                    answer_id = int(row_key.split(":", 1)[1])
+                                except ValueError:
+                                    answer_id = 0
+                                pending_item = next((item for item in pending_items if item.answer_id == answer_id), None)
+                                if pending_item is not None:
+                                    current_assignee = pending_item.assigned_player_id
+                                    current_accepted = bool(pending_item.accepted)
+                            draft_assignee = task_menu_assignment_targets.get(row_key)
+                            if draft_assignee not in team_player_ids:
+                                draft_assignee = None
+                            display_assignee = draft_assignee or current_assignee
+                            if display_assignee not in self._player_states:
+                                display_assignee = None
+                            if display_assignee is None:
+                                assignee_text = "любой игрок"
+                            else:
+                                assignee_text = self._player_caption(display_assignee)
+                            status = "ok" if current_accepted else "wait"
+                            draft_tag = " draft" if (draft_assignee is not None and draft_assignee != current_assignee) else ""
+                            task_panel_lines.append(f"{mark} {row_label} -> {assignee_text} [{status}{draft_tag}]")
                     task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
-                    task_panel_lines.append("W/S: выбор | A/D: исполнитель | F: применить | Q: назад")
+                    task_panel_lines.append("W/S: выбор | A/D: исполнитель | Q: применить | Esc: назад")
+                    task_panel_lines.append("Статус: wait=не подтверждено, draft=изменение не применено")
             if browser.is_connected():
                 host_title = connected_host_name or connected_host_player_name or "unknown"
             else:
@@ -2539,7 +2547,10 @@ class GameSession:
         )
         if message:
             if message.startswith("Задача #"):
-                self._set_message(message.replace(assignee_id, self._player_caption(assignee_id)))
+                self._set_message(
+                    message.replace(assignee_id, self._player_caption(assignee_id)),
+                    duration_sec=3.2,
+                )
             else:
                 self._set_message(message)
 
@@ -2569,7 +2580,10 @@ class GameSession:
         )
         if message:
             if "игроку " in message:
-                self._set_message(message.replace(assignee_id, self._player_caption(assignee_id)))
+                self._set_message(
+                    message.replace(assignee_id, self._player_caption(assignee_id)),
+                    duration_sec=3.2,
+                )
             else:
                 self._set_message(message)
 
@@ -4104,9 +4118,9 @@ class GameSession:
             return sprites.math_token_sprite(str(obj.label or "?"), answer=True)
         return sprites.backpack_set().get(0)
 
-    def _set_message(self, text: str) -> None:
+    def _set_message(self, text: str, *, duration_sec: float = 1.6) -> None:
         self._message = text
-        self._message_until = time.monotonic() + 1.6
+        self._message_until = time.monotonic() + max(0.2, float(duration_sec))
 
     def _inventory_has_item(self, inventory: Inventory, item_id: str) -> bool:
         target = item_id.strip().lower()
