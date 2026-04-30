@@ -471,14 +471,14 @@ class TestApplyHostEvent:
         session = make_session()
         world = make_world()
         add(session, "p1", x=100.0, y=100.0)
-        event = HostEvent(type="join", player_id="r2", player_name="Alice")
+        event = HostEvent(type="join", player_id="r2", player_name="Alice", player_team="B")
         session._apply_host_event(event, world)
         assert "r2" in session._player_states
 
     def test_join_without_local_player_is_no_op(self):
         session = make_session()
         world = make_world()
-        event = HostEvent(type="join", player_id="r2", player_name="Alice")
+        event = HostEvent(type="join", player_id="r2", player_name="Alice", player_team="B")
         session._apply_host_event(event, world)
         assert "r2" not in session._player_states
 
@@ -487,7 +487,7 @@ class TestApplyHostEvent:
         world = make_world()
         add(session, "p1")
         add(session, "r2")
-        event = HostEvent(type="leave", player_id="r2", player_name="Alice")
+        event = HostEvent(type="leave", player_id="r2", player_name="Alice", player_team="B")
         session._apply_host_event(event, world)
         assert "r2" not in session._player_states
 
@@ -495,7 +495,7 @@ class TestApplyHostEvent:
         session = make_session()
         world = make_world()
         add(session, "p1")
-        event = HostEvent(type="leave", player_id="p1", player_name="Local")
+        event = HostEvent(type="leave", player_id="p1", player_name="Local", player_team="A")
         session._apply_host_event(event, world)
         assert "p1" in session._player_states
 

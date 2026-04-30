@@ -26,6 +26,7 @@ class HostEvent:
     type: str
     player_id: str
     player_name: str
+    player_team: str
 
 
 @dataclass
@@ -33,6 +34,7 @@ class _ClientSession:
     conn: socket.socket
     player_id: str
     player_name: str
+    player_team: str
 
 
 def _recv_json_line(conn: socket.socket, recv_buffer: bytearray) -> dict | None:
@@ -229,7 +231,12 @@ class LanPresenceHost:
                         continue
                     self._remote_inputs.pop(client.player_id, None)
                     self._events.append(
-                        HostEvent(type="leave", player_id=client.player_id, player_name=client.player_name)
+                        HostEvent(
+                            type="leave",
+                            player_id=client.player_id,
+                            player_name=client.player_name,
+                            player_team=client.player_team,
+                        )
                     )
                     try:
                         client.conn.close()
@@ -284,6 +291,7 @@ class LanPresenceHost:
         accepted = False
         client_player_id = ""
         client_player_name = ""
+        client_player_team = "A"
         recv_buffer = bytearray()
         try:
             # Disable Nagle: inputs are tiny and latency matters more than throughput.
@@ -294,6 +302,8 @@ class LanPresenceHost:
             client_player_name = str(first.get("player_name", "player")).strip() if isinstance(first, dict) else "player"
             if not client_player_name:
                 client_player_name = "player"
+            if isinstance(first, dict):
+                client_player_team = str(first.get("team_id", "A")).strip().upper() or "A"
 
             with self._lock:
                 can_join = self._joinable and len(self._active_clients) < max(0, self.max_players - 1)
@@ -304,9 +314,15 @@ class LanPresenceHost:
                         conn=conn,
                         player_id=client_player_id,
                         player_name=client_player_name,
+                        player_team=client_player_team,
                     )
                     self._events.append(
-                        HostEvent(type="join", player_id=client_player_id, player_name=client_player_name)
+                        HostEvent(
+                            type="join",
+                            player_id=client_player_id,
+                            player_name=client_player_name,
+                            player_team=client_player_team,
+                        )
                     )
                     accepted = True
 
@@ -368,7 +384,14 @@ class LanPresenceHost:
                     prev = self._active_clients.pop(client_key, None)
                     if prev is not None:
                         self._remote_inputs.pop(prev.player_id, None)
-                        self._events.append(HostEvent(type="leave", player_id=prev.player_id, player_name=prev.player_name))
+                        self._events.append(
+                            HostEvent(
+                                type="leave",
+                                player_id=prev.player_id,
+                                player_name=prev.player_name,
+                                player_team=prev.player_team,
+                            )
+                        )
             try:
                 conn.close()
             except Exception:
@@ -452,13 +475,20 @@ class LanServerBrowser:
             except Exception:
                 pass
 
-    def connect_async(self, entry: ServerEntry, *, player_name: str, timeout_sec: float = 1.0) -> None:
+    def connect_async(
+        self,
+        entry: ServerEntry,
+        *,
+        player_name: str,
+        team_id: str = "A",
+        timeout_sec: float = 1.0,
+    ) -> None:
         if self._connect_thread is not None and self._connect_thread.is_alive():
             return
         self._connect_result = None
         self._connect_thread = threading.Thread(
             target=self._connect_worker,
-            args=(entry, player_name, timeout_sec),
+            args=(entry, player_name, team_id, timeout_sec),
             daemon=True,
         )
         self._connect_thread.start()
@@ -505,7 +535,7 @@ class LanServerBrowser:
             pos, self._latest_pos_update = self._latest_pos_update, None
         return pos
 
-    def _connect_worker(self, entry: ServerEntry, player_name: str, timeout_sec: float) -> None:
+    def _connect_worker(self, entry: ServerEntry, player_name: str, team_id: str, timeout_sec: float) -> None:
         self.disconnect()
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         recv_buffer = bytearray()
@@ -514,7 +544,12 @@ class LanServerBrowser:
             sock.connect((entry.host, int(entry.port)))
             # Disable Nagle: inputs are tiny; we care about latency, not throughput.
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            req = {"type": "join_request", "player_name": player_name, "ts": time.time()}
+            req = {
+                "type": "join_request",
+                "player_name": player_name,
+                "team_id": str(team_id).strip().upper() or "A",
+                "ts": time.time(),
+            }
             sock.sendall(self._encode_line(req))
             data = _recv_json_line(sock, recv_buffer)
             if not isinstance(data, dict) or data.get("type") != "join_accept":

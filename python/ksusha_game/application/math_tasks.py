@@ -15,6 +15,18 @@ class MathRoundState:
             "pick_second": None,
         }
     )
+    assignment_accepted: dict[str, bool] = field(
+        default_factory=lambda: {
+            "pick_first": True,
+            "pick_second": True,
+        }
+    )
+    assignment_assigned_by: dict[str, str | None] = field(
+        default_factory=lambda: {
+            "pick_first": None,
+            "pick_second": None,
+        }
+    )
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -22,6 +34,8 @@ class MathRoundState:
             "operation": self.operation,
             "first_digit": self.first_digit,
             "assignments": dict(self.assignments),
+            "assignment_accepted": dict(self.assignment_accepted),
+            "assignment_assigned_by": dict(self.assignment_assigned_by),
         }
 
     @classmethod
@@ -46,11 +60,25 @@ class MathRoundState:
                 else:
                     token = str(raw).strip()
                     assignments[key] = token if token else None
+        accepted_raw = payload.get("assignment_accepted", {})
+        assignment_accepted = {"pick_first": True, "pick_second": True}
+        if isinstance(accepted_raw, dict):
+            for key in assignment_accepted.keys():
+                assignment_accepted[key] = bool(accepted_raw.get(key, True))
+        assigned_by_raw = payload.get("assignment_assigned_by", {})
+        assignment_assigned_by = {"pick_first": None, "pick_second": None}
+        if isinstance(assigned_by_raw, dict):
+            for key in assignment_assigned_by.keys():
+                raw = assigned_by_raw.get(key)
+                token = str(raw).strip() if raw is not None else ""
+                assignment_assigned_by[key] = token if token else None
         return cls(
             stage=stage,
             operation=operation,
             first_digit=first_digit,
             assignments=assignments,
+            assignment_accepted=assignment_accepted,
+            assignment_assigned_by=assignment_assigned_by,
         )
 
 
@@ -63,6 +91,10 @@ class MathPendingAnswer:
     correct_answer: int
     answer_options: list[int] = field(default_factory=list)
     assigned_player_id: str | None = None
+    assigned_by_player_id: str | None = None
+    brief: str | None = None
+    details: str | None = None
+    accepted: bool = True
     solved: bool = False
 
     def to_payload(self) -> dict[str, object]:
@@ -74,6 +106,10 @@ class MathPendingAnswer:
             "correct_answer": self.correct_answer,
             "answer_options": list(self.answer_options),
             "assigned_player_id": self.assigned_player_id,
+            "assigned_by_player_id": self.assigned_by_player_id,
+            "brief": self.brief,
+            "details": self.details,
+            "accepted": self.accepted,
             "solved": self.solved,
         }
 
@@ -99,6 +135,15 @@ class MathPendingAnswer:
                     options.append(item)
         assigned_raw = payload.get("assigned_player_id")
         assigned_player_id = str(assigned_raw).strip() if assigned_raw is not None and str(assigned_raw).strip() else None
+        assigned_by_raw = payload.get("assigned_by_player_id")
+        assigned_by_player_id = (
+            str(assigned_by_raw).strip() if assigned_by_raw is not None and str(assigned_by_raw).strip() else None
+        )
+        brief_raw = payload.get("brief")
+        brief = str(brief_raw).strip() if brief_raw is not None and str(brief_raw).strip() else None
+        details_raw = payload.get("details")
+        details = str(details_raw).strip() if details_raw is not None and str(details_raw).strip() else None
+        accepted = bool(payload.get("accepted", True))
         solved = bool(payload.get("solved", False))
         return cls(
             answer_id=answer_id,
@@ -108,6 +153,10 @@ class MathPendingAnswer:
             correct_answer=correct_answer,
             answer_options=options,
             assigned_player_id=assigned_player_id,
+            assigned_by_player_id=assigned_by_player_id,
+            brief=brief,
+            details=details,
+            accepted=accepted,
             solved=solved,
         )
 
@@ -139,6 +188,8 @@ class MathTaskEngineState:
     pending_answers: list[MathPendingAnswer] = field(default_factory=list)
     active_answer_id: int | None = None
     next_answer_id: int = 1
+    dispatcher_player_id: str | None = None
+    dispatcher_team_id: str | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -158,6 +209,8 @@ class MathTaskEngineState:
             "pending_answers": [item.to_payload() for item in self.pending_answers],
             "active_answer_id": self.active_answer_id,
             "next_answer_id": self.next_answer_id,
+            "dispatcher_player_id": self.dispatcher_player_id,
+            "dispatcher_team_id": self.dispatcher_team_id,
         }
 
     @classmethod
@@ -185,6 +238,12 @@ class MathTaskEngineState:
         out.solved_count = max(0, int(payload.get("solved_count", 0) or 0))
         out.active_answer_id = int(payload.get("active_answer_id")) if isinstance(payload.get("active_answer_id"), int) else None
         out.next_answer_id = max(1, int(payload.get("next_answer_id", 1) or 1))
+        raw_dispatcher = payload.get("dispatcher_player_id")
+        out.dispatcher_player_id = (
+            str(raw_dispatcher).strip() if raw_dispatcher is not None and str(raw_dispatcher).strip() else None
+        )
+        raw_team = payload.get("dispatcher_team_id")
+        out.dispatcher_team_id = str(raw_team).strip() if raw_team is not None and str(raw_team).strip() else None
         pending_raw = payload.get("pending_answers", [])
         if isinstance(pending_raw, list):
             for item in pending_raw:
@@ -231,12 +290,31 @@ class MathTaskEngineState:
             return []
         return list(pending.answer_options)
 
+    def unresolved_pending_answers(self) -> list[MathPendingAnswer]:
+        return [item for item in self.pending_answers if not item.solved]
+
+    def _is_dispatcher(self, player_id: str) -> bool:
+        requester = str(player_id).strip()
+        dispatcher = str(self.dispatcher_player_id).strip() if self.dispatcher_player_id is not None else ""
+        if not requester:
+            return False
+        if not dispatcher:
+            return True
+        return requester == dispatcher
+
     def task_operation(self) -> str:
         if self.selected_task == 2:
             return "-"
         return "+"
 
-    def select_task(self, *, player_id: str, task_no: int, now_ts: float) -> MathTaskOutcome:
+    def select_task(
+        self,
+        *,
+        player_id: str,
+        task_no: int,
+        now_ts: float,
+        team_id: str | None = None,
+    ) -> MathTaskOutcome:
         if not self.has_math_quest:
             return MathTaskOutcome(message="Сначала найди книгу математики")
         if task_no < 1 or task_no > 9:
@@ -252,6 +330,8 @@ class MathTaskEngineState:
             self.active_answer_id = None
             return MathTaskOutcome(message=f"Задача {task_no}: пока не реализована")
         self.active = True
+        self.dispatcher_player_id = str(player_id).strip() or None
+        self.dispatcher_team_id = str(team_id).strip() if team_id is not None and str(team_id).strip() else None
         if self.session_started_at_ts is None:
             self.session_started_at_ts = float(now_ts)
         operation = "+" if task_no == 1 else "-"
@@ -261,7 +341,24 @@ class MathTaskEngineState:
         self.pending_answers = []
         self.active_answer_id = None
         self.next_answer_id = 1
-        self.current_round = MathRoundState(stage="pick_first", operation=operation, first_digit=None)
+        leader_id = str(player_id).strip() or "p1"
+        self.current_round = MathRoundState(
+            stage="pick_first",
+            operation=operation,
+            first_digit=None,
+            assignments={
+                "pick_first": leader_id,
+                "pick_second": leader_id,
+            },
+            assignment_accepted={
+                "pick_first": True,
+                "pick_second": True,
+            },
+            assignment_assigned_by={
+                "pick_first": leader_id,
+                "pick_second": leader_id,
+            },
+        )
         self.iterations_target = 10
         return MathTaskOutcome(
             message=f"Задача {task_no}: {self.iterations_target} итераций. Найди первое число",
@@ -269,14 +366,6 @@ class MathTaskEngineState:
             clear_answers=True,
             spawn_digits=True,
         )
-
-    def can_player_pick_stage(self, *, player_id: str, stage: str) -> bool:
-        if self.current_round is None:
-            return False
-        owner = self.current_round.assignments.get(stage)
-        if owner is None:
-            return True
-        return owner == player_id
 
     def pick_digit(
         self,
@@ -296,15 +385,21 @@ class MathTaskEngineState:
         else:
             value = max(0, min(9, int(digit)))
         if round_state.stage == "pick_first":
-            if not self.can_player_pick_stage(player_id=player_id, stage="pick_first"):
+            owner = round_state.assignments.get("pick_first")
+            if owner not in {None, player_id}:
                 return MathTaskOutcome(message="Это число назначено другому игроку")
+            if owner == player_id and not round_state.assignment_accepted.get("pick_first", True):
+                return MathTaskOutcome(message="Сначала прими задачу: найти первое число")
             round_state.first_digit = value
             round_state.stage = "pick_second"
             op = round_state.operation
             return MathTaskOutcome(message=f"Операция: {op}. Найди второе число")
         if round_state.stage == "pick_second":
-            if not self.can_player_pick_stage(player_id=player_id, stage="pick_second"):
+            owner = round_state.assignments.get("pick_second")
+            if owner not in {None, player_id}:
                 return MathTaskOutcome(message="Это число назначено другому игроку")
+            if owner == player_id and not round_state.assignment_accepted.get("pick_second", True):
+                return MathTaskOutcome(message="Сначала прими задачу: найти второе число")
             first = int(round_state.first_digit or 0)
             second = value
             operation = round_state.operation if round_state.operation in {"+", "-"} else "+"
@@ -320,6 +415,10 @@ class MathTaskEngineState:
                     producer_player_id=player_id,
                     online_player_ids=online_player_ids or [],
                 ),
+                assigned_by_player_id=player_id,
+                brief="Найти результат выражения",
+                details=f"Найди правильный результат для {first} {operation} {second}",
+                accepted=False,
             )
             self.next_answer_id += 1
             self.produced_count += 1
@@ -337,6 +436,7 @@ class MathTaskEngineState:
             if assigned is not None and assigned != player_id:
                 out.message = f"Ответ делегирован игроку {assigned}. Ищи следующее число"
             else:
+                answer.accepted = True
                 out.message = "Ответ у тебя. Можно брать следующий пример"
             return out
         return MathTaskOutcome(message=None)
@@ -350,6 +450,8 @@ class MathTaskEngineState:
         assigned = pending.assigned_player_id
         if assigned is not None and assigned != player_id:
             return MathTaskOutcome(message=f"Этот ответ назначен игроку {assigned}")
+        if assigned is not None and assigned == player_id and not pending.accepted:
+            return MathTaskOutcome(message="Сначала прими задачу на ответ")
         self.total_attempts += 1
         if int(answer_value) == int(pending.correct_answer):
             pending.solved = True
@@ -370,6 +472,98 @@ class MathTaskEngineState:
             out.message = "Верно! Очередь ответов пока пуста"
             return out
         return MathTaskOutcome(message="Неверный ответ. Попробуй другой")
+
+    def reassign_pending_answer(
+        self,
+        *,
+        answer_id: int,
+        assignee_player_id: str,
+        requested_by_player_id: str,
+        online_player_ids: list[str] | None = None,
+    ) -> str:
+        if not self._is_dispatcher(requested_by_player_id):
+            return "Только диспетчер может перераспределять задачи"
+        pending = self._pending_by_id(int(answer_id))
+        if pending is None:
+            return "Эта задача уже решена или не найдена"
+        assignee = str(assignee_player_id).strip()
+        if not assignee:
+            return "Исполнитель не указан"
+        roster: set[str] = set()
+        for pid in online_player_ids or []:
+            token = str(pid).strip()
+            if token:
+                roster.add(token)
+        requester = str(requested_by_player_id).strip()
+        if requester:
+            roster.add(requester)
+        if assignee not in roster:
+            return "Исполнитель не в текущей сессии"
+        pending.assigned_player_id = assignee
+        pending.assigned_by_player_id = requester
+        pending.accepted = assignee == requester
+        return f"Задача #{pending.answer_id}: ответ назначен игроку {assignee}"
+
+    def reassign_round_stage(
+        self,
+        *,
+        stage: str,
+        assignee_player_id: str,
+        requested_by_player_id: str,
+        online_player_ids: list[str] | None = None,
+    ) -> str:
+        if not self._is_dispatcher(requested_by_player_id):
+            return "Только диспетчер может перераспределять задачи"
+        if self.current_round is None or not self.active:
+            return "Нет активной задачи"
+        stage_key = str(stage).strip().lower()
+        if stage_key not in {"pick_first", "pick_second"}:
+            return "Неизвестный этап"
+        assignee = str(assignee_player_id).strip()
+        if not assignee:
+            return "Исполнитель не указан"
+        roster: set[str] = set()
+        for pid in online_player_ids or []:
+            token = str(pid).strip()
+            if token:
+                roster.add(token)
+        requester = str(requested_by_player_id).strip()
+        if requester:
+            roster.add(requester)
+        if assignee not in roster:
+            return "Исполнитель не в текущей команде"
+        self.current_round.assignments[stage_key] = assignee
+        self.current_round.assignment_accepted[stage_key] = assignee == requester
+        self.current_round.assignment_assigned_by[stage_key] = requester
+        stage_label = "первое число" if stage_key == "pick_first" else "второе число"
+        return f"Этап '{stage_label}' назначен игроку {assignee}"
+
+    def accept_round_stage(self, *, stage: str, player_id: str) -> str:
+        if self.current_round is None or not self.active:
+            return "Нет активной задачи"
+        stage_key = str(stage).strip().lower()
+        if stage_key not in {"pick_first", "pick_second"}:
+            return "Неизвестный этап"
+        owner = self.current_round.assignments.get(stage_key)
+        if owner is None:
+            return "Этот этап не назначен явно"
+        if owner != player_id:
+            return "Этот этап назначен другому игроку"
+        self.current_round.assignment_accepted[stage_key] = True
+        stage_label = "первое число" if stage_key == "pick_first" else "второе число"
+        return f"Принято: этап '{stage_label}'"
+
+    def accept_pending_answer(self, *, answer_id: int, player_id: str) -> str:
+        pending = self._pending_by_id(int(answer_id))
+        if pending is None:
+            return "Эта задача уже решена или не найдена"
+        owner = pending.assigned_player_id
+        if owner is None:
+            return f"Ответ #{pending.answer_id} без назначения: принятие не требуется"
+        if owner != player_id:
+            return "Этот ответ назначен другому игроку"
+        pending.accepted = True
+        return f"Принято: ответ #{pending.answer_id}"
 
     def _pending_by_id(self, answer_id: int) -> MathPendingAnswer | None:
         for item in self.pending_answers:
@@ -397,11 +591,23 @@ class MathTaskEngineState:
         if producer and producer not in seen:
             roster.append(producer)
             seen.add(producer)
+        if not producer:
+            producer = roster[0] if roster else "p1"
         if not roster:
             return producer or "p1"
-        roster.sort()
-        idx = max(0, int(self.next_answer_id) - 1) % len(roster)
-        return roster[idx]
+        busy: set[str] = set()
+        for item in self.pending_answers:
+            if item.solved:
+                continue
+            assigned = str(item.assigned_player_id).strip() if item.assigned_player_id is not None else ""
+            if assigned:
+                busy.add(assigned)
+        free_candidates = [pid for pid in roster if pid != producer and pid not in busy]
+        if free_candidates:
+            free_candidates.sort()
+            idx = max(0, int(self.next_answer_id) - 1) % len(free_candidates)
+            return free_candidates[idx]
+        return producer
 
     def _generate_answer_options(self, correct: int, *, operation: str, rng: random.Random) -> list[int]:
         correct_value = int(correct)
@@ -421,6 +627,57 @@ class MathTaskEngineState:
         rng.shuffle(options)
         return options
 
+    def on_player_left(
+        self,
+        *,
+        player_id: str,
+        online_player_ids: list[str],
+        online_team_player_ids: list[str] | None = None,
+    ) -> None:
+        left = str(player_id).strip()
+        if not left:
+            return
+        online: list[str] = []
+        seen: set[str] = set()
+        for pid in online_player_ids:
+            token = str(pid).strip()
+            if not token or token == left or token in seen:
+                continue
+            seen.add(token)
+            online.append(token)
+        team_online: list[str] = []
+        team_seen: set[str] = set()
+        for pid in online_team_player_ids or []:
+            token = str(pid).strip()
+            if not token or token == left or token in team_seen:
+                continue
+            team_seen.add(token)
+            team_online.append(token)
+        if self.dispatcher_player_id == left:
+            if team_online:
+                self.dispatcher_player_id = sorted(team_online)[0]
+            elif online:
+                self.dispatcher_player_id = sorted(online)[0]
+            else:
+                self.dispatcher_player_id = None
+
+        if self.current_round is not None:
+            for stage in ("pick_first", "pick_second"):
+                owner = self.current_round.assignments.get(stage)
+                if owner == left:
+                    self.current_round.assignments[stage] = None
+                    self.current_round.assignment_accepted[stage] = True
+                    self.current_round.assignment_assigned_by[stage] = None
+                elif self.current_round.assignment_assigned_by.get(stage) == left:
+                    self.current_round.assignment_assigned_by[stage] = None
+
+        for pending in self.pending_answers:
+            if pending.assigned_player_id == left:
+                pending.assigned_player_id = None
+                pending.accepted = True
+            if pending.assigned_by_player_id == left:
+                pending.assigned_by_player_id = None
+
     def remap_player_ids(self, id_map: dict[str, str]) -> None:
         if not id_map:
             return
@@ -434,10 +691,14 @@ class MathTaskEngineState:
             return id_map.get(token, token)
 
         self.menu_owner_player_id = _remap(self.menu_owner_player_id)
+        self.dispatcher_player_id = _remap(self.dispatcher_player_id)
 
         if self.current_round is not None:
             for stage, owner in list(self.current_round.assignments.items()):
                 self.current_round.assignments[stage] = _remap(owner)
+            for stage, owner in list(self.current_round.assignment_assigned_by.items()):
+                self.current_round.assignment_assigned_by[stage] = _remap(owner)
 
         for pending in self.pending_answers:
             pending.assigned_player_id = _remap(pending.assigned_player_id)
+            pending.assigned_by_player_id = _remap(pending.assigned_by_player_id)

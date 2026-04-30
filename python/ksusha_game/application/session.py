@@ -80,6 +80,7 @@ class GameSession:
         self._interaction_anchor_offset = (44.0, 58.0)
         self._player_states: dict[str, SessionPlayerState] = {}
         self._player_display_names: dict[str, str] = {}
+        self._player_teams: dict[str, str] = {}
         self._spray_tags: list[SprayTag] = []
         self._spray_frame_interval = 0.055
         self._room_item_use_counts: dict[tuple[str, str], int] = {}
@@ -93,11 +94,14 @@ class GameSession:
         self._math_tasks = MathTaskEngineState()
         self._math_spawn_seq = 0
         self._math_rng = random.Random()
+        self._network_raw_to_local_player_ids: dict[str, str] = {}
+        self._network_local_to_raw_player_ids: dict[str, str] = {}
         # Per-frame caches: rebuilt once per frame after world mutations, before physics.
         self._frame_blocking_objects: list[WorldObject] = []
         self._frame_door_objects: list[WorldObject] = []
         self._frame_platform_objects: list[WorldObject] = []
         self._frame_objects_by_id: dict[str, WorldObject] = {}
+        self._frame_rooms_by_id: dict[str, RoomArea] = {}
 
     def _player_state(self, player_id: str) -> SessionPlayerState | None:
         return self._player_states.get(player_id)
@@ -126,6 +130,98 @@ class GameSession:
             return token
         fallback = str(player_id).strip() or "player"
         return fallback[:32]
+
+    def _player_caption(self, player_id: str) -> str:
+        pid = str(player_id).strip() or "player"
+        team = self._player_team(pid)
+        team_part = f" @T{team}" if team else ""
+        return f"{self._player_display_name(pid)} [{pid}]{team_part}"
+
+    def _sorted_player_ids_for_ui(self) -> list[str]:
+        player_ids = list(self._player_states.keys())
+        player_ids.sort(
+            key=lambda pid: (0 if pid == self._LOCAL_PLAYER_ID else 1, self._player_display_name(pid).lower(), pid)
+        )
+        return player_ids
+
+    def _normalize_team_id(self, team_id: str | None) -> str:
+        token = str(team_id or "").strip().upper()
+        if not token:
+            return "A"
+        return token[:12]
+
+    def _set_player_team(self, player_id: str, team_id: str | None) -> None:
+        pid = str(player_id).strip()
+        if not pid:
+            return
+        self._player_teams[pid] = self._normalize_team_id(team_id)
+
+    def _player_team(self, player_id: str) -> str:
+        pid = str(player_id).strip()
+        if not pid:
+            return "A"
+        team = self._player_teams.get(pid)
+        if team and team.strip():
+            return team
+        return "A"
+
+    def _team_player_ids(self, team_id: str | None) -> list[str]:
+        normalized = self._normalize_team_id(team_id)
+        return [pid for pid in self._player_states.keys() if self._player_team(pid) == normalized]
+
+    def _build_math_inbox_rows(self, *, player_id: str) -> list[tuple[str, str, str | None, str | None]]:
+        pid = str(player_id).strip()
+        if not pid or not self._math_tasks.active:
+            return []
+        rows: list[tuple[str, str, str | None, str | None]] = []
+        round_state = self._math_tasks.current_round
+        if round_state is not None:
+            for stage_key, stage_label in (
+                ("pick_first", "найти первое число"),
+                ("pick_second", "найти второе число"),
+            ):
+                owner = round_state.assignments.get(stage_key)
+                if owner != pid:
+                    continue
+                if bool(round_state.assignment_accepted.get(stage_key, True)):
+                    continue
+                assigned_by = round_state.assignment_assigned_by.get(stage_key)
+                rows.append(
+                    (
+                        f"stage:{stage_key}",
+                        f"Этап: {stage_label}",
+                        assigned_by,
+                        f"Выполни этап: {stage_label}",
+                    )
+                )
+        for pending_item in self._math_tasks.unresolved_pending_answers():
+            if pending_item.assigned_player_id != pid:
+                continue
+            if pending_item.accepted:
+                continue
+            expr = f"{pending_item.first_digit}{pending_item.operation}{pending_item.second_digit}=?"
+            rows.append(
+                (
+                    f"answer:{pending_item.answer_id}",
+                    f"Ответ #{pending_item.answer_id}: найти результат {expr}",
+                    pending_item.assigned_by_player_id,
+                    pending_item.details or "Найди правильный результат и сообщи команде",
+                )
+            )
+        return rows
+
+    def _network_outbound_player_id(self, player_id: str) -> str:
+        token = str(player_id).strip()
+        if not token:
+            return token
+        mapped = self._network_local_to_raw_player_ids.get(token)
+        if mapped is not None and mapped.strip():
+            return mapped
+        return token
+
+    def _reset_network_player_id_maps(self) -> None:
+        self._network_raw_to_local_player_ids = {}
+        self._network_local_to_raw_player_ids = {}
 
     @property
     def _standing_on_object_id(self) -> str | None:
@@ -225,6 +321,8 @@ class GameSession:
         renderer = WorldRenderer(self._config)
         self._player_states = {}
         self._player_display_names = {}
+        self._player_teams = {}
+        self._reset_network_player_id_maps()
         self.add_player(
             player_id=self._LOCAL_PLAYER_ID,
             spawn_x=float(world.spawn_x),
@@ -245,7 +343,7 @@ class GameSession:
         static_control_hint_lines: list[str] = []
         static_control_hint_lines.append("LAN mode: one local player per computer")
         static_control_hint_lines.append("LAN menu: Ctrl+M")
-        static_control_hint_lines.append("Tasks menu: Ctrl+Q")
+        static_control_hint_lines.append("Tasks menu: TAB (or Ctrl+Q)")
 
         def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
             raw = os.getenv(name, "").strip()
@@ -267,7 +365,9 @@ class GameSession:
             return f"{m:02d}:{s:02d}"
 
         local_player_name = os.getenv("KSU_PLAYER_NAME", "").strip() or os.getenv("USER", "").strip() or "player"
+        local_team_id = self._normalize_team_id(os.getenv("KSU_TEAM", "A"))
         self._set_player_display_name(self._LOCAL_PLAYER_ID, local_player_name)
+        self._set_player_team(self._LOCAL_PLAYER_ID, local_team_id)
         local_host_name = socket.gethostname().strip() or "computer"
         local_level_name = self._config.map_path.stem
         discovery_port = _env_int("KSU_DISCOVERY_PORT", 45891, min_value=1024, max_value=65535)
@@ -296,6 +396,9 @@ class GameSession:
         task_menu_section = "quests"
         task_menu_selected_quest = 0
         task_menu_selected_task = 0
+        task_menu_selected_assignment = 0
+        task_menu_selected_inbox = 0
+        task_menu_assignment_targets: dict[str, str] = {}
         was_connected = False
         last_snapshot_sent_at = 0.0
         if host_started:
@@ -341,6 +444,7 @@ class GameSession:
                 connected_host_name = None
                 connected_host_player_name = None
                 reconnect_candidate = None
+                self._reset_network_player_id_maps()
             was_connected = is_connected
             if not current_servers:
                 selected_server_idx = 0
@@ -360,23 +464,30 @@ class GameSession:
                 elif event.type == pygame.KEYDOWN:
                     ctrl_m_pressed = event.key == pygame.K_m and (event.mod & pygame.KMOD_CTRL)
                     ctrl_q_pressed = event.key == pygame.K_q and (event.mod & pygame.KMOD_CTRL)
+                    tab_tasks_pressed = event.key == pygame.K_TAB
                     if ctrl_m_pressed:
                         if show_task_menu:
                             show_task_menu = False
                             task_menu_section = "quests"
+                            task_menu_assignment_targets.clear()
                         show_server_list = not show_server_list
                         if not show_server_list:
                             reconnect_candidate = None
                         for controller in input_controllers.values():
                             controller.clear_pressed()
                         continue
-                    if ctrl_q_pressed:
+                    if ctrl_q_pressed or tab_tasks_pressed:
                         if show_server_list:
                             show_server_list = False
                             reconnect_candidate = None
                         show_task_menu = not show_task_menu
                         if show_task_menu:
                             task_menu_section = "quests"
+                            task_menu_selected_assignment = 0
+                            task_menu_selected_inbox = 0
+                            task_menu_assignment_targets.clear()
+                        else:
+                            task_menu_assignment_targets.clear()
                         for controller in input_controllers.values():
                             controller.clear_pressed()
                         continue
@@ -391,6 +502,7 @@ class GameSession:
                         if show_task_menu:
                             show_task_menu = False
                             task_menu_section = "quests"
+                            task_menu_assignment_targets.clear()
                             continue
                         running = False
                         continue
@@ -403,7 +515,11 @@ class GameSession:
                                 browser.disconnect()
                                 connected_since_monotonic = None
                                 connected_host_summary = None
-                                browser.connect_async(target, player_name=local_player_name)
+                                browser.connect_async(
+                                    target,
+                                    player_name=local_player_name,
+                                    team_id=local_team_id,
+                                )
                                 connect_requested_target = target
                                 self._set_message(
                                     f"Reconnecting: {target.host_name} ({target.player_name}) [{target.level_name}]"
@@ -436,7 +552,11 @@ class GameSession:
                                     "Reconnect to selected host? Enter/Y = yes, Esc/N = no"
                                 )
                                 continue
-                            browser.connect_async(target, player_name=local_player_name)
+                            browser.connect_async(
+                                target,
+                                player_name=local_player_name,
+                                team_id=local_team_id,
+                            )
                             connect_requested_target = target
                             self._set_message(
                                 f"Connecting: {target.host_name} ({target.player_name}) [{target.level_name}]"
@@ -446,36 +566,73 @@ class GameSession:
 
                     if show_task_menu:
                         has_math_quest = self._math_tasks.has_math_quest
+                        dispatcher_team = self._math_tasks.dispatcher_team_id or self._player_team(self._LOCAL_PLAYER_ID)
+                        inbox_rows = self._build_math_inbox_rows(player_id=self._LOCAL_PLAYER_ID)
+                        if event.key == pygame.K_1:
+                            task_menu_section = "quests"
+                            continue
+                        if event.key == pygame.K_2 and has_math_quest:
+                            task_menu_section = "tasks"
+                            continue
+                        if (
+                            event.key == pygame.K_3
+                            and self._math_tasks.active
+                            and self._math_tasks.current_round is not None
+                        ):
+                            if self._math_tasks.dispatcher_player_id not in {None, self._LOCAL_PLAYER_ID}:
+                                self._set_message("Диспетчер задач: только ведущий")
+                                continue
+                            task_menu_section = "assign"
+                            continue
+                        if event.key == pygame.K_4 and self._math_tasks.active:
+                            task_menu_section = "inbox"
+                            continue
                         if task_menu_section == "quests":
-                            if event.key in {pygame.K_w, pygame.K_a, pygame.K_UP, pygame.K_LEFT}:
+                            if event.key in {pygame.K_w, pygame.K_UP}:
                                 task_menu_selected_quest = max(0, task_menu_selected_quest - 1)
                                 continue
-                            if event.key in {pygame.K_s, pygame.K_d, pygame.K_DOWN, pygame.K_RIGHT}:
+                            if event.key in {pygame.K_s, pygame.K_DOWN}:
                                 task_menu_selected_quest = min(0, task_menu_selected_quest + 1)
                                 continue
                             if event.key == pygame.K_q:
+                                show_task_menu = False
+                                task_menu_section = "quests"
+                                task_menu_assignment_targets.clear()
+                                continue
+                            if event.key in {pygame.K_e, pygame.K_f, pygame.K_d, pygame.K_RIGHT, pygame.K_RETURN, pygame.K_KP_ENTER}:
                                 if not has_math_quest:
                                     self._set_message("Сначала найди книгу математики")
                                 else:
                                     task_menu_section = "tasks"
                                 continue
-                            if event.key in {pygame.K_e, pygame.K_RETURN, pygame.K_KP_ENTER}:
-                                if not has_math_quest:
-                                    self._set_message("Сначала найди книгу математики")
-                                else:
-                                    self._set_message("Открой раздел кнопкой Q")
-                                continue
-                        else:
-                            if event.key in {pygame.K_w, pygame.K_a, pygame.K_UP, pygame.K_LEFT}:
+                        elif task_menu_section == "tasks":
+                            if event.key in {pygame.K_w, pygame.K_UP}:
                                 task_menu_selected_task = (task_menu_selected_task - 1) % 9
                                 continue
-                            if event.key in {pygame.K_s, pygame.K_d, pygame.K_DOWN, pygame.K_RIGHT}:
+                            if event.key in {pygame.K_s, pygame.K_DOWN}:
+                                task_menu_selected_task = (task_menu_selected_task + 1) % 9
+                                continue
+                            if event.key in {pygame.K_a, pygame.K_LEFT}:
+                                task_menu_selected_task = (task_menu_selected_task - 1) % 9
+                                continue
+                            if event.key in {pygame.K_d, pygame.K_RIGHT}:
                                 task_menu_selected_task = (task_menu_selected_task + 1) % 9
                                 continue
                             if event.key == pygame.K_q:
                                 task_menu_section = "quests"
+                                task_menu_assignment_targets.clear()
                                 continue
-                            if event.key in {pygame.K_e, pygame.K_RETURN, pygame.K_KP_ENTER}:
+                            if event.key == pygame.K_r:
+                                if not self._math_tasks.active:
+                                    self._set_message("Сначала запусти задачу 1 или 2")
+                                elif self._math_tasks.dispatcher_player_id not in {None, self._LOCAL_PLAYER_ID}:
+                                    self._set_message("Диспетчер задач: только ведущий")
+                                else:
+                                    task_menu_section = "assign"
+                                    task_menu_selected_assignment = 0
+                                    task_menu_assignment_targets.clear()
+                                continue
+                            if event.key in {pygame.K_e, pygame.K_f, pygame.K_RETURN, pygame.K_KP_ENTER}:
                                 if not has_math_quest:
                                     self._set_message("Сначала найди книгу математики")
                                     continue
@@ -489,6 +646,140 @@ class GameSession:
                                         issued_at=now,
                                     )
                                 self._set_message(f"Запуск задачи {task_menu_selected_task + 1}")
+                                continue
+                        elif task_menu_section == "inbox":
+                            if not inbox_rows:
+                                if event.key == pygame.K_q:
+                                    task_menu_section = "tasks"
+                                else:
+                                    self._set_message("Для тебя пока нет новых задач")
+                                continue
+                            task_menu_selected_inbox = max(0, min(task_menu_selected_inbox, len(inbox_rows) - 1))
+                            if event.key in {pygame.K_w, pygame.K_UP}:
+                                task_menu_selected_inbox = (task_menu_selected_inbox - 1) % len(inbox_rows)
+                                continue
+                            if event.key in {pygame.K_s, pygame.K_DOWN}:
+                                task_menu_selected_inbox = (task_menu_selected_inbox + 1) % len(inbox_rows)
+                                continue
+                            if event.key == pygame.K_q:
+                                task_menu_section = "tasks"
+                                continue
+                            if event.key in {pygame.K_e, pygame.K_f, pygame.K_RETURN, pygame.K_KP_ENTER}:
+                                row_key, row_title, _assigned_by, _details = inbox_rows[task_menu_selected_inbox]
+                                if row_key.startswith("stage:"):
+                                    stage_key = row_key.split(":", 1)[1]
+                                    action = f"task_accept_stage::{stage_key}"
+                                else:
+                                    try:
+                                        answer_id = int(row_key.split(":", 1)[1])
+                                    except ValueError:
+                                        answer_id = 0
+                                    action = f"task_accept_answer::{answer_id}"
+                                if browser.is_connected():
+                                    browser.send_action(action=action)
+                                    self._set_message(f"{row_title}: запрос отправлен")
+                                else:
+                                    self.queue_player_action(
+                                        player_id=self._LOCAL_PLAYER_ID,
+                                        action=action,
+                                        issued_at=now,
+                                    )
+                                    self._set_message(f"{row_title}: принято")
+                                continue
+                        else:
+                            round_state = self._math_tasks.current_round
+                            pending_items = self._math_tasks.unresolved_pending_answers()
+                            pending_items.sort(key=lambda item: item.answer_id)
+                            assignment_rows: list[tuple[str, str]] = []
+                            if round_state is not None:
+                                assignment_rows.append(("stage:pick_first", "Этап: найти первое число"))
+                                assignment_rows.append(("stage:pick_second", "Этап: найти второе число"))
+                            for pending_item in pending_items:
+                                expr = f"{pending_item.first_digit}{pending_item.operation}{pending_item.second_digit}=?"
+                                assignment_rows.append((f"answer:{pending_item.answer_id}", f"Ответ #{pending_item.answer_id} {expr}"))
+                            row_keys = {key for key, _ in assignment_rows}
+                            task_menu_assignment_targets = {
+                                row_key: assignee
+                                for row_key, assignee in task_menu_assignment_targets.items()
+                                if row_key in row_keys and assignee in self._player_states
+                            }
+                            if not assignment_rows:
+                                if event.key == pygame.K_q:
+                                    task_menu_section = "tasks"
+                                else:
+                                    self._set_message("Нет задач для делегирования")
+                                continue
+                            dispatcher_team = self._math_tasks.dispatcher_team_id or self._player_team(self._LOCAL_PLAYER_ID)
+                            team_player_ids = [
+                                pid for pid in self._sorted_player_ids_for_ui() if self._player_team(pid) == dispatcher_team
+                            ]
+                            if not team_player_ids:
+                                team_player_ids = [self._LOCAL_PLAYER_ID]
+                            task_menu_selected_assignment = max(
+                                0,
+                                min(task_menu_selected_assignment, len(assignment_rows) - 1),
+                            )
+                            if event.key in {pygame.K_w, pygame.K_UP}:
+                                task_menu_selected_assignment = (task_menu_selected_assignment - 1) % len(assignment_rows)
+                                continue
+                            if event.key in {pygame.K_s, pygame.K_DOWN}:
+                                task_menu_selected_assignment = (task_menu_selected_assignment + 1) % len(assignment_rows)
+                                continue
+                            if event.key == pygame.K_q:
+                                task_menu_section = "tasks"
+                                continue
+                            selected_row_key, selected_row_label = assignment_rows[task_menu_selected_assignment]
+                            if event.key in {pygame.K_a, pygame.K_LEFT, pygame.K_d, pygame.K_RIGHT}:
+                                preview_assignee = task_menu_assignment_targets.get(selected_row_key)
+                                if not preview_assignee or preview_assignee not in team_player_ids:
+                                    if selected_row_key.startswith("stage:") and round_state is not None:
+                                        stage_key = selected_row_key.split(":", 1)[1]
+                                        preview_assignee = round_state.assignments.get(stage_key)
+                                    elif selected_row_key.startswith("answer:"):
+                                        try:
+                                            answer_id = int(selected_row_key.split(":", 1)[1])
+                                        except ValueError:
+                                            answer_id = 0
+                                        selected_pending = next(
+                                            (item for item in pending_items if item.answer_id == answer_id),
+                                            None,
+                                        )
+                                        preview_assignee = selected_pending.assigned_player_id if selected_pending is not None else None
+                                if not preview_assignee or preview_assignee not in team_player_ids:
+                                    preview_assignee = team_player_ids[0]
+                                shift = -1 if event.key in {pygame.K_a, pygame.K_LEFT} else 1
+                                base_idx = team_player_ids.index(preview_assignee)
+                                next_assignee = team_player_ids[(base_idx + shift) % len(team_player_ids)]
+                                task_menu_assignment_targets[selected_row_key] = next_assignee
+                                self._set_message(f"{selected_row_label} -> {self._player_caption(next_assignee)}")
+                                continue
+                            if event.key in {pygame.K_e, pygame.K_f, pygame.K_RETURN, pygame.K_KP_ENTER}:
+                                target_assignee = task_menu_assignment_targets.get(selected_row_key)
+                                if not target_assignee or target_assignee not in team_player_ids:
+                                    target_assignee = team_player_ids[0]
+                                outbound_assignee = (
+                                    self._network_outbound_player_id(target_assignee)
+                                    if browser.is_connected()
+                                    else target_assignee
+                                )
+                                if selected_row_key.startswith("stage:"):
+                                    stage_key = selected_row_key.split(":", 1)[1]
+                                    action = f"task_stage_assign::{stage_key}::{outbound_assignee}"
+                                else:
+                                    try:
+                                        answer_id = int(selected_row_key.split(":", 1)[1])
+                                    except ValueError:
+                                        answer_id = 0
+                                    action = f"task_assign::{answer_id}::{outbound_assignee}"
+                                if browser.is_connected():
+                                    browser.send_action(action=action)
+                                else:
+                                    self.queue_player_action(
+                                        player_id=self._LOCAL_PLAYER_ID,
+                                        action=action,
+                                        issued_at=now,
+                                    )
+                                self._set_message(f"{selected_row_label} -> {self._player_caption(target_assignee)}")
                                 continue
                         continue
 
@@ -618,6 +909,7 @@ class GameSession:
             local_inventory = self._primary_player_state().inventory
             local_render: tuple[tuple[float, float], pygame.Surface, float, bool] | None = None
             extra_renders: list[tuple[tuple[float, float], pygame.Surface, float, bool]] = []
+            player_portraits: dict[str, pygame.Surface] = {}
             local_wearing_backpack = self._inventory_has_item(local_inventory, "backpack")
             net_client_mode = browser.is_connected()
 
@@ -655,6 +947,7 @@ class GameSession:
                         )
                         left_facing = player.facing in {Direction.LEFT, Direction.UP_LEFT, Direction.DOWN_LEFT}
                         render_item = (player_center, current_frame, bob + jump_y, left_facing)
+                        player_portraits[player_id] = current_frame
                         if is_local:
                             local_render = render_item
                             local_wearing_backpack = wearing_backpack
@@ -792,6 +1085,7 @@ class GameSession:
                     )
                     left_facing = player.facing in {Direction.LEFT, Direction.UP_LEFT, Direction.DOWN_LEFT}
                     render_item = (player_center, current_frame, bob + jump_y, left_facing)
+                    player_portraits[player_id] = current_frame
                     if is_local:
                         local_render = render_item
                         local_wearing_backpack = wearing_backpack
@@ -808,6 +1102,8 @@ class GameSession:
             dynamic_hint_lines = list(static_control_hint_lines)
             task_panel_lines: list[str] | None = None
             multiplayer_lines: list[str] | None = None
+            task_assignments_lines: list[str] | None = None
+            task_assignments_rows: list[tuple[str, str | None]] | None = None
             lan_menu_lines: list[str] | None = None
             if show_server_list:
                 lan_menu_lines = ["LAN HOSTS", "W/S or UP/DOWN: select | ENTER: connect | ESC: close"]
@@ -836,23 +1132,25 @@ class GameSession:
                             f"{mark}{conn} {entry.host_name} | {entry.player_name} | {entry.level_name} | {entry.players}/{entry.max_players}"
                         )
             if show_task_menu:
-                task_panel_lines = ["TASKS (Ctrl+Q close)"]
+                task_panel_lines = ["TASKS DISPATCHER (TAB close)"]
                 if task_menu_section == "quests":
-                    task_panel_lines.append("Разделы:")
+                    task_panel_lines.append("Разделы (1/2/3/4):")
                     if self._math_tasks.has_math_quest:
                         mark = ">" if task_menu_selected_quest == 0 else " "
                         task_panel_lines.append(f"{mark} Математика")
-                        task_panel_lines.append("Q: открыть раздел")
+                        task_panel_lines.append("E/F/D: открыть")
                     else:
                         task_panel_lines.append("Квестов пока нет")
                         task_panel_lines.append("Найди книгу математики")
-                    task_panel_lines.append("W/A/S/D: выбор")
-                else:
+                    task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
+                    task_panel_lines.append("W/S: выбор | Q: закрыть")
+                elif task_menu_section == "tasks":
                     task_panel_lines.append("Математика:")
                     for idx in range(9):
                         mark = ">" if idx == task_menu_selected_task else " "
                         task_panel_lines.append(f"{mark} Задача {idx + 1}")
-                    task_panel_lines.append("E: запуск | Q: назад")
+                    task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
+                    task_panel_lines.append("W/S/A/D: выбор | F/E: запуск | R: диспетчер | Q: назад")
                     if task_menu_selected_task == 0:
                         task_panel_lines.append("Описание: сложение, 10 итераций, очередь ответов")
                     elif task_menu_selected_task == 1:
@@ -861,19 +1159,78 @@ class GameSession:
                         task_panel_lines.append("Описание: выбрать + или - (в разработке)")
                     else:
                         task_panel_lines.append("Описание: в разработке")
+                elif task_menu_section == "inbox":
+                    task_panel_lines.append("INBOX: мои новые задачи")
+                    task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
+                    inbox_rows = self._build_math_inbox_rows(player_id=self._LOCAL_PLAYER_ID)
+                    if not inbox_rows:
+                        task_panel_lines.append("Новых задач нет")
+                    else:
+                        task_menu_selected_inbox = max(0, min(task_menu_selected_inbox, len(inbox_rows) - 1))
+                        for idx, (_row_key, row_label, assigned_by_id, _details) in enumerate(inbox_rows[:10]):
+                            mark = ">" if idx == task_menu_selected_inbox else " "
+                            if assigned_by_id:
+                                by = self._player_caption(assigned_by_id)
+                                task_panel_lines.append(f"{mark} {row_label} | от: {by}")
+                            else:
+                                task_panel_lines.append(f"{mark} {row_label}")
+                        selected_row = inbox_rows[task_menu_selected_inbox]
+                        selected_details = selected_row[3]
+                        if selected_details:
+                            task_panel_lines.append(f"Описание: {selected_details}")
+                    task_panel_lines.append("W/S: выбор | F/E: принять | Q: назад")
+                else:
+                    task_panel_lines.append("TASK ASSIGN (этапы/ответы):")
+                    round_state = self._math_tasks.current_round
+                    pending_items = self._math_tasks.unresolved_pending_answers()
+                    pending_items.sort(key=lambda item: item.answer_id)
+                    assignment_rows: list[tuple[str, str]] = []
+                    if round_state is not None:
+                        assignment_rows.append(("stage:pick_first", "Этап: найти первое число"))
+                        assignment_rows.append(("stage:pick_second", "Этап: найти второе число"))
+                    for pending_item in pending_items:
+                        expr = f"{pending_item.first_digit}{pending_item.operation}{pending_item.second_digit}=?"
+                        assignment_rows.append((f"answer:{pending_item.answer_id}", f"Ответ #{pending_item.answer_id} {expr}"))
+                    if not assignment_rows:
+                        task_panel_lines.append("Нет активных этапов и ответов")
+                    else:
+                        task_menu_selected_assignment = max(
+                            0,
+                            min(task_menu_selected_assignment, len(assignment_rows) - 1),
+                        )
+                        dispatcher_team = self._math_tasks.dispatcher_team_id or self._player_team(self._LOCAL_PLAYER_ID)
+                        team_player_ids = [
+                            pid for pid in self._sorted_player_ids_for_ui() if self._player_team(pid) == dispatcher_team
+                        ]
+                        for idx, (row_key, row_label) in enumerate(assignment_rows[:10]):
+                            mark = ">" if idx == task_menu_selected_assignment else " "
+                            selected_assignee = task_menu_assignment_targets.get(row_key)
+                            if not selected_assignee or selected_assignee not in self._player_states:
+                                if row_key.startswith("stage:") and round_state is not None:
+                                    stage_key = row_key.split(":", 1)[1]
+                                    selected_assignee = round_state.assignments.get(stage_key)
+                                elif row_key.startswith("answer:"):
+                                    try:
+                                        answer_id = int(row_key.split(":", 1)[1])
+                                    except ValueError:
+                                        answer_id = 0
+                                    pending_item = next((item for item in pending_items if item.answer_id == answer_id), None)
+                                    selected_assignee = pending_item.assigned_player_id if pending_item is not None else None
+                            if not selected_assignee or selected_assignee not in self._player_states:
+                                selected_assignee = team_player_ids[0] if team_player_ids else self._LOCAL_PLAYER_ID
+                            task_panel_lines.append(f"{mark} {row_label} -> {self._player_caption(selected_assignee)}")
+                    task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
+                    task_panel_lines.append("W/S: выбор | A/D: исполнитель | F/E: применить | Q: назад")
             if browser.is_connected():
                 host_title = connected_host_name or connected_host_player_name or "unknown"
             else:
                 host_title = local_host_name or local_player_name
             if self._player_states:
-                player_ids = list(self._player_states.keys())
-                player_ids.sort(
-                    key=lambda pid: (0 if pid == self._LOCAL_PLAYER_ID else 1, self._player_display_name(pid).lower())
-                )
+                player_ids = self._sorted_player_ids_for_ui()
                 multiplayer_lines = [f"HOST: {host_title}", f"ONLINE: {len(player_ids)}/{self._MAX_PLAYERS}"]
                 for pid in player_ids[:10]:
                     prefix = ">" if pid == self._LOCAL_PLAYER_ID else "-"
-                    multiplayer_lines.append(f"{prefix} {self._player_display_name(pid)}")
+                    multiplayer_lines.append(f"{prefix} {self._player_caption(pid)}")
             if self._math_tasks.active:
                 duration = _format_session_duration(self._math_tasks.session_duration_sec(time.time()))
                 pending = self._math_tasks.pending_count()
@@ -885,6 +1242,9 @@ class GameSession:
                     f"MATH score: {self._math_tasks.total_solved}/{self._math_tasks.total_attempts} | time {duration}"
                 )
                 dynamic_hint_lines.append(f"MATH task:{self._math_tasks.selected_task} op:{op} | solved {solved}/{target} | made {produced}/{target} | queue {pending}")
+                dynamic_hint_lines.append(
+                    f"MATH team: T{self._math_tasks.dispatcher_team_id or self._player_team(self._LOCAL_PLAYER_ID)}"
+                )
                 active_pending = self._math_tasks.active_pending_answer()
                 local_answer_turn = (
                     active_pending is not None
@@ -896,7 +1256,10 @@ class GameSession:
                     if assignee_id:
                         assignee_name = self._player_display_name(assignee_id)
                         if assignee_id == self._LOCAL_PLAYER_ID:
-                            dynamic_hint_lines.append("MATH stage: найди результат (или собирай след. пример)")
+                            if active_pending.accepted:
+                                dynamic_hint_lines.append("MATH stage: найди результат (или собирай след. пример)")
+                            else:
+                                dynamic_hint_lines.append("MATH stage: у тебя новая задача на ответ (TAB -> Inbox, F принять)")
                         else:
                             dynamic_hint_lines.append(f"MATH stage: Пользователь {assignee_name} ищет результат")
                         dynamic_hint_lines.append(f"MATH answer: Пользователь {assignee_name} ищет ответ")
@@ -906,9 +1269,60 @@ class GameSession:
                         dynamic_hint_lines.append("MATH answer: ответ без назначения")
                 elif round_state is not None:
                     if round_state.stage == "pick_first":
-                        dynamic_hint_lines.append("MATH stage: найди первое число")
+                        stage_owner = round_state.assignments.get("pick_first")
+                        stage_accepted = bool(round_state.assignment_accepted.get("pick_first", True))
+                        if stage_owner == self._LOCAL_PLAYER_ID and not stage_accepted:
+                            dynamic_hint_lines.append("MATH stage: новая задача - найти первое число (TAB -> Inbox, F принять)")
+                        else:
+                            dynamic_hint_lines.append("MATH stage: найди первое число")
                     elif round_state.stage == "pick_second":
-                        dynamic_hint_lines.append(f"MATH stage: операция {round_state.operation}, найди второе число")
+                        stage_owner = round_state.assignments.get("pick_second")
+                        stage_accepted = bool(round_state.assignment_accepted.get("pick_second", True))
+                        if stage_owner == self._LOCAL_PLAYER_ID and not stage_accepted:
+                            dynamic_hint_lines.append("MATH stage: новая задача - найти второе число (TAB -> Inbox, F принять)")
+                        else:
+                            dynamic_hint_lines.append(f"MATH stage: операция {round_state.operation}, найди второе число")
+                task_assignments_lines = ["TASK FLOW"]
+                task_assignments_rows = [("TASK FLOW", None)]
+                unresolved = self._math_tasks.unresolved_pending_answers()
+                unresolved.sort(key=lambda item: item.answer_id)
+                if round_state is not None and self._math_tasks.produced_count < self._math_tasks.iterations_target:
+                    if round_state.stage == "pick_first":
+                        stage_owner_id = round_state.assignments.get("pick_first")
+                        stage_owner = (
+                            self._player_caption(stage_owner_id)
+                            if stage_owner_id
+                            else "любой игрок"
+                        )
+                        stage_state = "ok" if bool(round_state.assignment_accepted.get("pick_first", True)) else "wait accept"
+                        line = f"Сейчас: найти первое число -> {stage_owner} [{stage_state}]"
+                        task_assignments_lines.append(line)
+                        task_assignments_rows.append((line, stage_owner_id))
+                    elif round_state.stage == "pick_second":
+                        stage_owner_id = round_state.assignments.get("pick_second")
+                        stage_owner = (
+                            self._player_caption(stage_owner_id)
+                            if stage_owner_id
+                            else "любой игрок"
+                        )
+                        stage_state = "ok" if bool(round_state.assignment_accepted.get("pick_second", True)) else "wait accept"
+                        line = f"Сейчас: найти второе число ({round_state.operation}) -> {stage_owner} [{stage_state}]"
+                        task_assignments_lines.append(line)
+                        task_assignments_rows.append((line, stage_owner_id))
+                if not unresolved:
+                    line = "Ответов в очереди нет"
+                    task_assignments_lines.append(line)
+                    task_assignments_rows.append((line, None))
+                else:
+                    for pending_item in unresolved[:8]:
+                        marker = ">" if pending_item.answer_id == self._math_tasks.active_answer_id else "-"
+                        assignee_id = pending_item.assigned_player_id
+                        assignee = self._player_caption(assignee_id) if assignee_id else "любой игрок"
+                        expr = f"{pending_item.first_digit}{pending_item.operation}{pending_item.second_digit}=?"
+                        accepted_state = "ok" if pending_item.accepted else "wait accept"
+                        line = f"{marker} #{pending_item.answer_id} {expr} | найти результат -> {assignee} [{accepted_state}]"
+                        task_assignments_lines.append(line)
+                        task_assignments_rows.append((line, assignee_id))
             if browser.is_connected():
                 dynamic_hint_lines.append("NET: connected as client (authoritative host sync)")
             elif host_started:
@@ -935,6 +1349,9 @@ class GameSession:
                 control_hints=dynamic_hint_lines,
                 task_panel_lines=task_panel_lines,
                 multiplayer_lines=multiplayer_lines,
+                task_assignments_lines=task_assignments_lines,
+                task_assignments_rows=task_assignments_rows,
+                player_portraits=player_portraits,
                 lan_menu_lines=lan_menu_lines,
             )
 
@@ -1043,6 +1460,7 @@ class GameSession:
         spawn_x: float,
         spawn_y: float,
         stats: PlayerStats,
+        team_id: str | None = None,
         base_inventory_capacity: int = 5,
     ) -> None:
         if player_id in self._player_states:
@@ -1054,14 +1472,27 @@ class GameSession:
             inventory=Inventory(base_capacity=base_inventory_capacity, capacity=base_inventory_capacity),
         )
         self._set_player_display_name(player_id, player_id)
+        if team_id is not None:
+            self._set_player_team(player_id, team_id)
         self._movement_inputs[player_id] = (0, 0, False, 1.0)
 
     def remove_player(self, *, player_id: str) -> None:
         if player_id == self._LOCAL_PLAYER_ID:
             return
+        removed = str(player_id).strip()
+        if not removed:
+            return
         self._player_states.pop(player_id, None)
         self._player_display_names.pop(player_id, None)
+        self._player_teams.pop(player_id, None)
         self._movement_inputs.pop(player_id, None)
+        dispatcher_team = self._math_tasks.dispatcher_team_id
+        team_online = self._team_player_ids(dispatcher_team) if dispatcher_team else list(self._player_states.keys())
+        self._math_tasks.on_player_left(
+            player_id=removed,
+            online_player_ids=list(self._player_states.keys()),
+            online_team_player_ids=team_online,
+        )
 
     def _apply_host_event(self, host_event: HostEvent, world: WorldMap) -> None:
         if host_event.type == "join":
@@ -1075,8 +1506,10 @@ class GameSession:
                 spawn_x=spawn_x,
                 spawn_y=spawn_y,
                 stats=world.player_stats,
+                team_id=host_event.player_team,
             )
             self._set_player_display_name(host_event.player_id, host_event.player_name)
+            self._set_player_team(host_event.player_id, host_event.player_team)
             self._set_message(f"Joined: {host_event.player_name}")
             return
         if host_event.type == "leave":
@@ -1148,6 +1581,7 @@ class GameSession:
                 {
                     "id": player_id,
                     "name": self._player_display_name(player_id),
+                    "team": self._player_team(player_id),
                     "x": float(state.player.x),
                     "y": float(state.player.y),
                     "facing": state.player.facing.value,
@@ -1221,8 +1655,10 @@ class GameSession:
                     spawn_x=float(item.get("x", world.spawn_x)),
                     spawn_y=float(item.get("y", world.spawn_y)),
                     stats=world.player_stats,
+                    team_id=item.get("team"),
                 )
             self._set_player_display_name(player_id, item.get("name"))
+            self._set_player_team(player_id, item.get("team"))
             state = self._player_state(player_id)
             if state is None:
                 continue
@@ -1245,6 +1681,8 @@ class GameSession:
         for pid in remote_ids:
             if pid not in seen:
                 self.remove_player(player_id=pid)
+        self._network_raw_to_local_player_ids = dict(player_id_map)
+        self._network_local_to_raw_player_ids = {local: raw for raw, local in player_id_map.items()}
 
         objects_payload = snapshot.get("objects")
         if isinstance(objects_payload, list):
@@ -1630,6 +2068,30 @@ class GameSession:
                 world=world,
             )
             return
+        if action.startswith("task_assign::"):
+            self._handle_math_task_assign_action(
+                action=action,
+                player_id=player_id,
+            )
+            return
+        if action.startswith("task_stage_assign::"):
+            self._handle_math_task_stage_assign_action(
+                action=action,
+                player_id=player_id,
+            )
+            return
+        if action.startswith("task_accept_stage::"):
+            self._handle_math_task_accept_stage_action(
+                action=action,
+                player_id=player_id,
+            )
+            return
+        if action.startswith("task_accept_answer::"):
+            self._handle_math_task_accept_answer_action(
+                action=action,
+                player_id=player_id,
+            )
+            return
 
         if action == "inventory_move":
             self._toggle_inventory_move_mode(inventory, world)
@@ -1759,16 +2221,25 @@ class GameSession:
         sprite_h: int,
     ) -> str | None:
         cx = player.x + sprite_w * 0.5
-        probes = (
+        probe_y_foot = player.y + sprite_h * 0.84
+        # Fast path: check if the player is still in the last known room (O(1) dict + 3 comparisons).
+        current_id = self._active_area_id
+        if current_id is not None:
+            room = self._frame_rooms_by_id.get(current_id)
+            if room is not None:
+                for probe_y in (player.y + sprite_h * 0.62, player.y + sprite_h * 0.74, probe_y_foot):
+                    if room.x <= cx < room.x + room.width and room.y <= probe_y < room.y + room.height:
+                        return current_id
+        # Slow path: linear search over all rooms.
+        for px, py in (
             (cx, player.y + sprite_h * 0.62),
             (cx, player.y + sprite_h * 0.74),
-            (cx, player.y + sprite_h * 0.84),
-        )
-        for px, py in probes:
+            (cx, probe_y_foot),
+        ):
             rid = world.room_id_for_point_half_open(px, py)
             if rid is not None:
                 return rid
-        room = world.room_for_point(cx, player.y + sprite_h * 0.84)
+        room = world.room_for_point(cx, probe_y_foot)
         return room.room_id if room is not None else None
 
     def _update_spray_recharge_by_door_crossing(
@@ -2043,8 +2514,110 @@ class GameSession:
             player_id=player_id,
             task_no=task_no,
             now_ts=time.time(),
+            team_id=self._player_team(player_id),
         )
         self._apply_math_task_outcome(outcome, world)
+
+    def _handle_math_task_assign_action(
+        self,
+        *,
+        action: str,
+        player_id: str,
+    ) -> None:
+        token = str(action).strip()
+        parts = token.split("::", 2)
+        if len(parts) != 3:
+            return
+        prefix, answer_raw, assignee_raw = parts
+        if prefix != "task_assign":
+            return
+        try:
+            answer_id = int(answer_raw)
+        except ValueError:
+            return
+        assignee_id = str(assignee_raw).strip()
+        if not assignee_id:
+            return
+        message = self._math_tasks.reassign_pending_answer(
+            answer_id=answer_id,
+            assignee_player_id=assignee_id,
+            requested_by_player_id=player_id,
+            online_player_ids=self._team_player_ids(self._math_tasks.dispatcher_team_id or self._player_team(player_id)),
+        )
+        if message:
+            if message.startswith("Задача #"):
+                self._set_message(message.replace(assignee_id, self._player_caption(assignee_id)))
+            else:
+                self._set_message(message)
+
+    def _handle_math_task_stage_assign_action(
+        self,
+        *,
+        action: str,
+        player_id: str,
+    ) -> None:
+        token = str(action).strip()
+        parts = token.split("::", 2)
+        if len(parts) != 3:
+            return
+        prefix, stage_raw, assignee_raw = parts
+        if prefix != "task_stage_assign":
+            return
+        stage_key = str(stage_raw).strip().lower()
+        assignee_id = str(assignee_raw).strip()
+        if not assignee_id:
+            return
+        dispatcher_team = self._math_tasks.dispatcher_team_id or self._player_team(player_id)
+        message = self._math_tasks.reassign_round_stage(
+            stage=stage_key,
+            assignee_player_id=assignee_id,
+            requested_by_player_id=player_id,
+            online_player_ids=self._team_player_ids(dispatcher_team),
+        )
+        if message:
+            if "игроку " in message:
+                self._set_message(message.replace(assignee_id, self._player_caption(assignee_id)))
+            else:
+                self._set_message(message)
+
+    def _handle_math_task_accept_stage_action(
+        self,
+        *,
+        action: str,
+        player_id: str,
+    ) -> None:
+        token = str(action).strip()
+        parts = token.split("::", 1)
+        if len(parts) != 2:
+            return
+        prefix, stage_raw = parts
+        if prefix != "task_accept_stage":
+            return
+        stage_key = str(stage_raw).strip().lower()
+        message = self._math_tasks.accept_round_stage(stage=stage_key, player_id=player_id)
+        if message:
+            self._set_message(message)
+
+    def _handle_math_task_accept_answer_action(
+        self,
+        *,
+        action: str,
+        player_id: str,
+    ) -> None:
+        token = str(action).strip()
+        parts = token.split("::", 1)
+        if len(parts) != 2:
+            return
+        prefix, answer_raw = parts
+        if prefix != "task_accept_answer":
+            return
+        try:
+            answer_id = int(answer_raw)
+        except ValueError:
+            return
+        message = self._math_tasks.accept_pending_answer(answer_id=answer_id, player_id=player_id)
+        if message:
+            self._set_message(message)
 
     def _try_handle_math_task_interaction(
         self,
@@ -2065,7 +2638,7 @@ class GameSession:
 
         if target.kind == self._MATH_DIGIT_KIND:
             if not self._math_tasks.active:
-                self._set_message("Сначала активируй задачу (Ctrl+Q)")
+                self._set_message("Сначала активируй задачу (TAB)")
                 return True
             try:
                 digit = int(str(target.label or "").strip())
@@ -2091,18 +2664,19 @@ class GameSession:
                 self._apply_math_task_outcome(outcome, world)
                 return True
             world.remove_object(target.object_id)
+            dispatcher_team = self._math_tasks.dispatcher_team_id or self._player_team(player_id)
             outcome = self._math_tasks.pick_digit(
                 player_id=player_id,
                 digit=digit,
                 rng=self._math_rng,
-                online_player_ids=list(self._player_states.keys()),
+                online_player_ids=self._team_player_ids(dispatcher_team),
             )
             self._apply_math_task_outcome(outcome, world)
             return True
 
         if target.kind == self._MATH_ANSWER_KIND:
             if not self._math_tasks.active:
-                self._set_message("Сначала активируй задачу (Ctrl+Q)")
+                self._set_message("Сначала активируй задачу (TAB)")
                 return True
             try:
                 answer_value = int(str(target.label or "").strip())
@@ -4280,6 +4854,7 @@ class GameSession:
             if o.kind != "sofa" and o.jump_platform_w is not None and o.jump_platform_h is not None
         ]
         self._frame_objects_by_id = {o.object_id: o for o in world.objects}
+        self._frame_rooms_by_id = {r.room_id: r for r in world.rooms}
 
     def _collides_with_blocking(
         self,

@@ -34,6 +34,19 @@ class RenderCache:
     outside_floor_tile: list[pygame.Surface] | None = None
     outside_bush: list[pygame.Surface] | None = None
     outside_bush_layout: dict[tuple[object, ...], list[tuple[int, int, int]]] = field(default_factory=dict)
+    # Reusable full-screen surface — avoids per-frame allocation of the world layer.
+    world_layer: pygame.Surface | None = None
+    # Fog: reusable intermediate surfaces (no allocation on steady-state frames).
+    fog_masked: pygame.Surface | None = None
+    fog_blur_down_medium: pygame.Surface | None = None
+    fog_blur_up_medium: pygame.Surface | None = None
+    fog_blur_down_strong: pygame.Surface | None = None
+    fog_blur_up_strong: pygame.Surface | None = None
+    fog_blur_gray: pygame.Surface | None = None
+    # Fog: memoized surfaces that only need recomputing when the view or player position changes.
+    fog_band_masks: dict[tuple[object, ...], pygame.Surface] = field(default_factory=dict)
+    fog_overlay_key: tuple[object, ...] | None = None
+    fog_overlay_surf: pygame.Surface | None = None
 
 
 class WorldRenderer:
@@ -70,11 +83,28 @@ class WorldRenderer:
         control_hints: list[str] | None = None,
         task_panel_lines: list[str] | None = None,
         multiplayer_lines: list[str] | None = None,
+        task_assignments_lines: list[str] | None = None,
+        task_assignments_rows: list[tuple[str, str | None]] | None = None,
+        player_portraits: dict[str, pygame.Surface] | None = None,
         lan_menu_lines: list[str] | None = None,
     ) -> None:
         width, height = screen.get_size()
         camera = self._build_camera(world, width, height, player_pos)
-        world_layer = pygame.Surface((width, height), pygame.SRCALPHA)
+        size = (width, height)
+        world_layer = self._cache.world_layer
+        if world_layer is None or world_layer.get_size() != size:
+            world_layer = pygame.Surface(size, pygame.SRCALPHA)
+            self._cache.world_layer = world_layer
+            # Screen resize: invalidate all fog buffers — sizes no longer match.
+            self._cache.fog_masked = None
+            self._cache.fog_blur_down_medium = None
+            self._cache.fog_blur_up_medium = None
+            self._cache.fog_blur_down_strong = None
+            self._cache.fog_blur_up_strong = None
+            self._cache.fog_blur_gray = None
+            self._cache.fog_band_masks.clear()
+            self._cache.fog_overlay_key = None
+            self._cache.fog_overlay_surf = None
         all_players: list[tuple[tuple[float, float], pygame.Surface, float, bool]] = [
             (player_pos, player_frame, player_bob, player_left_facing)
         ]
@@ -145,8 +175,18 @@ class WorldRenderer:
             control_hints_top = max(control_hints_top, self._draw_task_panel(screen, task_panel_lines) + 8)
         if control_hints:
             self._draw_control_hints(screen, control_hints, top=control_hints_top)
+        right_top = 54
         if multiplayer_lines:
-            self._draw_right_panel(screen, multiplayer_lines)
+            right_top = self._draw_right_panel(screen, multiplayer_lines, top=right_top) + 8
+        if task_assignments_rows:
+            self._draw_right_panel_rows(
+                screen,
+                task_assignments_rows,
+                top=right_top,
+                player_portraits=player_portraits,
+            )
+        elif task_assignments_lines:
+            self._draw_right_panel(screen, task_assignments_lines, top=right_top)
         if lan_menu_lines:
             self._draw_lan_center_menu(screen, lan_menu_lines)
         if message:
@@ -1788,10 +1828,10 @@ class WorldRenderer:
             screen.blit(surf, (x + pad_x, cy))
             cy += line_h + 3
 
-    def _draw_right_panel(self, screen: pygame.Surface, lines: list[str]) -> None:
+    def _draw_right_panel(self, screen: pygame.Surface, lines: list[str], *, top: int = 54) -> int:
         rendered = [self._lock_marker_font.render(line, True, (235, 240, 244)) for line in lines if line]
         if not rendered:
-            return
+            return int(top)
         max_w = max(surf.get_width() for surf in rendered)
         line_h = max(surf.get_height() for surf in rendered)
         pad_x = 10
@@ -1801,12 +1841,70 @@ class WorldRenderer:
         panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
         panel.fill((8, 12, 18, 170))
         x = max(8, screen.get_width() - panel_w - 10)
-        y = 54
+        y = int(top)
         screen.blit(panel, (x, y))
         cy = y + pad_y
         for surf in rendered:
             screen.blit(surf, (x + pad_x, cy))
             cy += line_h + 3
+        return y + panel_h
+
+    def _draw_right_panel_rows(
+        self,
+        screen: pygame.Surface,
+        rows: list[tuple[str, str | None]],
+        *,
+        top: int = 54,
+        player_portraits: dict[str, pygame.Surface] | None = None,
+    ) -> int:
+        normalized = [(text, pid) for text, pid in rows if str(text).strip()]
+        if not normalized:
+            return int(top)
+        line_h = self._lock_marker_font.get_linesize()
+        icon_size = max(14, line_h + 4)
+        icon_gap = 6
+        rendered_rows: list[tuple[pygame.Surface, pygame.Surface | None, int]] = []
+        scaled_portraits: dict[str, pygame.Surface] = {}
+        max_w = 0
+        for text, player_id in normalized:
+            text_surf = self._lock_marker_font.render(text, True, (235, 240, 244))
+            portrait: pygame.Surface | None = None
+            if player_id is not None and player_portraits is not None:
+                pid = str(player_id).strip()
+                source = player_portraits.get(pid)
+                if source is not None:
+                    portrait = scaled_portraits.get(pid)
+                    if portrait is None:
+                        portrait = pygame.transform.scale(source, (icon_size, icon_size))
+                        scaled_portraits[pid] = portrait
+            row_h = max(text_surf.get_height(), icon_size if portrait is not None else 0)
+            row_w = text_surf.get_width() + (icon_size + icon_gap if portrait is not None else 0)
+            rendered_rows.append((text_surf, portrait, row_h))
+            if row_w > max_w:
+                max_w = row_w
+        if max_w <= 0:
+            return int(top)
+        pad_x = 10
+        pad_y = 8
+        line_gap = 3
+        panel_w = max_w + pad_x * 2
+        panel_h = (sum(row_h for _, _, row_h in rendered_rows)) + pad_y * 2 + max(0, len(rendered_rows) - 1) * line_gap
+        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        panel.fill((8, 12, 18, 170))
+        x = max(8, screen.get_width() - panel_w - 10)
+        y = int(top)
+        screen.blit(panel, (x, y))
+        cy = y + pad_y
+        for text_surf, portrait, row_h in rendered_rows:
+            row_x = x + pad_x
+            if portrait is not None:
+                iy = cy + (row_h - portrait.get_height()) // 2
+                screen.blit(portrait, (row_x, iy))
+                row_x += portrait.get_width() + icon_gap
+            ty = cy + (row_h - text_surf.get_height()) // 2
+            screen.blit(text_surf, (row_x, ty))
+            cy += row_h + line_gap
+        return y + panel_h
 
     def _draw_lan_center_menu(self, screen: pygame.Surface, lines: list[str]) -> None:
         normalized = [line for line in lines if line]
@@ -1851,22 +1949,25 @@ class WorldRenderer:
         if not fog.enabled:
             return world_layer
 
-        out = world_layer.copy()
         vision_multiplier = world.player_stats.vision_multiplier()
         near, mid, far, dark = fog.scaled_radii(vision_multiplier)
         cx = int(center[0])
         cy = int(center[1])
-
-        medium_blur = self._blur_surface(world_layer, fog.medium_blur_scale)
-        strong_blur = self._blur_surface(world_layer, fog.far_blur_scale)
-        grayscale_far = self._grayscale_surface(strong_blur)
         transition = max(0, int(fog.transition))
 
-        self._blit_square_band(out, medium_blur, (cx, cy), near, mid, transition)
-        self._blit_square_band(out, strong_blur, (cx, cy), mid, dark, transition)
-        self._blit_square_band(out, grayscale_far, (cx, cy), far, dark, transition)
-        fog_overlay = self._build_fog_overlay(
-            size=out.get_size(),
+        # Compute blurs into pre-allocated surfaces (no new allocations on steady frames).
+        medium_blur = self._blur_surface_into(world_layer, fog.medium_blur_scale, "medium")
+        strong_blur = self._blur_surface_into(world_layer, fog.far_blur_scale, "strong")
+        grayscale_far = self._grayscale_surface_cached(strong_blur)
+
+        # Apply blurred bands directly onto world_layer (no full-screen copy needed).
+        # All blurs are computed from world_layer before any writes, so in-place is safe.
+        self._blit_square_band(world_layer, medium_blur, (cx, cy), near, mid, transition)
+        self._blit_square_band(world_layer, strong_blur, (cx, cy), mid, dark, transition)
+        self._blit_square_band(world_layer, grayscale_far, (cx, cy), far, dark, transition)
+
+        fog_overlay = self._build_fog_overlay_cached(
+            size=world_layer.get_size(),
             center=(cx, cy),
             near=near,
             mid=mid,
@@ -1878,16 +1979,60 @@ class WorldRenderer:
             outer_alpha=fog.outer_dark_alpha,
             transition=transition,
         )
-        out.blit(fog_overlay, (0, 0))
-        return out
+        world_layer.blit(fog_overlay, (0, 0))
+        return world_layer
 
-    def _blur_surface(self, source: pygame.Surface, scale: float) -> pygame.Surface:
+    def _blur_surface_into(self, source: pygame.Surface, scale: float, slot: str) -> pygame.Surface:
+        """Box-blur via down/up scale. Reuses pre-allocated surfaces to avoid per-frame allocation."""
         sw, sh = source.get_size()
         safe = max(0.05, min(scale, 1.0))
         down_w = max(1, int(sw * safe))
         down_h = max(1, int(sh * safe))
-        reduced = pygame.transform.scale(source, (down_w, down_h))
-        return pygame.transform.scale(reduced, (sw, sh))
+
+        if slot == "medium":
+            down_buf = self._cache.fog_blur_down_medium
+            up_buf = self._cache.fog_blur_up_medium
+        else:
+            down_buf = self._cache.fog_blur_down_strong
+            up_buf = self._cache.fog_blur_up_strong
+
+        if down_buf is None or down_buf.get_size() != (down_w, down_h):
+            down_buf = pygame.Surface((down_w, down_h), source.get_flags())
+        if up_buf is None or up_buf.get_size() != (sw, sh):
+            up_buf = pygame.Surface((sw, sh), source.get_flags())
+
+        pygame.transform.scale(source, (down_w, down_h), down_buf)
+        pygame.transform.scale(down_buf, (sw, sh), up_buf)
+
+        if slot == "medium":
+            self._cache.fog_blur_down_medium = down_buf
+            self._cache.fog_blur_up_medium = up_buf
+        else:
+            self._cache.fog_blur_down_strong = down_buf
+            self._cache.fog_blur_up_strong = up_buf
+        return up_buf
+
+    def _grayscale_surface_cached(self, source: pygame.Surface) -> pygame.Surface:
+        """Grayscale the source surface, reusing a pre-allocated output buffer."""
+        transform = getattr(pygame.transform, "grayscale", None)
+        if callable(transform):
+            gray = self._cache.fog_blur_gray
+            if gray is None or gray.get_size() != source.get_size():
+                gray = pygame.Surface(source.get_size(), source.get_flags())
+                self._cache.fog_blur_gray = gray
+            return transform(source, gray)
+
+        # Fallback path for pygame builds without transform.grayscale.
+        gray = self._cache.fog_blur_gray
+        if gray is None or gray.get_size() != source.get_size():
+            gray = source.copy()
+            self._cache.fog_blur_gray = gray
+        else:
+            gray.blit(source, (0, 0))
+        tint = pygame.Surface(source.get_size(), pygame.SRCALPHA)
+        tint.fill((128, 128, 128, 160))
+        gray.blit(tint, (0, 0))
+        return gray
 
     def _grayscale_surface(self, source: pygame.Surface) -> pygame.Surface:
         transform = getattr(pygame.transform, "grayscale", None)
@@ -1914,9 +2059,42 @@ class WorldRenderer:
         if outer_radius <= inner_radius:
             return
         mask = self._square_band_mask(target.get_size(), center, inner_radius, outer_radius, transition)
-        masked = layer.copy()
+        # Reuse a pre-allocated surface instead of layer.copy() to avoid per-call allocation.
+        masked = self._cache.fog_masked
+        if masked is None or masked.get_size() != layer.get_size():
+            masked = pygame.Surface(layer.get_size(), layer.get_flags())
+            self._cache.fog_masked = masked
+        masked.fill((0, 0, 0, 0))  # clear residue from previous frame before copying
+        masked.blit(layer, (0, 0))
         masked.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
         target.blit(masked, (0, 0))
+
+    def _build_fog_overlay_cached(
+        self,
+        *,
+        size: tuple[int, int],
+        center: tuple[int, int],
+        near: int,
+        mid: int,
+        far: int,
+        dark: int,
+        fog_color: tuple[int, int, int],
+        mid_alpha: int,
+        far_alpha: int,
+        outer_alpha: int,
+        transition: int,
+    ) -> pygame.Surface:
+        key = (size, center, near, mid, far, dark, fog_color, mid_alpha, far_alpha, outer_alpha, transition)
+        if key == self._cache.fog_overlay_key and self._cache.fog_overlay_surf is not None:
+            return self._cache.fog_overlay_surf
+        overlay = self._build_fog_overlay(
+            size=size, center=center, near=near, mid=mid, far=far, dark=dark,
+            fog_color=fog_color, mid_alpha=mid_alpha, far_alpha=far_alpha,
+            outer_alpha=outer_alpha, transition=transition,
+        )
+        self._cache.fog_overlay_key = key
+        self._cache.fog_overlay_surf = overlay
+        return overlay
 
     def _build_fog_overlay(
         self,
@@ -1953,13 +2131,21 @@ class WorldRenderer:
         outer_radius: int,
         transition: int,
     ) -> pygame.Surface:
+        key = (size, center, inner_radius, outer_radius, transition)
+        cached = self._cache.fog_band_masks.get(key)
+        if cached is not None:
+            return cached
         mask = pygame.Surface(size, pygame.SRCALPHA)
         outer_rect = self._square_rect(center, outer_radius, size)
         inner_rect = self._square_rect(center, inner_radius, size)
         pygame.draw.rect(mask, (255, 255, 255, 255), outer_rect)
         pygame.draw.rect(mask, (0, 0, 0, 0), inner_rect)
         if transition > 0:
-            return self._soften_alpha_surface(mask, transition)
+            mask = self._soften_alpha_surface(mask, transition)
+        # Cap cache size: center drifts at world edges, don't accumulate indefinitely.
+        if len(self._cache.fog_band_masks) >= 64:
+            self._cache.fog_band_masks.clear()
+        self._cache.fog_band_masks[key] = mask
         return mask
 
     def _fill_square(

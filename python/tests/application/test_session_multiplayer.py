@@ -9,6 +9,8 @@ run() is never called in these tests.
 """
 from __future__ import annotations
 
+import random
+
 import pytest
 
 from ksusha_game.application.commands import PlayerActionCommand
@@ -126,6 +128,42 @@ class TestRemovePlayer:
         session.remove_player(player_id="p2")
         assert "p1" in session._player_states
         assert "p3" in session._player_states
+
+    def test_remove_player_releases_math_assignments(self, session, stats):
+        add(session, "p1", stats)
+        add(session, "p2", stats)
+        session._math_tasks.unlock_math_quest()
+        session._math_tasks.select_task(player_id="p1", task_no=1, now_ts=1.0, team_id="A")
+        rng = random.Random(123)
+        session._math_tasks.pick_digit(player_id="p1", digit=4, rng=rng, online_player_ids=["p1", "p2"])
+        session._math_tasks.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
+        session._math_tasks.reassign_round_stage(
+            stage="pick_first",
+            assignee_player_id="p2",
+            requested_by_player_id="p1",
+            online_player_ids=["p1", "p2"],
+        )
+        pending = session._math_tasks.active_pending_answer()
+        assert pending is not None
+        assert pending.assigned_player_id == "p2"
+        session.remove_player(player_id="p2")
+        assert pending.assigned_player_id is None
+        assert pending.accepted is True
+        assert session._math_tasks.current_round is not None
+        assert session._math_tasks.current_round.assignments["pick_first"] is None
+
+    def test_remove_player_reelects_dispatcher_from_same_team(self, session, stats):
+        add(session, "p1", stats)
+        add(session, "p2", stats)
+        add(session, "p3", stats)
+        session._set_player_team("p1", "A")
+        session._set_player_team("p2", "A")
+        session._set_player_team("p3", "B")
+        session._math_tasks.unlock_math_quest()
+        session._math_tasks.select_task(player_id="p2", task_no=1, now_ts=1.0, team_id="A")
+        assert session._math_tasks.dispatcher_player_id == "p2"
+        session.remove_player(player_id="p2")
+        assert session._math_tasks.dispatcher_player_id == "p1"
 
 
 # ---------------------------------------------------------------------------
@@ -397,8 +435,8 @@ class TestApplyNetworkSnapshot:
         snapshot = {
             "level": session._config.map_path.stem,
             "players": [
-                {"id": "p1", "x": 11.0, "y": 12.0, "facing": "down", "walk_time": 0.0, "jump_time_left": 0.0},
-                {"id": "r2", "x": 21.0, "y": 22.0, "facing": "left", "walk_time": 0.3, "jump_time_left": 0.1},
+                {"id": "p1", "team": "A", "x": 11.0, "y": 12.0, "facing": "down", "walk_time": 0.0, "jump_time_left": 0.0},
+                {"id": "r2", "team": "B", "x": 21.0, "y": 22.0, "facing": "left", "walk_time": 0.3, "jump_time_left": 0.1},
             ],
         }
 
@@ -409,6 +447,10 @@ class TestApplyNetworkSnapshot:
         assert "host:p1" in session._player_states
         assert session._player_states["host:p1"].player.x == pytest.approx(11.0)
         assert session._player_states["host:p1"].player.y == pytest.approx(12.0)
+        assert session._player_team("p1") == "B"
+        assert session._player_team("host:p1") == "A"
+        assert session._network_outbound_player_id("p1") == "r2"
+        assert session._network_outbound_player_id("host:p1") == "p1"
 
     def test_snapshot_removes_stale_remote_players(self, session, stats, world):
         add(session, GameSession._LOCAL_PLAYER_ID, stats)
