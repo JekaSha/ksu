@@ -202,7 +202,7 @@ class LanPresenceHost:
 
     def _run_broadcast(self) -> None:
         while not self._stop.is_set():
-            self._broadcast_event.wait(timeout=0.01)
+            self._broadcast_event.wait(timeout=0.002)
             self._broadcast_event.clear()
             with self._lock:
                 pos = self._pending_positions
@@ -511,7 +511,6 @@ class LanServerBrowser:
             "dy": new_input[1],
             "holding_pickup": new_input[2],
             "run_multiplier": new_input[3],
-            "ts": time.time(),
         }
         self._send_json(payload)
 

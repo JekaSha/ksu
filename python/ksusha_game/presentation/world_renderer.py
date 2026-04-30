@@ -1751,23 +1751,32 @@ class WorldRenderer:
         label_h = 40
         pad = 28
         title_gap = 24
-        panel_w = pad * 2 + cols * slot_size + (cols - 1) * spacing
+        grid_w = cols * slot_size + (cols - 1) * spacing
+        panel_w = pad * 2 + grid_w
         panel_h = pad * 2 + 72 + title_gap + rows * (slot_size + label_h) + max(0, rows - 1) * 16 + 46
+        title_surf = self._menu_title_font.render(title, True, (250, 240, 220))
+        hint_surf: pygame.Surface | None = None
+        if hint:
+            hint_surf = self._menu_body_font.render(hint, True, (244, 236, 210))
+        text_w = title_surf.get_width()
+        if hint_surf is not None:
+            text_w = max(text_w, hint_surf.get_width())
+        panel_w = max(panel_w, text_w + pad * 2 + 16)
         width, height = screen.get_size()
         panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
         panel.fill((20, 20, 26, 236))
         pygame.draw.rect(panel, (220, 190, 112, 235), pygame.Rect(0, 0, panel_w, panel_h), width=3)
 
-        title_surf = self._menu_title_font.render(title, True, (250, 240, 220))
         panel.blit(title_surf, ((panel_w - title_surf.get_width()) // 2, 10))
         grid_top = 10 + title_surf.get_height() + title_gap
+        grid_left = (panel_w - grid_w) // 2
 
         for i, entry in enumerate(entries_raw):
             if not isinstance(entry, dict):
                 continue
             row = i // cols
             col = i % cols
-            x = pad + col * (slot_size + spacing)
+            x = grid_left + col * (slot_size + spacing)
             y = grid_top + row * (slot_size + label_h + 10)
             rect = pygame.Rect(x, y, slot_size, slot_size)
             pygame.draw.rect(panel, (20, 24, 34), rect)
@@ -1802,8 +1811,7 @@ class WorldRenderer:
             ly = rect.y + slot_size + 2
             panel.blit(label_surf, (lx, ly))
 
-        if hint:
-            hint_surf = self._menu_body_font.render(hint, True, (244, 236, 210))
+        if hint_surf is not None:
             panel.blit(hint_surf, ((panel_w - hint_surf.get_width()) // 2, panel_h - hint_surf.get_height() - 8))
         screen.blit(panel, ((width - panel_w) // 2, (height - panel_h) // 2))
 

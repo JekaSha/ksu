@@ -15,7 +15,7 @@
     "rows": 8,
     "detect_content_rect": true,
     "alignment_mode": "rect_center",
-    "component_pick": "none",
+    "component_pick": "largest",
     "normalize_canvas": true,
     "chroma_key": true,
     "chroma_green_delta": 24,
@@ -26,7 +26,7 @@
     "output_size": [172, 125],
     "body_height": 118,
     "body_scale_min": 0.72,
-    "body_scale_max": 4.0,
+    "body_scale_max": 1.28,
     "bbox_padding": 0,
     "foot_margin": 0,
     "row_by_direction": {

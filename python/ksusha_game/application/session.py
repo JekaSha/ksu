@@ -64,6 +64,22 @@ class GameSession:
         _MATH_DIGIT_KIND,
         _MATH_ANSWER_KIND,
     )
+    # Objects with none of these properties are permanent map fixtures that never
+    # change during play. They are omitted from periodic snapshots to cut payload;
+    # clients preserve them from the initial map load.
+    # Exclusions: pickup_item_id (picked up → removed), lock_key_sets (unlockable),
+    # transitions (state machine), math-related kinds (removed on interact).
+    _SNAPSHOT_MUTABLE_KINDS: frozenset[str] = frozenset({"math_book", "math_digit", "math_answer"})
+
+    @staticmethod
+    def _is_snapshot_static(obj: "WorldObject") -> bool:
+        return (
+            obj.pickup_item_id is None
+            and not obj.lock_key_sets
+            and not obj.transitions
+            and obj.kind not in GameSession._SNAPSHOT_MUTABLE_KINDS
+        )
+
     _ACTION_PROCESSING_ORDER: tuple[str, ...] = (
         "inventory_move",
         "inventory_up",
@@ -87,6 +103,7 @@ class GameSession:
         self._player_states: dict[str, SessionPlayerState] = {}
         self._player_display_names: dict[str, str] = {}
         self._player_teams: dict[str, str] = {}
+        self._player_character_ids: dict[str, str] = {}
         self._spray_tags: list[SprayTag] = []
         self._spray_frame_interval = 0.055
         self._room_item_use_counts: dict[tuple[str, str], int] = {}
@@ -102,6 +119,10 @@ class GameSession:
         self._math_rng = random.Random()
         self._network_raw_to_local_player_ids: dict[str, str] = {}
         self._network_local_to_raw_player_ids: dict[str, str] = {}
+        # IDs of static map objects (plants, decorative sofas) that are omitted from
+        # periodic snapshots and preserved client-side from the initial map load.
+        # Populated once in _load_runtime_resources; stays empty in unit tests.
+        self._map_static_object_ids: set[str] = set()
         # Per-frame caches: rebuilt once per frame after world mutations, before physics.
         self._frame_blocking_objects: list[WorldObject] = []
         self._frame_door_objects: list[WorldObject] = []
@@ -174,6 +195,23 @@ class GameSession:
     def _team_player_ids(self, team_id: str | None) -> list[str]:
         normalized = self._normalize_team_id(team_id)
         return [pid for pid in self._player_states.keys() if self._player_team(pid) == normalized]
+
+    def _set_player_character_id(self, player_id: str, character_id: str | None) -> None:
+        pid = str(player_id).strip()
+        if not pid:
+            return
+        token = str(character_id or "").strip()
+        _skin_pool_dir, _sprite_path, _backpack_path, resolved = resolve_character_config(token)
+        self._player_character_ids[pid] = resolved
+
+    def _player_character_id(self, player_id: str) -> str:
+        pid = str(player_id).strip()
+        if not pid:
+            return str(self._config.character_id).strip() or "ksu"
+        token = self._player_character_ids.get(pid)
+        if token:
+            return token
+        return str(self._config.character_id).strip() or "ksu"
 
     def _build_math_inbox_rows(self, *, player_id: str) -> list[tuple[str, str, str | None, str | None]]:
         pid = str(player_id).strip()
@@ -336,6 +374,7 @@ class GameSession:
         self._player_states = {}
         self._player_display_names = {}
         self._player_teams = {}
+        self._player_character_ids = {}
         self._reset_network_player_id_maps()
         self.add_player(
             player_id=self._LOCAL_PLAYER_ID,
@@ -379,6 +418,30 @@ class GameSession:
                 return f"{h:02d}:{m:02d}:{s:02d}"
             return f"{m:02d}:{s:02d}"
 
+        character_animation_caches: dict[str, tuple[ScaledAnimationCache, ScaledAnimationCache]] = {}
+
+        def _animation_caches_for_character(char_id: str) -> tuple[ScaledAnimationCache, ScaledAnimationCache]:
+            token = str(char_id).strip()
+            if not token:
+                return walk_cache, backpack_cache
+            cached_pair = character_animation_caches.get(token)
+            if cached_pair is not None:
+                return cached_pair
+            try:
+                _skin_pool_dir, sprite_path, backpack_path, resolved = resolve_character_config(token)
+                resolved_cached = character_animation_caches.get(resolved)
+                if resolved_cached is not None:
+                    character_animation_caches[token] = resolved_cached
+                    return resolved_cached
+                walk_anim = ScaledAnimationCache(loader.load_walk_frames(project_root / sprite_path))
+                backpack_anim = ScaledAnimationCache(loader.load_walk_frames(project_root / backpack_path))
+                pair = (walk_anim, backpack_anim)
+                character_animation_caches[resolved] = pair
+                character_animation_caches[token] = pair
+                return pair
+            except Exception:
+                return walk_cache, backpack_cache
+
         def _build_character_preview(char_id: str) -> pygame.Surface | None:
             token = str(char_id).strip()
             if not token:
@@ -389,8 +452,9 @@ class GameSession:
             try:
                 _skin_pool_dir, sprite_path, _backpack_path, _resolved = resolve_character_config(token)
                 anim = ScaledAnimationCache(loader.load_walk_frames(project_root / sprite_path))
-                frame = anim.frames_for_height(82)[Direction.DOWN][0]
-                max_side = 46
+                # Build large preview first, then downscale in UI to preserve detail.
+                frame = anim.frames_for_height(260)[Direction.DOWN][0]
+                max_side = 118
                 scale = min(max_side / max(1, frame.get_width()), max_side / max(1, frame.get_height()))
                 target_size = (
                     max(1, int(round(frame.get_width() * scale))),
@@ -415,11 +479,15 @@ class GameSession:
                 runtime_sprite_path = sprite_path
                 runtime_backpack_sprite_path = backpack_path
                 current_character_id = resolved
+                character_animation_caches[resolved] = (walk_cache, backpack_cache)
+                self._set_player_character_id(self._LOCAL_PLAYER_ID, resolved)
                 user_settings = dict(user_settings)
                 user_settings["character_id"] = resolved
                 user_settings["player_name"] = local_player_name
                 user_settings["team_id"] = local_team_id
                 save_user_settings(user_settings)
+                if browser.is_connected():
+                    browser.send_action(action=f"set_character::{resolved}")
                 renderer.clear_render_cache()
                 self._set_message(f"Персонаж: {resolved}")
             except Exception as exc:
@@ -437,6 +505,8 @@ class GameSession:
         self._set_player_display_name(self._LOCAL_PLAYER_ID, local_player_name)
         self._set_player_team(self._LOCAL_PLAYER_ID, local_team_id)
         current_character_id = str(self._config.character_id).strip() or "ksu"
+        self._set_player_character_id(self._LOCAL_PLAYER_ID, current_character_id)
+        character_animation_caches[current_character_id] = (walk_cache, backpack_cache)
         user_settings = dict(user_settings)
         user_settings["player_name"] = local_player_name
         user_settings["team_id"] = local_team_id
@@ -546,6 +616,7 @@ class GameSession:
                 # Joining remote host: keep only local player state until snapshots arrive.
                 for pid in [pid for pid in self._player_states.keys() if pid != self._LOCAL_PLAYER_ID]:
                     self.remove_player(player_id=pid)
+                browser.send_action(action=f"set_character::{current_character_id}")
             if (not is_connected) and was_connected and not browser.is_connecting():
                 connected_since_monotonic = None
                 connected_host_summary = None
@@ -1090,6 +1161,8 @@ class GameSession:
                         sprite_path=runtime_sprite_path,
                         backpack_sprite_path=runtime_backpack_sprite_path,
                     )
+                    character_animation_caches.clear()
+                    character_animation_caches[current_character_id] = (walk_cache, backpack_cache)
                     for state in self._player_states.values():
                         state.player.stats = world.player_stats
                         state.grabbed_object_id = None
@@ -1182,7 +1255,9 @@ class GameSession:
                     drag_hold = holding_pickup
 
                     wearing_backpack = self._inventory_has_item(inventory, "backpack")
-                    animation_cache = backpack_cache if wearing_backpack else walk_cache
+                    player_character_id = self._player_character_id(player_id)
+                    walk_anim, backpack_anim = _animation_caches_for_character(player_character_id)
+                    animation_cache = backpack_anim if wearing_backpack else walk_anim
                     frames_by_dir = animation_cache.frames_for_height(target_h)
                     if net_client_mode:
                         # Host-authoritative mode: do not locally simulate players,
@@ -1541,7 +1616,7 @@ class GameSession:
                 if entries_payload:
                     character_picker = {
                         "title": "CHARACTER SELECT",
-                        "hint": "A/D (or arrows): select | Q/Enter: apply | Esc: close",
+                        "hint": "A/D: select | Q/Enter: apply | Esc: close",
                         "entries": entries_payload,
                         "selected_index": max(0, min(character_menu_selected, len(entries_payload) - 1)),
                         "columns": min(character_menu_cols, max(2, len(entries_payload))),
@@ -1774,6 +1849,12 @@ class GameSession:
         if not world.spray_profiles:
             self._queue_async_preload("spray_profile", "")
         apply_interior_physics(world, object_sprites)
+        # Snapshot bandwidth optimization: track IDs of truly static map objects (no
+        # pickups, locks, transitions, or animation) so they can be omitted from the
+        # periodic 5 Hz snapshot and preserved client-side instead.
+        self._map_static_object_ids = {
+            obj.object_id for obj in world.objects if self._is_snapshot_static(obj)
+        }
         walk_src = sprite_path if sprite_path is not None else self._config.sprite_path
         backpack_src = backpack_sprite_path if backpack_sprite_path is not None else self._config.backpack_sprite_path
         walk_cache = ScaledAnimationCache(loader.load_walk_frames(project_root / walk_src))
@@ -1832,6 +1913,7 @@ class GameSession:
         spawn_y: float,
         stats: PlayerStats,
         team_id: str | None = None,
+        character_id: str | None = None,
         base_inventory_capacity: int = 5,
     ) -> None:
         if player_id in self._player_states:
@@ -1845,6 +1927,7 @@ class GameSession:
         self._set_player_display_name(player_id, player_id)
         if team_id is not None:
             self._set_player_team(player_id, team_id)
+        self._set_player_character_id(player_id, character_id)
         self._movement_inputs[player_id] = (0, 0, False, 1.0)
 
     def remove_player(self, *, player_id: str) -> None:
@@ -1856,6 +1939,7 @@ class GameSession:
         self._player_states.pop(player_id, None)
         self._player_display_names.pop(player_id, None)
         self._player_teams.pop(player_id, None)
+        self._player_character_ids.pop(player_id, None)
         self._movement_inputs.pop(player_id, None)
         dispatcher_team = self._math_tasks.dispatcher_team_id
         team_online = self._team_player_ids(dispatcher_team) if dispatcher_team else list(self._player_states.keys())
@@ -1912,7 +1996,7 @@ class GameSession:
             }
             for pid, s in self._player_states.items()
         ]
-        raw: dict[str, object] = {"type": "pos", "pos": {"players": players, "ts": time.time()}}
+        raw: dict[str, object] = {"type": "pos", "pos": {"players": players}}
         return (json.dumps(raw, ensure_ascii=True) + "\n").encode("utf-8")
 
     def _apply_position_update(
@@ -1953,6 +2037,7 @@ class GameSession:
                     "id": player_id,
                     "name": self._player_display_name(player_id),
                     "team": self._player_team(player_id),
+                    "character_id": self._player_character_id(player_id),
                     "x": float(state.player.x),
                     "y": float(state.player.y),
                     "facing": state.player.facing.value,
@@ -1968,7 +2053,7 @@ class GameSession:
         return {
             "level": self._config.map_path.stem,
             "players": players,
-            "objects": [self._world_object_payload(obj) for obj in world.objects],
+            "objects": [self._world_object_payload(obj) for obj in world.objects if not self._is_snapshot_static(obj)],
             "spray_tags": [self._spray_tag_payload(tag) for tag in self._spray_tags],
             "room_item_use_counts": room_item_use_counts,
             "math_tasks": self._math_tasks.to_payload(),
@@ -2027,9 +2112,11 @@ class GameSession:
                     spawn_y=float(item.get("y", world.spawn_y)),
                     stats=world.player_stats,
                     team_id=item.get("team"),
+                    character_id=item.get("character_id"),
                 )
             self._set_player_display_name(player_id, item.get("name"))
             self._set_player_team(player_id, item.get("team"))
+            self._set_player_character_id(player_id, item.get("character_id"))
             state = self._player_state(player_id)
             if state is None:
                 continue
@@ -2067,7 +2154,17 @@ class GameSession:
                 obj = self._world_object_from_payload(raw_obj)
                 if obj is not None:
                     restored_objects.append(obj)
-            world.objects = restored_objects
+            # Static map objects (plants, decorative sofas) are omitted from periodic
+            # snapshots to cut payload. Restore them from the current world using the
+            # known-static IDs collected at map load — snapshot is authoritative for
+            # everything else (mutable objects, pickups, doors).
+            snapshot_ids = {obj.object_id for obj in restored_objects}
+            preserved_static = [
+                obj for obj in world.objects
+                if obj.object_id in self._map_static_object_ids
+                and obj.object_id not in snapshot_ids
+            ]
+            world.objects = preserved_static + restored_objects
             known_object_ids = {obj.object_id for obj in world.objects}
             for state in self._player_states.values():
                 if state.grabbed_object_id and state.grabbed_object_id not in known_object_ids:
@@ -2469,6 +2566,12 @@ class GameSession:
             return
         if action.startswith("task_accept_answer::"):
             self._handle_math_task_accept_answer_action(
+                action=action,
+                player_id=player_id,
+            )
+            return
+        if action.startswith("set_character::"):
+            self._handle_set_character_action(
                 action=action,
                 player_id=player_id,
             )
@@ -3028,6 +3131,24 @@ class GameSession:
         message = self._math_tasks.accept_pending_answer(answer_id=answer_id, player_id=player_id)
         if message:
             self._set_message(message)
+
+    def _handle_set_character_action(
+        self,
+        *,
+        action: str,
+        player_id: str,
+    ) -> None:
+        token = str(action).strip()
+        parts = token.split("::", 1)
+        if len(parts) != 2:
+            return
+        prefix, char_raw = parts
+        if prefix != "set_character":
+            return
+        char_id = str(char_raw).strip()
+        if not char_id:
+            return
+        self._set_player_character_id(player_id, char_id)
 
     def _try_handle_math_task_interaction(
         self,
