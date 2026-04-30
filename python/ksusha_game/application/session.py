@@ -1386,8 +1386,6 @@ class GameSession:
                 flow_solved = max(0, int(self._math_tasks.solved_count))
                 if flow_solved >= flow_target and flow_produced >= flow_target:
                     flow_iteration = flow_target
-                elif active_pending is not None:
-                    flow_iteration = max(1, min(flow_target, int(active_pending.answer_id)))
                 else:
                     flow_iteration = max(1, min(flow_target, flow_produced + 1))
                 iteration_line = f"Итерация: {flow_iteration} из {flow_target}"
@@ -1438,20 +1436,20 @@ class GameSession:
                     task_assignments_rows.append((line, None))
                 else:
                     active_id = self._math_tasks.active_answer_id
-                    flow_answers = [
-                        item
-                        for item in unresolved
-                        if item.answer_id == active_id or not bool(item.accepted)
-                    ]
-                    if not flow_answers:
-                        flow_answers = unresolved[:1]
-                    for pending_item in flow_answers[:8]:
+                    for pending_item in unresolved[:8]:
                         marker = ">" if pending_item.answer_id == self._math_tasks.active_answer_id else "-"
                         assignee_id = pending_item.assigned_player_id
                         assignee = self._player_caption(assignee_id) if assignee_id else "любой игрок"
                         expr = f"{pending_item.first_digit}{pending_item.operation}{pending_item.second_digit}=?"
+                        if pending_item.answer_id == active_id:
+                            queue_state = "active"
+                        else:
+                            queue_state = "queued"
                         accepted_state = "ok" if pending_item.accepted else "wait accept"
-                        line = f"{marker} #{pending_item.answer_id} {expr} | найти результат -> {assignee} [{accepted_state}]"
+                        line = (
+                            f"{marker} #{pending_item.answer_id} {expr} | найти результат -> "
+                            f"{assignee} [{queue_state}, {accepted_state}]"
+                        )
                         task_assignments_lines.append(line)
                         task_assignments_rows.append((line, assignee_id))
             if browser.is_connected():
