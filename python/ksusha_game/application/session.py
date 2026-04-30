@@ -504,9 +504,8 @@ class GameSession:
                             task_menu_section = "quests"
                             task_menu_assignment_targets.clear()
                             continue
-                        running = False
+                        self._set_message("Esc: меню закрыто")
                         continue
-
                     if show_server_list:
                         if reconnect_candidate is not None:
                             if event.key in {pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_y}:
@@ -588,10 +587,10 @@ class GameSession:
                             task_menu_section = "inbox"
                             continue
                         if task_menu_section == "quests":
-                            if event.key in {pygame.K_w, pygame.K_UP}:
+                            if event.key == pygame.K_w:
                                 task_menu_selected_quest = max(0, task_menu_selected_quest - 1)
                                 continue
-                            if event.key in {pygame.K_s, pygame.K_DOWN}:
+                            if event.key == pygame.K_s:
                                 task_menu_selected_quest = min(0, task_menu_selected_quest + 1)
                                 continue
                             if event.key == pygame.K_q:
@@ -606,16 +605,16 @@ class GameSession:
                                     task_menu_section = "tasks"
                                 continue
                         elif task_menu_section == "tasks":
-                            if event.key in {pygame.K_w, pygame.K_UP}:
+                            if event.key == pygame.K_w:
                                 task_menu_selected_task = (task_menu_selected_task - 1) % 9
                                 continue
-                            if event.key in {pygame.K_s, pygame.K_DOWN}:
+                            if event.key == pygame.K_s:
                                 task_menu_selected_task = (task_menu_selected_task + 1) % 9
                                 continue
-                            if event.key in {pygame.K_a, pygame.K_LEFT}:
+                            if event.key == pygame.K_a:
                                 task_menu_selected_task = (task_menu_selected_task - 1) % 9
                                 continue
-                            if event.key in {pygame.K_d, pygame.K_RIGHT}:
+                            if event.key == pygame.K_d:
                                 task_menu_selected_task = (task_menu_selected_task + 1) % 9
                                 continue
                             if event.key == pygame.K_q:
@@ -655,10 +654,10 @@ class GameSession:
                                     self._set_message("Для тебя пока нет новых задач")
                                 continue
                             task_menu_selected_inbox = max(0, min(task_menu_selected_inbox, len(inbox_rows) - 1))
-                            if event.key in {pygame.K_w, pygame.K_UP}:
+                            if event.key == pygame.K_w:
                                 task_menu_selected_inbox = (task_menu_selected_inbox - 1) % len(inbox_rows)
                                 continue
-                            if event.key in {pygame.K_s, pygame.K_DOWN}:
+                            if event.key == pygame.K_s:
                                 task_menu_selected_inbox = (task_menu_selected_inbox + 1) % len(inbox_rows)
                                 continue
                             if event.key == pygame.K_q:
@@ -719,17 +718,17 @@ class GameSession:
                                 0,
                                 min(task_menu_selected_assignment, len(assignment_rows) - 1),
                             )
-                            if event.key in {pygame.K_w, pygame.K_UP}:
+                            if event.key == pygame.K_w:
                                 task_menu_selected_assignment = (task_menu_selected_assignment - 1) % len(assignment_rows)
                                 continue
-                            if event.key in {pygame.K_s, pygame.K_DOWN}:
+                            if event.key == pygame.K_s:
                                 task_menu_selected_assignment = (task_menu_selected_assignment + 1) % len(assignment_rows)
                                 continue
                             if event.key == pygame.K_q:
                                 task_menu_section = "tasks"
                                 continue
                             selected_row_key, selected_row_label = assignment_rows[task_menu_selected_assignment]
-                            if event.key in {pygame.K_a, pygame.K_LEFT, pygame.K_d, pygame.K_RIGHT}:
+                            if event.key in {pygame.K_a, pygame.K_d}:
                                 preview_assignee = task_menu_assignment_targets.get(selected_row_key)
                                 if not preview_assignee or preview_assignee not in team_player_ids:
                                     if selected_row_key.startswith("stage:") and round_state is not None:
@@ -747,7 +746,7 @@ class GameSession:
                                         preview_assignee = selected_pending.assigned_player_id if selected_pending is not None else None
                                 if not preview_assignee or preview_assignee not in team_player_ids:
                                     preview_assignee = team_player_ids[0]
-                                shift = -1 if event.key in {pygame.K_a, pygame.K_LEFT} else 1
+                                shift = -1 if event.key == pygame.K_a else 1
                                 base_idx = team_player_ids.index(preview_assignee)
                                 next_assignee = team_player_ids[(base_idx + shift) % len(team_player_ids)]
                                 task_menu_assignment_targets[selected_row_key] = next_assignee
@@ -778,10 +777,9 @@ class GameSession:
                                         player_id=self._LOCAL_PLAYER_ID,
                                         action=action,
                                         issued_at=now,
-                                    )
+                                )
                                 self._set_message(f"{selected_row_label} -> {self._player_caption(target_assignee)}")
                                 continue
-                        continue
 
                     for controller in input_controllers.values():
                         controller.on_keydown(event, now)
@@ -875,14 +873,9 @@ class GameSession:
             target_h = max(28, int(height * self._config.sprite_sheet.target_height_ratio))
             keys = pygame.key.get_pressed()
             for player_id, controller in input_controllers.items():
-                if show_task_menu and player_id == self._LOCAL_PLAYER_ID:
-                    dx, dy = 0, 0
-                    holding_pickup = False
-                    run_boost = 1.0
-                else:
-                    dx, dy = controller.read_direction(keys)
-                    holding_pickup = controller.is_action_pressed(keys, "pickup")
-                    run_boost = controller.speed_multiplier(now, dx, dy)
+                dx, dy = controller.read_direction(keys)
+                holding_pickup = controller.is_action_pressed(keys, "pickup")
+                run_boost = controller.speed_multiplier(now, dx, dy)
                 if player_id == self._LOCAL_PLAYER_ID and browser.is_connected():
                     browser.send_input_update(
                         dx=dx,
