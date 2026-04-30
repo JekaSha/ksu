@@ -683,9 +683,14 @@ class GameSession:
                             pending_items = self._math_tasks.unresolved_pending_answers()
                             pending_items.sort(key=lambda item: item.answer_id)
                             assignment_rows: list[tuple[str, str]] = []
-                            if round_state is not None:
-                                assignment_rows.append(("stage:pick_first", "Этап: найти первое число"))
-                                assignment_rows.append(("stage:pick_second", "Этап: найти второе число"))
+                            if (
+                                round_state is not None
+                                and self._math_tasks.produced_count < self._math_tasks.iterations_target
+                            ):
+                                if round_state.stage == "pick_second":
+                                    assignment_rows.append(("stage:pick_second", "Этап: найти второе число"))
+                                else:
+                                    assignment_rows.append(("stage:pick_first", "Этап: найти первое число"))
                             for pending_item in pending_items:
                                 expr = f"{pending_item.first_digit}{pending_item.operation}{pending_item.second_digit}=?"
                                 assignment_rows.append((f"answer:{pending_item.answer_id}", f"Ответ #{pending_item.answer_id} {expr}"))
@@ -1172,9 +1177,14 @@ class GameSession:
                     pending_items = self._math_tasks.unresolved_pending_answers()
                     pending_items.sort(key=lambda item: item.answer_id)
                     assignment_rows: list[tuple[str, str]] = []
-                    if round_state is not None:
-                        assignment_rows.append(("stage:pick_first", "Этап: найти первое число"))
-                        assignment_rows.append(("stage:pick_second", "Этап: найти второе число"))
+                    if (
+                        round_state is not None
+                        and self._math_tasks.produced_count < self._math_tasks.iterations_target
+                    ):
+                        if round_state.stage == "pick_second":
+                            assignment_rows.append(("stage:pick_second", "Этап: найти второе число"))
+                        else:
+                            assignment_rows.append(("stage:pick_first", "Этап: найти первое число"))
                     for pending_item in pending_items:
                         expr = f"{pending_item.first_digit}{pending_item.operation}{pending_item.second_digit}=?"
                         assignment_rows.append((f"answer:{pending_item.answer_id}", f"Ответ #{pending_item.answer_id} {expr}"))
