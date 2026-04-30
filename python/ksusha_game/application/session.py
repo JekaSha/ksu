@@ -15,7 +15,13 @@ from ksusha_game.application.commands import PlayerActionCommand
 from ksusha_game.application.input_controller import KeyboardInputController
 from ksusha_game.application.math_tasks import MathTaskEngineState, MathTaskOutcome
 from ksusha_game.application.session_state import SessionPlayerState
-from ksusha_game.config import GameConfig
+from ksusha_game.config import (
+    GameConfig,
+    list_available_characters,
+    load_user_settings,
+    resolve_character_config,
+    save_user_settings,
+)
 from ksusha_game.domain.direction import Direction, FACING_VECTOR
 from ksusha_game.domain.inventory import Inventory
 from ksusha_game.domain.player import Player, PlayerStats
@@ -310,6 +316,8 @@ class GameSession:
         preprocessor = FramePreprocessor(frame_cfg)
         cache = SpriteCache(project_root / ".asset_cache")
         loader = SpriteSheetLoader(self._config.sprite_sheet, preprocessor, cache=cache)
+        runtime_sprite_path = self._config.sprite_path
+        runtime_backpack_sprite_path = self._config.backpack_sprite_path
         (
             world,
             floor_tileset,
@@ -317,7 +325,13 @@ class GameSession:
             object_sprites,
             walk_cache,
             backpack_cache,
-        ) = self._load_runtime_resources(project_root, loader, cache)
+        ) = self._load_runtime_resources(
+            project_root,
+            loader,
+            cache,
+            sprite_path=runtime_sprite_path,
+            backpack_sprite_path=runtime_backpack_sprite_path,
+        )
         renderer = WorldRenderer(self._config)
         self._player_states = {}
         self._player_display_names = {}
@@ -344,6 +358,7 @@ class GameSession:
         static_control_hint_lines.append("LAN mode: one local player per computer")
         static_control_hint_lines.append("LAN menu: Ctrl+M")
         static_control_hint_lines.append("Tasks menu: TAB (or Ctrl+Q)")
+        static_control_hint_lines.append("Character menu: Ctrl+P")
 
         def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
             raw = os.getenv(name, "").strip()
@@ -364,10 +379,72 @@ class GameSession:
                 return f"{h:02d}:{m:02d}:{s:02d}"
             return f"{m:02d}:{s:02d}"
 
-        local_player_name = os.getenv("KSU_PLAYER_NAME", "").strip() or os.getenv("USER", "").strip() or "player"
-        local_team_id = self._normalize_team_id(os.getenv("KSU_TEAM", "A"))
+        def _build_character_preview(char_id: str) -> pygame.Surface | None:
+            token = str(char_id).strip()
+            if not token:
+                return None
+            cached_preview = character_preview_cache.get(token)
+            if cached_preview is not None:
+                return cached_preview
+            try:
+                _skin_pool_dir, sprite_path, _backpack_path, _resolved = resolve_character_config(token)
+                anim = ScaledAnimationCache(loader.load_walk_frames(project_root / sprite_path))
+                frame = anim.frames_for_height(82)[Direction.DOWN][0]
+                max_side = 46
+                scale = min(max_side / max(1, frame.get_width()), max_side / max(1, frame.get_height()))
+                target_size = (
+                    max(1, int(round(frame.get_width() * scale))),
+                    max(1, int(round(frame.get_height() * scale))),
+                )
+                preview = pygame.transform.smoothscale(frame, target_size)
+                character_preview_cache[token] = preview
+                return preview
+            except Exception:
+                return None
+
+        def _apply_character_selection(selected_char_id: str) -> None:
+            nonlocal walk_cache, backpack_cache, current_character_id, user_settings
+            nonlocal runtime_sprite_path, runtime_backpack_sprite_path
+            token = str(selected_char_id).strip()
+            if not token:
+                return
+            try:
+                _skin_pool_dir, sprite_path, backpack_path, resolved = resolve_character_config(token)
+                walk_cache = ScaledAnimationCache(loader.load_walk_frames(project_root / sprite_path))
+                backpack_cache = ScaledAnimationCache(loader.load_walk_frames(project_root / backpack_path))
+                runtime_sprite_path = sprite_path
+                runtime_backpack_sprite_path = backpack_path
+                current_character_id = resolved
+                user_settings = dict(user_settings)
+                user_settings["character_id"] = resolved
+                user_settings["player_name"] = local_player_name
+                user_settings["team_id"] = local_team_id
+                save_user_settings(user_settings)
+                renderer.clear_render_cache()
+                self._set_message(f"Персонаж: {resolved}")
+            except Exception as exc:
+                self._set_message(f"Не удалось сменить персонажа: {exc}")
+
+        user_settings = load_user_settings()
+        local_player_name = (
+            os.getenv("KSU_PLAYER_NAME", "").strip()
+            or str(user_settings.get("player_name", "")).strip()
+            or os.getenv("USER", "").strip()
+            or "player"
+        )
+        local_team_source = os.getenv("KSU_TEAM", "").strip() or str(user_settings.get("team_id", "A")).strip()
+        local_team_id = self._normalize_team_id(local_team_source)
         self._set_player_display_name(self._LOCAL_PLAYER_ID, local_player_name)
         self._set_player_team(self._LOCAL_PLAYER_ID, local_team_id)
+        current_character_id = str(self._config.character_id).strip() or "ksu"
+        user_settings = dict(user_settings)
+        user_settings["player_name"] = local_player_name
+        user_settings["team_id"] = local_team_id
+        user_settings.setdefault("character_id", current_character_id)
+        try:
+            save_user_settings(user_settings)
+        except Exception:
+            pass
         local_host_name = socket.gethostname().strip() or "computer"
         local_level_name = self._config.map_path.stem
         discovery_port = _env_int("KSU_DISCOVERY_PORT", 45891, min_value=1024, max_value=65535)
@@ -387,12 +464,21 @@ class GameSession:
         selected_server_idx = 0
         current_servers: list[ServerEntry] = []
         connect_requested_target: ServerEntry | None = None
+        last_connected_target: ServerEntry | None = None
         reconnect_candidate: ServerEntry | None = None
+        auto_reconnect_active = False
+        auto_reconnect_next_attempt_at: float | None = None
+        auto_reconnect_attempts = 0
         connected_since_monotonic: float | None = None
         connected_host_summary: str | None = None
         connected_host_name: str | None = None
         connected_host_player_name: str | None = None
         show_task_menu = False
+        show_character_menu = True
+        startup_character_pick_active = True
+        character_menu_cols = 4
+        character_menu_selected = 0
+        character_preview_cache: dict[str, pygame.Surface] = {}
         task_menu_section = "quests"
         task_menu_selected_quest = 0
         task_menu_selected_task = 0
@@ -403,12 +489,20 @@ class GameSession:
         task_menu_q_hold_task_no: int | None = None
         task_menu_q_hold_fired = False
         task_menu_q_hold_required_sec = 5.0
+        character_entries = list_available_characters()
+        if not character_entries:
+            character_entries = [{"id": current_character_id, "name": current_character_id.upper()}]
+        for idx, entry in enumerate(character_entries):
+            if str(entry.get("id", "")).strip() == current_character_id:
+                character_menu_selected = idx
+                break
         was_connected = False
         last_snapshot_sent_at = 0.0
         if host_started:
             self._set_message(f"LAN server visible: {local_host_name}:{server_port}")
         else:
             self._set_message("LAN server disabled: port busy")
+        self._set_message("Выбери персонажа: Q/Enter (или Esc оставить текущего)")
         self._math_rng.seed(int(time.time() * 1000) & 0xFFFFFFFF)
 
         snapshot = self._resource_snapshot(project_root) if dev_hot_enabled else None
@@ -427,33 +521,65 @@ class GameSession:
                 if ok:
                     connected_since_monotonic = now
                     if connect_requested_target is not None:
+                        last_connected_target = connect_requested_target
                         connected_host_name = str(connect_requested_target.host_name).strip() or None
                         connected_host_player_name = str(connect_requested_target.player_name).strip() or None
                         connected_host_summary = (
                             f"{connect_requested_target.host_name} ({connect_requested_target.player_name}) "
                             f"[{connect_requested_target.level_name}]"
                         )
+                    auto_reconnect_active = False
+                    auto_reconnect_next_attempt_at = None
+                    auto_reconnect_attempts = 0
                     self._set_message("Connected to host")
                 else:
-                    self._set_message(f"Connect failed: {reason}")
+                    if auto_reconnect_active and connect_requested_target is not None:
+                        auto_reconnect_attempts += 1
+                        delay = min(6.0, 1.0 + (0.75 * auto_reconnect_attempts))
+                        auto_reconnect_next_attempt_at = now + delay
+                        self._set_message(f"Связь потеряна. Повтор через {delay:.1f}с")
+                    else:
+                        self._set_message(f"Connect failed: {reason}")
                 connect_requested_target = None
             is_connected = browser.is_connected()
             if is_connected and not was_connected:
                 # Joining remote host: keep only local player state until snapshots arrive.
                 for pid in [pid for pid in self._player_states.keys() if pid != self._LOCAL_PLAYER_ID]:
                     self.remove_player(player_id=pid)
-            if (not is_connected) and was_connected:
+            if (not is_connected) and was_connected and not browser.is_connecting():
                 connected_since_monotonic = None
                 connected_host_summary = None
                 connected_host_name = None
                 connected_host_player_name = None
                 reconnect_candidate = None
                 self._reset_network_player_id_maps()
+                auto_reconnect_active = last_connected_target is not None
+                if auto_reconnect_active:
+                    auto_reconnect_next_attempt_at = now
+                    self._set_message("Связь потеряна. Пытаюсь переподключиться...")
+                else:
+                    auto_reconnect_next_attempt_at = None
+                    self._set_message("Связь потеряна")
             was_connected = is_connected
             if not current_servers:
                 selected_server_idx = 0
             else:
                 selected_server_idx = max(0, min(selected_server_idx, len(current_servers) - 1))
+            if (
+                auto_reconnect_active
+                and not browser.is_connected()
+                and not browser.is_connecting()
+                and last_connected_target is not None
+                and (auto_reconnect_next_attempt_at is None or now >= auto_reconnect_next_attempt_at)
+            ):
+                browser.connect_async(
+                    last_connected_target,
+                    player_name=local_player_name,
+                    team_id=local_team_id,
+                )
+                connect_requested_target = last_connected_target
+                delay = min(6.0, 1.0 + (0.75 * max(0, auto_reconnect_attempts)))
+                auto_reconnect_next_attempt_at = now + delay
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -475,8 +601,16 @@ class GameSession:
                 elif event.type == pygame.KEYDOWN:
                     ctrl_m_pressed = event.key == pygame.K_m and (event.mod & pygame.KMOD_CTRL)
                     ctrl_q_pressed = event.key == pygame.K_q and (event.mod & pygame.KMOD_CTRL)
+                    ctrl_p_pressed = event.key == pygame.K_p and (event.mod & pygame.KMOD_CTRL)
                     tab_tasks_pressed = event.key == pygame.K_TAB
                     if ctrl_m_pressed:
+                        if startup_character_pick_active:
+                            self._set_message("Сначала выбери персонажа (Q/Enter или Esc)")
+                            continue
+                        auto_reconnect_active = False
+                        auto_reconnect_next_attempt_at = None
+                        if show_character_menu:
+                            show_character_menu = False
                         if show_task_menu:
                             show_task_menu = False
                             task_menu_section = "quests"
@@ -490,10 +624,38 @@ class GameSession:
                         for controller in input_controllers.values():
                             controller.clear_pressed()
                         continue
-                    if ctrl_q_pressed or tab_tasks_pressed:
+                    if ctrl_p_pressed:
+                        if startup_character_pick_active:
+                            show_character_menu = True
+                            continue
                         if show_server_list:
                             show_server_list = False
                             reconnect_candidate = None
+                        if show_task_menu:
+                            show_task_menu = False
+                            task_menu_section = "quests"
+                            task_menu_assignment_targets.clear()
+                            task_menu_q_hold_started_at = None
+                            task_menu_q_hold_task_no = None
+                            task_menu_q_hold_fired = False
+                        show_character_menu = not show_character_menu
+                        if show_character_menu:
+                            for idx, entry in enumerate(character_entries):
+                                if str(entry.get("id", "")).strip() == current_character_id:
+                                    character_menu_selected = idx
+                                    break
+                        for controller in input_controllers.values():
+                            controller.clear_pressed()
+                        continue
+                    if ctrl_q_pressed or tab_tasks_pressed:
+                        if startup_character_pick_active:
+                            self._set_message("Сначала выбери персонажа (Q/Enter или Esc)")
+                            continue
+                        if show_server_list:
+                            show_server_list = False
+                            reconnect_candidate = None
+                        if show_character_menu:
+                            show_character_menu = False
                         show_task_menu = not show_task_menu
                         if show_task_menu:
                             task_menu_section = "quests"
@@ -513,17 +675,51 @@ class GameSession:
                             reconnect_candidate = None
                             self._set_message("Reconnect canceled")
                             continue
+                        if show_character_menu:
+                            if startup_character_pick_active:
+                                startup_character_pick_active = False
+                            show_character_menu = False
+                            self._set_message(f"Персонаж: {current_character_id}")
+                            continue
                         if show_server_list:
                             show_server_list = False
                             continue
                         if not show_task_menu:
                             self._set_message("Esc: меню закрыто")
                             continue
+                    if show_character_menu:
+                        entry_count = len(character_entries)
+                        if entry_count <= 0:
+                            show_character_menu = False
+                            continue
+                        if event.key in {pygame.K_LEFT, pygame.K_z, pygame.K_a}:
+                            character_menu_selected = (character_menu_selected - 1) % entry_count
+                            continue
+                        if event.key in {pygame.K_RIGHT, pygame.K_x, pygame.K_d}:
+                            character_menu_selected = (character_menu_selected + 1) % entry_count
+                            continue
+                        if event.key in {pygame.K_UP, pygame.K_w}:
+                            character_menu_selected = (character_menu_selected - character_menu_cols) % entry_count
+                            continue
+                        if event.key in {pygame.K_DOWN, pygame.K_s}:
+                            character_menu_selected = (character_menu_selected + character_menu_cols) % entry_count
+                            continue
+                        if event.key in {pygame.K_q, pygame.K_RETURN, pygame.K_KP_ENTER}:
+                            selected_entry = character_entries[character_menu_selected]
+                            selected_char_id = str(selected_entry.get("id", "")).strip()
+                            if selected_char_id:
+                                _apply_character_selection(selected_char_id)
+                                startup_character_pick_active = False
+                                show_character_menu = False
+                            continue
+                        continue
                     if show_server_list:
                         if reconnect_candidate is not None:
                             if event.key in {pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_y}:
                                 target = reconnect_candidate
                                 reconnect_candidate = None
+                                auto_reconnect_active = False
+                                auto_reconnect_next_attempt_at = None
                                 browser.disconnect()
                                 connected_since_monotonic = None
                                 connected_host_summary = None
@@ -533,6 +729,7 @@ class GameSession:
                                     team_id=local_team_id,
                                 )
                                 connect_requested_target = target
+                                last_connected_target = target
                                 self._set_message(
                                     f"Reconnecting: {target.host_name} ({target.player_name}) [{target.level_name}]"
                                 )
@@ -570,6 +767,9 @@ class GameSession:
                                 team_id=local_team_id,
                             )
                             connect_requested_target = target
+                            last_connected_target = target
+                            auto_reconnect_active = False
+                            auto_reconnect_next_attempt_at = None
                             self._set_message(
                                 f"Connecting: {target.host_name} ({target.player_name}) [{target.level_name}]"
                             )
@@ -883,7 +1083,13 @@ class GameSession:
                         object_sprites,
                         walk_cache,
                         backpack_cache,
-                    ) = self._load_runtime_resources(project_root, loader, cache)
+                    ) = self._load_runtime_resources(
+                        project_root,
+                        loader,
+                        cache,
+                        sprite_path=runtime_sprite_path,
+                        backpack_sprite_path=runtime_backpack_sprite_path,
+                    )
                     for state in self._player_states.values():
                         state.player.stats = world.player_stats
                         state.grabbed_object_id = None
@@ -1152,6 +1358,7 @@ class GameSession:
             task_assignments_lines: list[str] | None = None
             task_assignments_rows: list[tuple[str, str | None]] | None = None
             lan_menu_lines: list[str] | None = None
+            character_picker: dict[str, object] | None = None
             if show_server_list:
                 lan_menu_lines = ["LAN HOSTS", "W/S or UP/DOWN: select | ENTER: connect | ESC: close"]
                 connected_sid = browser.connected_server_id()
@@ -1317,6 +1524,28 @@ class GameSession:
                     task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
                     task_panel_lines.append("Z/X: выбор | C/V: исполнитель | Q: применить | Esc: назад")
                     task_panel_lines.append("Статус: wait=не подтверждено, draft=изменение не применено")
+            if show_character_menu:
+                entries_payload: list[dict[str, object]] = []
+                for idx, item in enumerate(character_entries):
+                    char_id = str(item.get("id", "")).strip()
+                    if not char_id:
+                        continue
+                    entries_payload.append(
+                        {
+                            "id": char_id,
+                            "name": str(item.get("name", char_id)).strip() or char_id,
+                            "is_current": char_id == current_character_id,
+                            "preview": _build_character_preview(char_id),
+                        }
+                    )
+                if entries_payload:
+                    character_picker = {
+                        "title": "CHARACTER SELECT",
+                        "hint": "A/D (or arrows): select | Q/Enter: apply | Esc: close",
+                        "entries": entries_payload,
+                        "selected_index": max(0, min(character_menu_selected, len(entries_payload) - 1)),
+                        "columns": min(character_menu_cols, max(2, len(entries_payload))),
+                    }
             if browser.is_connected():
                 host_title = connected_host_name or connected_host_player_name or "unknown"
             else:
@@ -1489,6 +1718,7 @@ class GameSession:
                 task_assignments_rows=task_assignments_rows,
                 player_portraits=player_portraits,
                 lan_menu_lines=lan_menu_lines,
+                character_picker=character_picker,
             )
 
             pygame.display.set_caption(
@@ -1514,6 +1744,9 @@ class GameSession:
         project_root: Path,
         loader: SpriteSheetLoader,
         cache: SpriteCache,
+        *,
+        sprite_path: Path | None = None,
+        backpack_sprite_path: Path | None = None,
     ) -> tuple[
         WorldMap,
         FloorTileset,
@@ -1541,9 +1774,11 @@ class GameSession:
         if not world.spray_profiles:
             self._queue_async_preload("spray_profile", "")
         apply_interior_physics(world, object_sprites)
-        walk_cache = ScaledAnimationCache(loader.load_walk_frames(project_root / self._config.sprite_path))
+        walk_src = sprite_path if sprite_path is not None else self._config.sprite_path
+        backpack_src = backpack_sprite_path if backpack_sprite_path is not None else self._config.backpack_sprite_path
+        walk_cache = ScaledAnimationCache(loader.load_walk_frames(project_root / walk_src))
         backpack_cache = ScaledAnimationCache(
-            loader.load_walk_frames(project_root / self._config.backpack_sprite_path)
+            loader.load_walk_frames(project_root / backpack_src)
         )
         return world, floor_tileset, wall_sprites, object_sprites, walk_cache, backpack_cache
 
@@ -1650,7 +1885,7 @@ class GameSession:
             return
         if host_event.type == "leave":
             self.remove_player(player_id=host_event.player_id)
-            self._set_message(f"Left: {host_event.player_name}")
+            self._set_message(f"Игрок выбыл: {host_event.player_name}")
 
     def _remap_player_id(self, raw_id: str, assigned_remote_id: str | None) -> str:
         """Map server-assigned player id to the local id used in this session."""
@@ -1816,7 +2051,10 @@ class GameSession:
         remote_ids = [pid for pid in self._player_states.keys() if pid != self._LOCAL_PLAYER_ID]
         for pid in remote_ids:
             if pid not in seen:
+                left_name = self._player_display_name(pid)
                 self.remove_player(player_id=pid)
+                if left_name:
+                    self._set_message(f"Игрок выбыл: {left_name}")
         self._network_raw_to_local_player_ids = dict(player_id_map)
         self._network_local_to_raw_player_ids = {local: raw for raw, local in player_id_map.items()}
 

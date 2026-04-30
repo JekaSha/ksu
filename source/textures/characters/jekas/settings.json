@@ -1,0 +1,51 @@
+{
+  "character": {
+    "id": "jekas",
+    "name": "Jekas",
+    "sheets": {
+      "walk": "walk/jekas.png",
+      "backpack": "backpack/jekas_with_bag.png"
+    },
+    "default_sheet": "walk",
+    "backpack_sheet": "backpack",
+    "skin_pool_subdir": "walk"
+  },
+  "defaults": {
+    "columns": 5,
+    "rows": 8,
+    "detect_content_rect": true,
+    "alignment_mode": "rect_center",
+    "component_pick": "none",
+    "normalize_canvas": true,
+    "chroma_key": true,
+    "chroma_green_delta": 24,
+    "chroma_green_min": 86,
+    "chroma_soften_spill": true,
+    "chroma_spill_green_delta": 10,
+    "chroma_spill_green_min": 74,
+    "output_size": [172, 125],
+    "body_height": 118,
+    "body_scale_min": 0.72,
+    "body_scale_max": 4.0,
+    "bbox_padding": 0,
+    "foot_margin": 0,
+    "row_by_direction": {
+      "down": 0,
+      "up": 1,
+      "left": 2,
+      "right": 3,
+      "up_right": 4,
+      "up_left": 5,
+      "down_left": 6,
+      "down_right": 7
+    }
+  },
+  "files": {
+    "walk/jekas.png": {
+      "detect_content_rect": false,
+      "offset": [1, 1],
+      "cell_size": [198, 198]
+    },
+    "backpack/jekas_with_bag.png": {}
+  }
+}

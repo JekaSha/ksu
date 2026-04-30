@@ -1,0 +1,45 @@
+{
+  "character": {
+    "id": "lisa",
+    "name": "Lisa",
+    "sheets": {
+      "walk": "walk/lisa.png",
+      "backpack": "backpack/lisa_with_bag.png"
+    },
+    "default_sheet": "walk",
+    "backpack_sheet": "backpack",
+    "skin_pool_subdir": "walk"
+  },
+  "defaults": {
+    "columns": 5,
+    "rows": 8,
+    "detect_content_rect": true,
+    "alignment_mode": "rect_center",
+    "component_pick": "largest",
+    "normalize_canvas": true,
+    "chroma_key": true,
+    "chroma_green_delta": 24,
+    "chroma_green_min": 86,
+    "chroma_soften_spill": true,
+    "chroma_spill_green_delta": 10,
+    "chroma_spill_green_min": 74,
+    "output_size": [172, 125],
+    "body_height": 118,
+    "bbox_padding": 0,
+    "foot_margin": 0,
+    "row_by_direction": {
+      "down": 0,
+      "up": 1,
+      "left": 2,
+      "right": 3,
+      "up_right": 4,
+      "up_left": 5,
+      "down_left": 6,
+      "down_right": 7
+    }
+  },
+  "files": {
+    "walk/lisa.png": {},
+    "backpack/lisa_with_bag.png": {}
+  }
+}

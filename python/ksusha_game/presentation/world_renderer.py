@@ -87,6 +87,7 @@ class WorldRenderer:
         task_assignments_rows: list[tuple[str, str | None]] | None = None,
         player_portraits: dict[str, pygame.Surface] | None = None,
         lan_menu_lines: list[str] | None = None,
+        character_picker: dict[str, object] | None = None,
     ) -> None:
         width, height = screen.get_size()
         camera = self._build_camera(world, width, height, player_pos)
@@ -189,6 +190,8 @@ class WorldRenderer:
             self._draw_right_panel(screen, task_assignments_lines, top=right_top)
         if lan_menu_lines:
             self._draw_lan_center_menu(screen, lan_menu_lines)
+        if character_picker:
+            self._draw_character_picker(screen, character_picker)
         if message:
             self._draw_message(screen, message)
 
@@ -1731,6 +1734,78 @@ class WorldRenderer:
                 ix = rect.x + (slot_size - icon.get_width()) // 2
                 iy = rect.y + (slot_size - icon.get_height()) // 2
                 screen.blit(icon, (ix, iy))
+
+    def _draw_character_picker(self, screen: pygame.Surface, picker: dict[str, object]) -> None:
+        entries_raw = picker.get("entries")
+        if not isinstance(entries_raw, list) or not entries_raw:
+            return
+        title = str(picker.get("title", "CHARACTER SELECT")).strip() or "CHARACTER SELECT"
+        hint = str(picker.get("hint", "")).strip()
+        selected_index = int(picker.get("selected_index", 0))
+        selected_index = max(0, min(selected_index, len(entries_raw) - 1))
+
+        slot_size = 128
+        spacing = 24
+        cols = max(1, min(6, int(picker.get("columns", 4) or 4)))
+        rows = (len(entries_raw) + cols - 1) // cols
+        label_h = 40
+        pad = 28
+        title_gap = 24
+        panel_w = pad * 2 + cols * slot_size + (cols - 1) * spacing
+        panel_h = pad * 2 + 72 + title_gap + rows * (slot_size + label_h) + max(0, rows - 1) * 16 + 46
+        width, height = screen.get_size()
+        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        panel.fill((20, 20, 26, 236))
+        pygame.draw.rect(panel, (220, 190, 112, 235), pygame.Rect(0, 0, panel_w, panel_h), width=3)
+
+        title_surf = self._menu_title_font.render(title, True, (250, 240, 220))
+        panel.blit(title_surf, ((panel_w - title_surf.get_width()) // 2, 10))
+        grid_top = 10 + title_surf.get_height() + title_gap
+
+        for i, entry in enumerate(entries_raw):
+            if not isinstance(entry, dict):
+                continue
+            row = i // cols
+            col = i % cols
+            x = pad + col * (slot_size + spacing)
+            y = grid_top + row * (slot_size + label_h + 10)
+            rect = pygame.Rect(x, y, slot_size, slot_size)
+            pygame.draw.rect(panel, (20, 24, 34), rect)
+            border_color = (92, 98, 120)
+            if i == selected_index:
+                border_color = (255, 208, 92)
+            elif bool(entry.get("is_current")):
+                border_color = (78, 220, 126)
+            pygame.draw.rect(panel, border_color, rect, width=3)
+
+            preview = entry.get("preview")
+            if isinstance(preview, pygame.Surface):
+                icon = preview
+                max_icon_side = slot_size - 14
+                if icon.get_width() > 0 and icon.get_height() > 0:
+                    scale = min(
+                        max_icon_side / float(icon.get_width()),
+                        max_icon_side / float(icon.get_height()),
+                    )
+                    target_w = max(1, int(round(icon.get_width() * scale)))
+                    target_h = max(1, int(round(icon.get_height() * scale)))
+                    if (target_w, target_h) != (icon.get_width(), icon.get_height()):
+                        icon = pygame.transform.smoothscale(icon, (target_w, target_h))
+                ix = rect.x + (slot_size - icon.get_width()) // 2
+                iy = rect.y + (slot_size - icon.get_height()) // 2
+                panel.blit(icon, (ix, iy))
+
+            name = str(entry.get("name", entry.get("id", ""))).strip() or str(entry.get("id", "")).strip()
+            label_color = (255, 235, 190) if i == selected_index else (220, 220, 220)
+            label_surf = self._object_label_font.render(name, True, label_color)
+            lx = rect.x + (slot_size - label_surf.get_width()) // 2
+            ly = rect.y + slot_size + 2
+            panel.blit(label_surf, (lx, ly))
+
+        if hint:
+            hint_surf = self._menu_body_font.render(hint, True, (244, 236, 210))
+            panel.blit(hint_surf, ((panel_w - hint_surf.get_width()) // 2, panel_h - hint_surf.get_height() - 8))
+        screen.blit(panel, ((width - panel_w) // 2, (height - panel_h) // 2))
 
     def _draw_spray_tags(
         self,

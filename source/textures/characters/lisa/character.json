@@ -1,0 +1,12 @@
+{
+  "id": "lisa",
+  "name": "Lisa",
+  "sheets": {
+    "walk": "walk/lisa.png",
+    "backpack": "backpack/lisa_with_bag.png"
+  },
+  "default_sheet": "walk",
+  "backpack_sheet": "backpack",
+  "skin_pool_subdir": "walk"
+}
+

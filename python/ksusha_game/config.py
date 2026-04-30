@@ -7,6 +7,9 @@ from pathlib import Path
 
 from ksusha_game.domain.direction import Direction
 
+_DEFAULT_CHARACTER_ID = "ksu"
+_USER_SETTINGS_PATH = Path(".ksusha_game_settings.json")
+
 
 @dataclass(frozen=True)
 class WindowConfig:
@@ -57,10 +60,37 @@ class GameConfig:
     sprite_path: Path = Path("source/textures/characters/ksu/walk/ksu.png")
     backpack_sprite_path: Path = Path("source/textures/characters/ksu/backpack/ksu_with_bag.png")
     interaction_distance: float = 140.0
+    character_id: str = _DEFAULT_CHARACTER_ID
 
 
-def _resolve_skin_pool_dir() -> Path:
-    character = os.getenv("KSU_CHARACTER", "ksu").strip() or "ksu"
+def load_user_settings(settings_path: Path | None = None) -> dict[str, object]:
+    path = _USER_SETTINGS_PATH if settings_path is None else Path(settings_path)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def save_user_settings(settings: dict[str, object], settings_path: Path | None = None) -> None:
+    path = _USER_SETTINGS_PATH if settings_path is None else Path(settings_path)
+    payload = settings if isinstance(settings, dict) else {}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _resolve_character_id() -> str:
+    env_character = os.getenv("KSU_CHARACTER", "").strip()
+    if env_character:
+        return env_character
+    settings = load_user_settings()
+    selected = str(settings.get("character_id", "")).strip()
+    if selected:
+        return selected
+    return _DEFAULT_CHARACTER_ID
+
+
+def _resolve_skin_pool_dir(character_id: str | None = None) -> Path:
+    character = str(character_id or "").strip() or _resolve_character_id()
     state = os.getenv("KSU_STATE", "walk").strip() or "walk"
     return Path("source/textures/characters") / character / state
 
@@ -91,16 +121,37 @@ def _load_character_manifest(character_dir: Path) -> dict | None:
     return None
 
 
-def _resolve_character_config() -> tuple[Path, Path, Path]:
-    character = os.getenv("KSU_CHARACTER", "ksu").strip() or "ksu"
+def list_available_characters(characters_root: Path = Path("source/textures/characters")) -> list[dict[str, str]]:
+    root = Path(characters_root)
+    out: list[dict[str, str]] = []
+    if not root.exists():
+        return out
+    for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+        if not entry.is_dir():
+            continue
+        if entry.name.upper().endswith("_TEMPLATE"):
+            continue
+        manifest = _load_character_manifest(entry)
+        if manifest is None:
+            continue
+        char_id = str(manifest.get("id", entry.name)).strip() or entry.name
+        display_name = str(manifest.get("name", char_id.capitalize())).strip() or char_id
+        out.append({"id": char_id, "name": display_name})
+    return out
+
+
+def resolve_character_config(character_id: str | None = None) -> tuple[Path, Path, Path, str]:
+    character = str(character_id or "").strip() or _resolve_character_id()
     character_dir = Path("source/textures/characters") / character
     manifest = _load_character_manifest(character_dir)
     if manifest is None:
-        skin_pool_dir = _resolve_skin_pool_dir()
+        fallback_character_dir = Path("source/textures/characters") / _DEFAULT_CHARACTER_ID
+        fallback_skin_pool_dir = fallback_character_dir / "walk"
         return (
-            skin_pool_dir,
-            _resolve_default_skin(skin_pool_dir),
-            Path("source/textures/characters/ksu/backpack/ksu_with_bag.png"),
+            fallback_skin_pool_dir,
+            fallback_skin_pool_dir / "ksu.png",
+            fallback_character_dir / "backpack/ksu_with_bag.png",
+            _DEFAULT_CHARACTER_ID,
         )
 
     sheets_raw = manifest.get("sheets", {})
@@ -130,13 +181,14 @@ def _resolve_character_config() -> tuple[Path, Path, Path]:
     else:
         skin_pool_dir = sprite_path.parent
 
-    return skin_pool_dir, sprite_path, backpack_path
+    return skin_pool_dir, sprite_path, backpack_path, character
 
 
 def get_default_config() -> GameConfig:
-    skin_pool_dir, sprite_path, backpack_path = _resolve_character_config()
+    skin_pool_dir, sprite_path, backpack_path, character_id = resolve_character_config()
     return GameConfig(
         skin_pool_dir=skin_pool_dir,
         sprite_path=sprite_path,
         backpack_sprite_path=backpack_path,
+        character_id=character_id,
     )

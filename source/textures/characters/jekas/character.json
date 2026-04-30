@@ -1,0 +1,11 @@
+{
+  "id": "jekas",
+  "name": "Jekas",
+  "sheets": {
+    "walk": "walk/jekas.png",
+    "backpack": "backpack/jekas_with_bag.png"
+  },
+  "default_sheet": "walk",
+  "backpack_sheet": "backpack",
+  "skin_pool_subdir": "walk"
+}

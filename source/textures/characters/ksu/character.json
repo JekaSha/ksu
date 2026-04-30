@@ -1,5 +1,6 @@
 {
   "id": "ksu",
+  "name": "Ksusha",
   "sheets": {
     "walk": "walk/ksu.png",
     "walk_with_bag": "walk/ksu_with_bag.png",

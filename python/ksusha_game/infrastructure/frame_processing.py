@@ -24,10 +24,16 @@ class FramePreprocessor:
         if not frames_raw:
             return frames_raw
 
-        w, h = frames_raw[0].get_size()
+        sizes = [frame.get_size() for frame in frames_raw]
+        max_w = max(size[0] for size in sizes)
+        max_h = max(size[1] for size in sizes)
 
-        rgb_stack = np.stack([pygame.surfarray.array3d(f) for f in frames_raw])     # (n, w, h, 3)
-        alpha_stack = np.stack([pygame.surfarray.array_alpha(f) for f in frames_raw])  # (n, w, h)
+        rgb_stack = np.zeros((len(frames_raw), max_w, max_h, 3), dtype=np.uint8)
+        alpha_stack = np.zeros((len(frames_raw), max_w, max_h), dtype=np.uint8)
+        for i, frame in enumerate(frames_raw):
+            w, h = frame.get_size()
+            rgb_stack[i, :w, :h, :] = pygame.surfarray.array3d(frame)
+            alpha_stack[i, :w, :h] = pygame.surfarray.array_alpha(frame)
 
         model_rgb = np.median(rgb_stack, axis=0).astype(np.uint8)   # (w, h, 3)
         model_a = np.median(alpha_stack, axis=0).astype(np.uint8)   # (w, h)
@@ -40,39 +46,40 @@ class FramePreprocessor:
         )
 
         # Flood-fill from edges to find the connected background region.
-        bg_mask = np.zeros((w, h), dtype=bool)
+        bg_mask = np.zeros((max_w, max_h), dtype=bool)
         queue: deque[int] = deque()
 
         def seed(x: int, y: int) -> None:
             if stable[x, y] and not bg_mask[x, y]:
                 bg_mask[x, y] = True
-                queue.append(y * w + x)
+                queue.append(y * max_w + x)
 
-        for x in range(w):
+        for x in range(max_w):
             seed(x, 0)
-            seed(x, h - 1)
-        for y in range(1, h - 1):
+            seed(x, max_h - 1)
+        for y in range(1, max_h - 1):
             seed(0, y)
-            seed(w - 1, y)
+            seed(max_w - 1, y)
 
         while queue:
             cur = queue.popleft()
-            x, y = cur % w, cur // w
+            x, y = cur % max_w, cur // max_w
             for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
-                if 0 <= nx < w and 0 <= ny < h and stable[nx, ny] and not bg_mask[nx, ny]:
+                if 0 <= nx < max_w and 0 <= ny < max_h and stable[nx, ny] and not bg_mask[nx, ny]:
                     bg_mask[nx, ny] = True
-                    queue.append(ny * w + nx)
+                    queue.append(ny * max_w + nx)
 
         match_tol_sq = self._cfg.bg_model_match_tol ** 2
         alpha_tol = self._cfg.bg_model_alpha_tol
 
         cleaned_frames: list[pygame.Surface] = []
         for i, frame in enumerate(frames_raw):
+            w, h = frame.get_size()
             diff_a = np.abs(alpha_stack[i].astype(np.int32) - model_a.astype(np.int32)) <= alpha_tol
             diff_rgb_sq = np.sum(
                 (rgb_stack[i].astype(np.int32) - model_rgb.astype(np.int32)) ** 2, axis=-1
             )
-            remove = bg_mask & diff_a & (diff_rgb_sq <= match_tol_sq)
+            remove = (bg_mask & diff_a & (diff_rgb_sq <= match_tol_sq))[:w, :h]
 
             cleaned = frame.copy()
             alpha_px = pygame.surfarray.pixels_alpha(cleaned)

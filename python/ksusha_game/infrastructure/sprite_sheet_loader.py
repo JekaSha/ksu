@@ -36,8 +36,16 @@ class SpriteSheetRuntimeSettings:
     step_y: int | None
     bbox_padding: int
     body_height: int | None
+    body_scale_min: float
+    body_scale_max: float
     foot_margin: int
     mirror_directions: dict[Direction, Direction]
+    chroma_key: bool
+    chroma_green_delta: int
+    chroma_green_min: int
+    chroma_soften_spill: bool
+    chroma_spill_green_delta: int
+    chroma_spill_green_min: int
 
 
 class SpriteSheetLoader:
@@ -60,6 +68,18 @@ class SpriteSheetLoader:
 
         sheet = pygame.image.load(str(sheet_path)).convert_alpha()
         runtime = self._resolve_runtime_settings(sheet_path, sheet)
+        if runtime.chroma_key:
+            self._chroma_to_alpha(
+                sheet,
+                green_delta=runtime.chroma_green_delta,
+                green_min=runtime.chroma_green_min,
+            )
+            if runtime.chroma_soften_spill:
+                self._soften_green_spill(
+                    sheet,
+                    green_delta=runtime.chroma_spill_green_delta,
+                    green_min=runtime.chroma_spill_green_min,
+                )
         content_rect = sheet.get_rect()
         if runtime.detect_content_rect:
             content_rect = self._detect_content_rect(sheet)
@@ -79,6 +99,8 @@ class SpriteSheetLoader:
             result = self._normalize_body_height(
                 result,
                 target_height=runtime.body_height,
+                scale_min=runtime.body_scale_min,
+                scale_max=runtime.body_scale_max,
                 foot_margin=runtime.foot_margin,
             )
 
@@ -255,8 +277,16 @@ class SpriteSheetLoader:
             step_y=None,
             bbox_padding=self._config.crop_padding,
             body_height=None,
+            body_scale_min=0.72,
+            body_scale_max=1.28,
             foot_margin=0,
             mirror_directions={},
+            chroma_key=False,
+            chroma_green_delta=24,
+            chroma_green_min=86,
+            chroma_soften_spill=False,
+            chroma_spill_green_delta=10,
+            chroma_spill_green_min=74,
         )
         raw = self._load_sheet_settings_for_file(sheet_path)
         if raw is None:
@@ -338,8 +368,32 @@ class SpriteSheetLoader:
         parsed_body_height = self._safe_positive_int(raw.get("body_height"), -1)
         if parsed_body_height <= 0:
             parsed_body_height = None
+        body_scale_min = self._safe_float(raw.get("body_scale_min"), runtime.body_scale_min)
+        body_scale_max = self._safe_float(raw.get("body_scale_max"), runtime.body_scale_max)
+        if body_scale_min <= 0.0:
+            body_scale_min = runtime.body_scale_min
+        if body_scale_max < body_scale_min:
+            body_scale_max = body_scale_min
         foot_margin = self._safe_non_negative_int(raw.get("foot_margin"), 0)
         mirror_directions = self._parse_mirror_directions(raw.get("mirror_directions"))
+        chroma_key = bool(raw.get("chroma_key", runtime.chroma_key))
+        chroma_green_delta = self._safe_non_negative_int(
+            raw.get("chroma_green_delta"),
+            runtime.chroma_green_delta,
+        )
+        chroma_green_min = self._safe_non_negative_int(
+            raw.get("chroma_green_min"),
+            runtime.chroma_green_min,
+        )
+        chroma_soften_spill = bool(raw.get("chroma_soften_spill", runtime.chroma_soften_spill))
+        chroma_spill_green_delta = self._safe_non_negative_int(
+            raw.get("chroma_spill_green_delta"),
+            runtime.chroma_spill_green_delta,
+        )
+        chroma_spill_green_min = self._safe_non_negative_int(
+            raw.get("chroma_spill_green_min"),
+            runtime.chroma_spill_green_min,
+        )
 
         return SpriteSheetRuntimeSettings(
             columns=columns,
@@ -362,8 +416,16 @@ class SpriteSheetLoader:
             step_y=(step_y if step_y > 0 else None),
             bbox_padding=bbox_padding,
             body_height=parsed_body_height,
+            body_scale_min=body_scale_min,
+            body_scale_max=body_scale_max,
             foot_margin=foot_margin,
             mirror_directions=mirror_directions,
+            chroma_key=chroma_key,
+            chroma_green_delta=chroma_green_delta,
+            chroma_green_min=chroma_green_min,
+            chroma_soften_spill=chroma_soften_spill,
+            chroma_spill_green_delta=chroma_spill_green_delta,
+            chroma_spill_green_min=chroma_spill_green_min,
         )
 
     def _load_sheet_settings_for_file(self, sheet_path: Path) -> dict[str, object] | None:
@@ -472,7 +534,12 @@ class SpriteSheetLoader:
         return None
 
     def _cache_variant_token(self, sheet_path: Path) -> str:
-        token_parts = ["walk_v8"]
+        token_parts = ["walk_v9"]
+        try:
+            stat = sheet_path.stat()
+            token_parts.append(f"sheet:{stat.st_mtime_ns}:{stat.st_size}")
+        except OSError:
+            token_parts.append("sheet:err")
         candidates = self._settings_candidate_paths(sheet_path)
         if not candidates:
             token_parts.append("no_settings")
@@ -683,6 +750,8 @@ class SpriteSheetLoader:
         frames_by_direction: dict[Direction, list[pygame.Surface]],
         *,
         target_height: int,
+        scale_min: float,
+        scale_max: float,
         foot_margin: int,
     ) -> dict[Direction, list[pygame.Surface]]:
         if target_height <= 0:
@@ -700,7 +769,7 @@ class SpriteSheetLoader:
                 target_h = min(target_height, max(1, canvas_h - foot_margin))
                 scale = target_h / max(1.0, float(body.height))
                 # Keep scaling safe; this is stabilization, not stylization.
-                scale = max(0.72, min(1.28, scale))
+                scale = max(scale_min, min(scale_max, scale))
                 if abs(scale - 1.0) < 0.01:
                     out.append(frame)
                     continue
@@ -757,6 +826,12 @@ class SpriteSheetLoader:
     def _safe_positive_int(self, value: object, default: int) -> int:
         parsed = self._safe_int(value, default)
         return parsed if parsed > 0 else default
+
+    def _safe_float(self, value: object, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
 
     def _detect_main_rect(self, frame: pygame.Surface, *, padding: int) -> pygame.Rect:
         alpha_cutoff = self._config.alpha_component_cutoff
@@ -838,6 +913,41 @@ class SpriteSheetLoader:
                 rgb[:, :, 1] = np.where(spill, np.minimum(g, g_limit), g).astype(np.uint8)
 
         del rgb, alpha  # release surface pixel lock
+
+    def _chroma_to_alpha(self, surface: pygame.Surface, *, green_delta: int, green_min: int) -> None:
+        rgb = pygame.surfarray.pixels3d(surface)
+        alpha = pygame.surfarray.pixels_alpha(surface)
+        r = rgb[:, :, 0].astype(np.int32)
+        g = rgb[:, :, 1].astype(np.int32)
+        b = rgb[:, :, 2].astype(np.int32)
+        chroma = (
+            (alpha > 0)
+            & (g >= green_min)
+            & (g >= r + green_delta)
+            & (g >= b + green_delta)
+        )
+        alpha[chroma] = 0
+        rgb[chroma] = 0
+        del rgb, alpha
+
+    def _soften_green_spill(self, surface: pygame.Surface, *, green_delta: int, green_min: int) -> None:
+        rgb = pygame.surfarray.pixels3d(surface)
+        alpha = pygame.surfarray.pixels_alpha(surface)
+        r = rgb[:, :, 0].astype(np.int32)
+        g = rgb[:, :, 1].astype(np.int32)
+        b = rgb[:, :, 2].astype(np.int32)
+        spill = (
+            (alpha > 0)
+            & (g >= green_min)
+            & (g >= r + green_delta)
+            & (g >= b + green_delta)
+        )
+        if np.any(spill):
+            # Keep contour antialiasing but suppress green halo.
+            reduced_alpha = (alpha.astype(np.float32) * 0.35).astype(np.uint8)
+            alpha[:, :] = np.where(spill, reduced_alpha, alpha)
+            rgb[:, :, 1] = np.where(spill, np.minimum(g, np.maximum(r, b) + 8), g).astype(np.uint8)
+        del rgb, alpha
 
 
 class ScaledAnimationCache:
