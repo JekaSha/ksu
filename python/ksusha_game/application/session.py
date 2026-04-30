@@ -399,6 +399,10 @@ class GameSession:
         task_menu_selected_assignment = 0
         task_menu_selected_inbox = 0
         task_menu_assignment_targets: dict[str, str] = {}
+        task_menu_q_hold_started_at: float | None = None
+        task_menu_q_hold_task_no: int | None = None
+        task_menu_q_hold_fired = False
+        task_menu_q_hold_required_sec = 5.0
         was_connected = False
         last_snapshot_sent_at = 0.0
         if host_started:
@@ -455,10 +459,17 @@ class GameSession:
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.KEYUP:
+                    if event.key == pygame.K_q:
+                        task_menu_q_hold_started_at = None
+                        task_menu_q_hold_task_no = None
+                        task_menu_q_hold_fired = False
                     for controller in input_controllers.values():
                         controller.on_keyup(event)
                 elif event.type in {pygame.WINDOWFOCUSLOST, pygame.WINDOWLEAVE}:
                     # Avoid sticky hold-actions (E/drag/spray) after focus or cursor leaves the window.
+                    task_menu_q_hold_started_at = None
+                    task_menu_q_hold_task_no = None
+                    task_menu_q_hold_fired = False
                     for controller in input_controllers.values():
                         controller.clear_pressed()
                 elif event.type == pygame.KEYDOWN:
@@ -470,6 +481,9 @@ class GameSession:
                             show_task_menu = False
                             task_menu_section = "quests"
                             task_menu_assignment_targets.clear()
+                            task_menu_q_hold_started_at = None
+                            task_menu_q_hold_task_no = None
+                            task_menu_q_hold_fired = False
                         show_server_list = not show_server_list
                         if not show_server_list:
                             reconnect_candidate = None
@@ -488,6 +502,9 @@ class GameSession:
                             task_menu_assignment_targets.clear()
                         else:
                             task_menu_assignment_targets.clear()
+                        task_menu_q_hold_started_at = None
+                        task_menu_q_hold_task_no = None
+                        task_menu_q_hold_fired = False
                         for controller in input_controllers.values():
                             controller.clear_pressed()
                         continue
@@ -627,7 +644,22 @@ class GameSession:
                                 if not has_math_quest:
                                     self._set_message("Сначала найди книгу математики")
                                     continue
-                                action = f"task_select_{task_menu_selected_task + 1}"
+                                selected_task_no = task_menu_selected_task + 1
+                                if self._math_tasks.active and self._math_tasks.selected_task == selected_task_no:
+                                    if task_menu_q_hold_task_no != selected_task_no:
+                                        task_menu_q_hold_started_at = now
+                                        task_menu_q_hold_task_no = selected_task_no
+                                        task_menu_q_hold_fired = False
+                                    elif task_menu_q_hold_started_at is None:
+                                        task_menu_q_hold_started_at = now
+                                    self._set_message(
+                                        f"Удерживай Q {int(task_menu_q_hold_required_sec)}с для сброса задачи {selected_task_no}"
+                                    )
+                                    continue
+                                task_menu_q_hold_started_at = None
+                                task_menu_q_hold_task_no = None
+                                task_menu_q_hold_fired = False
+                                action = f"task_select_{selected_task_no}"
                                 if browser.is_connected():
                                     browser.send_action(action=action)
                                 else:
@@ -636,7 +668,7 @@ class GameSession:
                                         action=action,
                                         issued_at=now,
                                     )
-                                self._set_message(f"Запуск задачи {task_menu_selected_task + 1}")
+                                self._set_message(f"Запуск задачи {selected_task_no}")
                                 continue
                         elif task_menu_section == "inbox":
                             if not inbox_rows:
@@ -865,6 +897,28 @@ class GameSession:
             width, height = screen.get_size()
             target_h = max(28, int(height * self._config.sprite_sheet.target_height_ratio))
             keys = pygame.key.get_pressed()
+            if (
+                show_task_menu
+                and task_menu_section == "tasks"
+                and task_menu_q_hold_started_at is not None
+                and not task_menu_q_hold_fired
+                and task_menu_q_hold_task_no is not None
+                and keys[pygame.K_q]
+                and self._math_tasks.active
+                and self._math_tasks.selected_task == task_menu_q_hold_task_no
+                and (now - task_menu_q_hold_started_at) >= task_menu_q_hold_required_sec
+            ):
+                restart_action = f"task_restart_{task_menu_q_hold_task_no}"
+                if browser.is_connected():
+                    browser.send_action(action=restart_action)
+                else:
+                    self.queue_player_action(
+                        player_id=self._LOCAL_PLAYER_ID,
+                        action=restart_action,
+                        issued_at=now,
+                    )
+                task_menu_q_hold_fired = True
+                self._set_message(f"Сброс задачи {task_menu_q_hold_task_no}")
             for player_id, controller in input_controllers.items():
                 dx, dy = controller.read_direction(keys)
                 holding_pickup = controller.is_action_pressed(keys, "pickup")
@@ -1174,6 +1228,7 @@ class GameSession:
                                 task_panel_lines.append(f"  Подзадача сейчас: {active_stage_text}")
                     task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
                     task_panel_lines.append("Z/X: выбор | Q: запуск | R: диспетчер | Esc: назад")
+                    task_panel_lines.append("Сброс активной: удерживай Q 5с")
                 elif task_menu_section == "inbox":
                     task_panel_lines.append("INBOX: мои новые задачи")
                     task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
@@ -1351,12 +1406,9 @@ class GameSession:
                     task_assignments_rows.append((stage_line, None))
                 unresolved = self._math_tasks.unresolved_pending_answers()
                 unresolved.sort(key=lambda item: item.answer_id)
-                # Show stage in flow only when there is no pending answer queue.
-                # Otherwise stage is a "next iteration" context and clutters current flow.
                 if (
                     round_state is not None
                     and self._math_tasks.produced_count < self._math_tasks.iterations_target
-                    and not unresolved
                 ):
                     if round_state.stage == "pick_first":
                         stage_owner_id = round_state.assignments.get("pick_first")
@@ -2147,6 +2199,13 @@ class GameSession:
                 world=world,
             )
             return
+        if action.startswith("task_restart_"):
+            self._handle_math_task_restart_action(
+                action=action,
+                player_id=player_id,
+                world=world,
+            )
+            return
         if action.startswith("task_assign::"):
             self._handle_math_task_assign_action(
                 action=action,
@@ -2590,6 +2649,29 @@ class GameSession:
         except ValueError:
             return
         outcome = self._math_tasks.select_task(
+            player_id=player_id,
+            task_no=task_no,
+            now_ts=time.time(),
+            team_id=self._player_team(player_id),
+        )
+        self._apply_math_task_outcome(outcome, world)
+
+    def _handle_math_task_restart_action(
+        self,
+        *,
+        action: str,
+        player_id: str,
+        world: WorldMap,
+    ) -> None:
+        token = str(action).strip().lower()
+        if not token.startswith("task_restart_"):
+            return
+        num_raw = token[len("task_restart_") :]
+        try:
+            task_no = int(num_raw)
+        except ValueError:
+            return
+        outcome = self._math_tasks.restart_task(
             player_id=player_id,
             task_no=task_no,
             now_ts=time.time(),

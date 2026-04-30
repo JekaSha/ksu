@@ -307,7 +307,7 @@ class MathTaskEngineState:
             return "-"
         return "+"
 
-    def select_task(
+    def _activate_supported_task(
         self,
         *,
         player_id: str,
@@ -315,20 +315,6 @@ class MathTaskEngineState:
         now_ts: float,
         team_id: str | None = None,
     ) -> MathTaskOutcome:
-        if not self.has_math_quest:
-            return MathTaskOutcome(message="Сначала найди книгу математики")
-        if task_no < 1 or task_no > 9:
-            return MathTaskOutcome(message="Номер задачи: 1..9")
-        if self.menu_open and self.menu_owner_player_id not in {None, player_id}:
-            return MathTaskOutcome(message="Эту задачу выбирает другой игрок")
-        self.selected_task = int(task_no)
-        self.close_menu()
-        if task_no not in {1, 2}:
-            self.active = False
-            self.current_round = None
-            self.pending_answers = []
-            self.active_answer_id = None
-            return MathTaskOutcome(message=f"Задача {task_no}: пока не реализована")
         self.active = True
         self.dispatcher_player_id = str(player_id).strip() or None
         self.dispatcher_team_id = str(team_id).strip() if team_id is not None and str(team_id).strip() else None
@@ -365,6 +351,69 @@ class MathTaskEngineState:
             clear_digits=True,
             clear_answers=True,
             spawn_digits=True,
+        )
+
+    def select_task(
+        self,
+        *,
+        player_id: str,
+        task_no: int,
+        now_ts: float,
+        team_id: str | None = None,
+    ) -> MathTaskOutcome:
+        if not self.has_math_quest:
+            return MathTaskOutcome(message="Сначала найди книгу математики")
+        if task_no < 1 or task_no > 9:
+            return MathTaskOutcome(message="Номер задачи: 1..9")
+        if self.menu_open and self.menu_owner_player_id not in {None, player_id}:
+            return MathTaskOutcome(message="Эту задачу выбирает другой игрок")
+        if self.active and self.selected_task == int(task_no) and task_no in {1, 2}:
+            return MathTaskOutcome(message=f"Задача {task_no} уже идет. Удерживай Q 5 сек для сброса")
+        self.selected_task = int(task_no)
+        self.close_menu()
+        if task_no not in {1, 2}:
+            self.active = False
+            self.current_round = None
+            self.pending_answers = []
+            self.active_answer_id = None
+            return MathTaskOutcome(message=f"Задача {task_no}: пока не реализована")
+        return self._activate_supported_task(
+            player_id=player_id,
+            task_no=task_no,
+            now_ts=now_ts,
+            team_id=team_id,
+        )
+
+    def restart_task(
+        self,
+        *,
+        player_id: str,
+        task_no: int,
+        now_ts: float,
+        team_id: str | None = None,
+    ) -> MathTaskOutcome:
+        if not self.has_math_quest:
+            return MathTaskOutcome(message="Сначала найди книгу математики")
+        if task_no < 1 or task_no > 9:
+            return MathTaskOutcome(message="Номер задачи: 1..9")
+        if task_no not in {1, 2}:
+            return MathTaskOutcome(message=f"Задача {task_no}: пока не реализована")
+        if not self.active or self.selected_task != int(task_no):
+            return self.select_task(
+                player_id=player_id,
+                task_no=task_no,
+                now_ts=now_ts,
+                team_id=team_id,
+            )
+        if not self._is_dispatcher(player_id):
+            return MathTaskOutcome(message="Сброс доступен только ведущему")
+        self.selected_task = int(task_no)
+        self.close_menu()
+        return self._activate_supported_task(
+            player_id=player_id,
+            task_no=task_no,
+            now_ts=now_ts,
+            team_id=team_id,
         )
 
     def pick_digit(
@@ -426,6 +475,13 @@ class MathTaskEngineState:
             self.pending_answers.append(answer)
             round_state.first_digit = None
             round_state.stage = "pick_first"
+            leader_id = str(player_id).strip() or "p1"
+            round_state.assignments["pick_first"] = leader_id
+            round_state.assignment_accepted["pick_first"] = True
+            round_state.assignment_assigned_by["pick_first"] = leader_id
+            round_state.assignments["pick_second"] = leader_id
+            round_state.assignment_accepted["pick_second"] = True
+            round_state.assignment_assigned_by["pick_second"] = leader_id
 
             out = MathTaskOutcome(message="Пример поставлен в очередь", spawn_digits=True)
             if self.active_answer_id is None:

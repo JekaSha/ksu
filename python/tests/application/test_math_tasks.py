@@ -191,6 +191,56 @@ def test_select_task_persists_dispatcher_team() -> None:
     assert state.dispatcher_team_id == "blue"
 
 
+def test_selecting_active_task_does_not_reset_progress() -> None:
+    state = MathTaskEngineState()
+    _start_task(state, task_no=1)
+    rng = random.Random(7)
+    state.pick_digit(player_id="p1", digit=4, rng=rng, online_player_ids=["p1", "p2"])
+    state.pick_digit(player_id="p1", digit=3, rng=rng, online_player_ids=["p1", "p2"])
+    assert state.produced_count == 1
+    out = state.select_task(player_id="p1", task_no=1, now_ts=12.0)
+    assert "удерживай q" in (out.message or "").lower()
+    assert state.produced_count == 1
+    assert state.pending_count() == 1
+
+
+def test_restart_task_resets_active_series_for_dispatcher() -> None:
+    state = MathTaskEngineState()
+    _start_task(state, task_no=1)
+    rng = random.Random(9)
+    state.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
+    state.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
+    assert state.produced_count == 1
+    out = state.restart_task(player_id="p1", task_no=1, now_ts=20.0)
+    assert out.spawn_digits is True
+    assert out.clear_digits is True
+    assert state.produced_count == 0
+    assert state.pending_count() == 0
+    assert state.current_round is not None
+    assert state.current_round.stage == "pick_first"
+
+
+def test_next_round_assignments_return_to_producer() -> None:
+    state = MathTaskEngineState()
+    _start_task(state, task_no=1)
+    rng = random.Random(42)
+    state.reassign_round_stage(
+        stage="pick_first",
+        assignee_player_id="p2",
+        requested_by_player_id="p1",
+        online_player_ids=["p1", "p2"],
+    )
+    accept_msg = state.accept_round_stage(stage="pick_first", player_id="p2")
+    assert "Принято" in accept_msg
+    out1 = state.pick_digit(player_id="p2", digit=5, rng=rng, online_player_ids=["p1", "p2"])
+    assert "второе число" in (out1.message or "")
+    out2 = state.pick_digit(player_id="p1", digit=1, rng=rng, online_player_ids=["p1", "p2"])
+    assert "следующее число" in (out2.message or "").lower()
+    assert state.current_round is not None
+    assert state.current_round.assignments["pick_first"] == "p1"
+    assert state.current_round.assignments["pick_second"] == "p1"
+
+
 def test_can_reassign_round_stage() -> None:
     state = MathTaskEngineState()
     _start_task(state, task_no=1)
