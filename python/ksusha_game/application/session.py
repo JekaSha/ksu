@@ -594,10 +594,10 @@ class GameSession:
                             task_menu_section = "inbox"
                             continue
                         if task_menu_section == "quests":
-                            if event.key == pygame.K_w:
+                            if event.key == pygame.K_z:
                                 task_menu_selected_quest = max(0, task_menu_selected_quest - 1)
                                 continue
-                            if event.key == pygame.K_s:
+                            if event.key == pygame.K_x:
                                 task_menu_selected_quest = min(0, task_menu_selected_quest + 1)
                                 continue
                             if event.key == pygame.K_q:
@@ -607,16 +607,10 @@ class GameSession:
                                     task_menu_section = "tasks"
                                 continue
                         elif task_menu_section == "tasks":
-                            if event.key == pygame.K_w:
+                            if event.key == pygame.K_z:
                                 task_menu_selected_task = (task_menu_selected_task - 1) % 9
                                 continue
-                            if event.key == pygame.K_s:
-                                task_menu_selected_task = (task_menu_selected_task + 1) % 9
-                                continue
-                            if event.key == pygame.K_a:
-                                task_menu_selected_task = (task_menu_selected_task - 1) % 9
-                                continue
-                            if event.key == pygame.K_d:
+                            if event.key == pygame.K_x:
                                 task_menu_selected_task = (task_menu_selected_task + 1) % 9
                                 continue
                             if event.key == pygame.K_r:
@@ -650,10 +644,10 @@ class GameSession:
                                     self._set_message("Для тебя пока нет новых задач")
                                 continue
                             task_menu_selected_inbox = max(0, min(task_menu_selected_inbox, len(inbox_rows) - 1))
-                            if event.key == pygame.K_w:
+                            if event.key == pygame.K_z:
                                 task_menu_selected_inbox = (task_menu_selected_inbox - 1) % len(inbox_rows)
                                 continue
-                            if event.key == pygame.K_s:
+                            if event.key == pygame.K_x:
                                 task_menu_selected_inbox = (task_menu_selected_inbox + 1) % len(inbox_rows)
                                 continue
                             if event.key == pygame.K_q:
@@ -714,14 +708,14 @@ class GameSession:
                                 0,
                                 min(task_menu_selected_assignment, len(assignment_rows) - 1),
                             )
-                            if event.key == pygame.K_w:
+                            if event.key == pygame.K_z:
                                 task_menu_selected_assignment = (task_menu_selected_assignment - 1) % len(assignment_rows)
                                 continue
-                            if event.key == pygame.K_s:
+                            if event.key == pygame.K_x:
                                 task_menu_selected_assignment = (task_menu_selected_assignment + 1) % len(assignment_rows)
                                 continue
                             selected_row_key, selected_row_label = assignment_rows[task_menu_selected_assignment]
-                            if event.key in {pygame.K_a, pygame.K_d}:
+                            if event.key in {pygame.K_c, pygame.K_v}:
                                 preview_assignee = task_menu_assignment_targets.get(selected_row_key)
                                 if not preview_assignee or preview_assignee not in team_player_ids:
                                     if selected_row_key.startswith("stage:") and round_state is not None:
@@ -739,7 +733,7 @@ class GameSession:
                                         preview_assignee = selected_pending.assigned_player_id if selected_pending is not None else None
                                 if not preview_assignee or preview_assignee not in team_player_ids:
                                     preview_assignee = team_player_ids[0]
-                                shift = -1 if event.key == pygame.K_a else 1
+                                shift = -1 if event.key == pygame.K_c else 1
                                 base_idx = team_player_ids.index(preview_assignee)
                                 next_assignee = team_player_ids[(base_idx + shift) % len(team_player_ids)]
                                 task_menu_assignment_targets[selected_row_key] = next_assignee
@@ -1135,22 +1129,51 @@ class GameSession:
                         task_panel_lines.append("Квестов пока нет")
                         task_panel_lines.append("Найди книгу математики")
                     task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
-                    task_panel_lines.append("W/S: выбор | Q: подтвердить | Esc: назад")
+                    task_panel_lines.append("Z/X: выбор | Q: подтвердить | Esc: назад")
                 elif task_menu_section == "tasks":
                     task_panel_lines.append("Математика:")
+                    active_task_no = self._math_tasks.selected_task if self._math_tasks.active else None
+                    target = max(1, int(self._math_tasks.iterations_target))
+                    produced = max(0, int(self._math_tasks.produced_count))
+                    solved = max(0, int(self._math_tasks.solved_count))
+                    active_pending = self._math_tasks.active_pending_answer()
+                    round_state = self._math_tasks.current_round
+                    active_stage_text = ""
+                    if active_pending is not None:
+                        active_stage_text = "найти результат"
+                    elif round_state is not None:
+                        if round_state.stage == "pick_first":
+                            active_stage_text = "найти первое число"
+                        elif round_state.stage == "pick_second":
+                            active_stage_text = f"найти второе число ({round_state.operation})"
                     for idx in range(9):
                         mark = ">" if idx == task_menu_selected_task else " "
-                        task_panel_lines.append(f"{mark} Задача {idx + 1}")
+                        task_no = idx + 1
+                        row_line = f"{mark} Задача {task_no}"
+                        if self._math_tasks.active and active_task_no == task_no:
+                            if solved >= target and produced >= target:
+                                row_line += f" [{target}/{target}]"
+                            else:
+                                if active_pending is not None:
+                                    current_iteration = max(1, min(target, int(active_pending.answer_id)))
+                                else:
+                                    current_iteration = max(1, min(target, produced + 1))
+                                row_line += f" [{current_iteration}/{target}]"
+                        task_panel_lines.append(row_line)
+                        if idx == task_menu_selected_task:
+                            if task_no == 1:
+                                selected_desc = "сложение, 10 итераций, очередь ответов"
+                            elif task_no == 2:
+                                selected_desc = "вычитание, 10 итераций, очередь ответов"
+                            elif task_no == 3:
+                                selected_desc = "выбрать + или - (в разработке)"
+                            else:
+                                selected_desc = "в разработке"
+                            task_panel_lines.append(f"  Описание: {selected_desc}")
+                            if self._math_tasks.active and active_task_no == task_no and active_stage_text:
+                                task_panel_lines.append(f"  Подзадача сейчас: {active_stage_text}")
                     task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
-                    task_panel_lines.append("W/S/A/D: выбор | Q: запуск | R: диспетчер | Esc: назад")
-                    if task_menu_selected_task == 0:
-                        task_panel_lines.append("Описание: сложение, 10 итераций, очередь ответов")
-                    elif task_menu_selected_task == 1:
-                        task_panel_lines.append("Описание: вычитание, 10 итераций, очередь ответов")
-                    elif task_menu_selected_task == 2:
-                        task_panel_lines.append("Описание: выбрать + или - (в разработке)")
-                    else:
-                        task_panel_lines.append("Описание: в разработке")
+                    task_panel_lines.append("Z/X: выбор | Q: запуск | R: диспетчер | Esc: назад")
                 elif task_menu_section == "inbox":
                     task_panel_lines.append("INBOX: мои новые задачи")
                     task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
@@ -1170,7 +1193,7 @@ class GameSession:
                         selected_details = selected_row[3]
                         if selected_details:
                             task_panel_lines.append(f"Описание: {selected_details}")
-                    task_panel_lines.append("W/S: выбор | Q: принять | Esc: назад")
+                    task_panel_lines.append("Z/X: выбор | Q: принять | Esc: назад")
                 else:
                     task_panel_lines.append("TASK ASSIGN (этапы/ответы):")
                     round_state = self._math_tasks.current_round
@@ -1230,7 +1253,7 @@ class GameSession:
                             draft_tag = " draft" if (draft_assignee is not None and draft_assignee != current_assignee) else ""
                             task_panel_lines.append(f"{mark} {row_label} -> {assignee_text} [{status}{draft_tag}]")
                     task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
-                    task_panel_lines.append("W/S: выбор | A/D: исполнитель | Q: применить | Esc: назад")
+                    task_panel_lines.append("Z/X: выбор | C/V: исполнитель | Q: применить | Esc: назад")
                     task_panel_lines.append("Статус: wait=не подтверждено, draft=изменение не применено")
             if browser.is_connected():
                 host_title = connected_host_name or connected_host_player_name or "unknown"
@@ -1270,7 +1293,7 @@ class GameSession:
                             if active_pending.accepted:
                                 dynamic_hint_lines.append("MATH stage: найди результат (или собирай след. пример)")
                             else:
-                                dynamic_hint_lines.append("MATH stage: у тебя новая задача на ответ (TAB -> Inbox, F принять)")
+                                dynamic_hint_lines.append("MATH stage: у тебя новая задача на ответ (TAB -> Inbox, Q принять)")
                         else:
                             dynamic_hint_lines.append(f"MATH stage: Пользователь {assignee_name} ищет результат")
                         dynamic_hint_lines.append(f"MATH answer: Пользователь {assignee_name} ищет ответ")
@@ -1283,21 +1306,58 @@ class GameSession:
                         stage_owner = round_state.assignments.get("pick_first")
                         stage_accepted = bool(round_state.assignment_accepted.get("pick_first", True))
                         if stage_owner == self._LOCAL_PLAYER_ID and not stage_accepted:
-                            dynamic_hint_lines.append("MATH stage: новая задача - найти первое число (TAB -> Inbox, F принять)")
+                            dynamic_hint_lines.append("MATH stage: новая задача - найти первое число (TAB -> Inbox, Q принять)")
                         else:
                             dynamic_hint_lines.append("MATH stage: найди первое число")
                     elif round_state.stage == "pick_second":
                         stage_owner = round_state.assignments.get("pick_second")
                         stage_accepted = bool(round_state.assignment_accepted.get("pick_second", True))
                         if stage_owner == self._LOCAL_PLAYER_ID and not stage_accepted:
-                            dynamic_hint_lines.append("MATH stage: новая задача - найти второе число (TAB -> Inbox, F принять)")
+                            dynamic_hint_lines.append("MATH stage: новая задача - найти второе число (TAB -> Inbox, Q принять)")
                         else:
                             dynamic_hint_lines.append(f"MATH stage: операция {round_state.operation}, найди второе число")
                 task_assignments_lines = ["TASK FLOW"]
                 task_assignments_rows = [("TASK FLOW", None)]
+                task_title_by_id = {
+                    1: "сложение",
+                    2: "вычитание",
+                    3: "выбор +/-",
+                }
+                task_title = task_title_by_id.get(self._math_tasks.selected_task, "в разработке")
+                task_assignments_lines.append(f"Задача {self._math_tasks.selected_task}: {task_title}")
+                task_assignments_rows.append((f"Задача {self._math_tasks.selected_task}: {task_title}", None))
+                flow_target = max(1, int(self._math_tasks.iterations_target))
+                flow_produced = max(0, int(self._math_tasks.produced_count))
+                flow_solved = max(0, int(self._math_tasks.solved_count))
+                if flow_solved >= flow_target and flow_produced >= flow_target:
+                    flow_iteration = flow_target
+                elif active_pending is not None:
+                    flow_iteration = max(1, min(flow_target, int(active_pending.answer_id)))
+                else:
+                    flow_iteration = max(1, min(flow_target, flow_produced + 1))
+                iteration_line = f"Итерация: {flow_iteration} из {flow_target}"
+                task_assignments_lines.append(iteration_line)
+                task_assignments_rows.append((iteration_line, None))
+                stage_line = ""
+                if active_pending is not None:
+                    stage_line = "Подзадача: найти результат"
+                elif round_state is not None:
+                    if round_state.stage == "pick_first":
+                        stage_line = "Подзадача: найти первое число"
+                    elif round_state.stage == "pick_second":
+                        stage_line = f"Подзадача: найти второе число ({round_state.operation})"
+                if stage_line:
+                    task_assignments_lines.append(stage_line)
+                    task_assignments_rows.append((stage_line, None))
                 unresolved = self._math_tasks.unresolved_pending_answers()
                 unresolved.sort(key=lambda item: item.answer_id)
-                if round_state is not None and self._math_tasks.produced_count < self._math_tasks.iterations_target:
+                # Show stage in flow only when there is no pending answer queue.
+                # Otherwise stage is a "next iteration" context and clutters current flow.
+                if (
+                    round_state is not None
+                    and self._math_tasks.produced_count < self._math_tasks.iterations_target
+                    and not unresolved
+                ):
                     if round_state.stage == "pick_first":
                         stage_owner_id = round_state.assignments.get("pick_first")
                         stage_owner = (
@@ -1325,7 +1385,15 @@ class GameSession:
                     task_assignments_lines.append(line)
                     task_assignments_rows.append((line, None))
                 else:
-                    for pending_item in unresolved[:8]:
+                    active_id = self._math_tasks.active_answer_id
+                    flow_answers = [
+                        item
+                        for item in unresolved
+                        if item.answer_id == active_id or not bool(item.accepted)
+                    ]
+                    if not flow_answers:
+                        flow_answers = unresolved[:1]
+                    for pending_item in flow_answers[:8]:
                         marker = ">" if pending_item.answer_id == self._math_tasks.active_answer_id else "-"
                         assignee_id = pending_item.assigned_player_id
                         assignee = self._player_caption(assignee_id) if assignee_id else "любой игрок"
