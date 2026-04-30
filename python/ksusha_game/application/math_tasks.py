@@ -168,6 +168,7 @@ class MathTaskOutcome:
     clear_answers: bool = False
     spawn_digits: bool = False
     spawn_answers: bool = False
+    consume_digit: bool = False
 
 
 @dataclass
@@ -433,22 +434,24 @@ class MathTaskEngineState:
             value = max(-9, min(9, int(digit)))
         else:
             value = max(0, min(9, int(digit)))
-        if self._player_has_assigned_pending_answer(player_id=player_id):
-            return MathTaskOutcome(message="Сначала реши назначенный тебе результат")
         if round_state.stage == "pick_first":
             owner = round_state.assignments.get("pick_first")
             if owner not in {None, player_id}:
                 return MathTaskOutcome(message="Это число назначено другому игроку")
+            if self._player_has_assigned_pending_answer(player_id=player_id) and owner != player_id:
+                return MathTaskOutcome(message="Сначала реши назначенный тебе результат")
             if owner == player_id and not round_state.assignment_accepted.get("pick_first", True):
                 return MathTaskOutcome(message="Сначала прими задачу: найти первое число")
             round_state.first_digit = value
             round_state.stage = "pick_second"
             op = round_state.operation
-            return MathTaskOutcome(message=f"Операция: {op}. Найди второе число")
+            return MathTaskOutcome(message=f"Операция: {op}. Найди второе число", consume_digit=True)
         if round_state.stage == "pick_second":
             owner = round_state.assignments.get("pick_second")
             if owner not in {None, player_id}:
                 return MathTaskOutcome(message="Это число назначено другому игроку")
+            if self._player_has_assigned_pending_answer(player_id=player_id) and owner != player_id:
+                return MathTaskOutcome(message="Сначала реши назначенный тебе результат")
             if owner == player_id and not round_state.assignment_accepted.get("pick_second", True):
                 return MathTaskOutcome(message="Сначала прими задачу: найти второе число")
             first = int(round_state.first_digit or 0)
@@ -490,7 +493,7 @@ class MathTaskEngineState:
             round_state.assignment_accepted["pick_second"] = next_owner in {None, assigned_by}
             round_state.assignment_assigned_by["pick_second"] = assigned_by if next_owner is not None else None
 
-            out = MathTaskOutcome(message="Пример поставлен в очередь", spawn_digits=True)
+            out = MathTaskOutcome(message="Пример поставлен в очередь", spawn_digits=True, consume_digit=True)
             if self.active_answer_id is None:
                 self.active_answer_id = answer.answer_id
                 out.clear_answers = True

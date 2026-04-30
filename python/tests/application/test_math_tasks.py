@@ -288,8 +288,15 @@ def test_player_with_pending_answer_cannot_pick_next_digit() -> None:
     state.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
     out = state.pick_digit(player_id="p1", digit=3, rng=rng, online_player_ids=["p1", "p2"])
     assert "делегирован" in (out.message or "").lower()
+    msg = state.reassign_round_stage(
+        stage="pick_first",
+        assignee_player_id="p2",
+        requested_by_player_id="p1",
+        online_player_ids=["p1", "p2"],
+    )
+    assert "занят" in msg.lower()
     blocked = state.pick_digit(player_id="p2", digit=4, rng=rng, online_player_ids=["p1", "p2"])
-    assert "сначала реши" in (blocked.message or "").lower()
+    assert "назначено другому игроку" in (blocked.message or "").lower()
 
 
 def test_can_reassign_round_stage() -> None:

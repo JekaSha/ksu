@@ -2835,7 +2835,6 @@ class GameSession:
                     world.remove_object(target.object_id)
                 self._apply_math_task_outcome(outcome, world)
                 return True
-            world.remove_object(target.object_id)
             dispatcher_team = self._math_tasks.dispatcher_team_id or self._player_team(player_id)
             outcome = self._math_tasks.pick_digit(
                 player_id=player_id,
@@ -2843,6 +2842,8 @@ class GameSession:
                 rng=self._math_rng,
                 online_player_ids=self._team_player_ids(dispatcher_team),
             )
+            if outcome.consume_digit:
+                world.remove_object(target.object_id)
             self._apply_math_task_outcome(outcome, world)
             return True
 
