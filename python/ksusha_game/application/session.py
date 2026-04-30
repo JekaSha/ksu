@@ -103,6 +103,7 @@ class GameSession:
         self._player_states: dict[str, SessionPlayerState] = {}
         self._player_display_names: dict[str, str] = {}
         self._player_teams: dict[str, str] = {}
+        self._team_catalog: list[dict[str, str]] = [{"id": "A", "name": "Team A"}]
         self._player_character_ids: dict[str, str] = {}
         self._spray_tags: list[SprayTag] = []
         self._spray_frame_interval = 0.055
@@ -176,6 +177,53 @@ class GameSession:
         if not token:
             return "A"
         return token[:12]
+
+    def _sanitize_team_name(self, name: str | None) -> str:
+        token = str(name or "").strip()
+        return token[:32] if token else ""
+
+    def _team_id_from_name(self, name: str | None) -> str:
+        token = self._sanitize_team_name(name).upper()
+        if not token:
+            return ""
+        cleaned = "".join(ch for ch in token if ch.isalnum())
+        return cleaned[:12]
+
+    def _set_team_catalog(self, teams: list[dict[str, str]] | None) -> None:
+        out: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in teams or []:
+            if not isinstance(item, dict):
+                continue
+            team_id = self._normalize_team_id(item.get("id"))
+            if not team_id or team_id in seen:
+                continue
+            team_name = self._sanitize_team_name(item.get("name")) or f"Team {team_id}"
+            out.append({"id": team_id, "name": team_name})
+            seen.add(team_id)
+        if not out:
+            out = [{"id": "A", "name": "Team A"}]
+        self._team_catalog = out
+
+    def _team_catalog_ids(self) -> list[str]:
+        return [str(item.get("id", "")).strip() for item in self._team_catalog if str(item.get("id", "")).strip()]
+
+    def _team_name(self, team_id: str | None) -> str:
+        tid = self._normalize_team_id(team_id)
+        for item in self._team_catalog:
+            if self._normalize_team_id(item.get("id")) == tid:
+                name = self._sanitize_team_name(item.get("name"))
+                return name or tid
+        return tid
+
+    def _team_id_for_join(self, preferred_team_id: str | None) -> str:
+        team_ids = self._team_catalog_ids()
+        preferred = self._normalize_team_id(preferred_team_id)
+        if len(team_ids) == 1:
+            return team_ids[0]
+        if preferred in team_ids:
+            return preferred
+        return team_ids[0] if team_ids else preferred
 
     def _set_player_team(self, player_id: str, team_id: str | None) -> None:
         pid = str(player_id).strip()
@@ -374,6 +422,7 @@ class GameSession:
         self._player_states = {}
         self._player_display_names = {}
         self._player_teams = {}
+        self._team_catalog = [{"id": "A", "name": "Team A"}]
         self._player_character_ids = {}
         self._reset_network_player_id_maps()
         self.add_player(
@@ -398,6 +447,7 @@ class GameSession:
         static_control_hint_lines.append("LAN menu: Ctrl+M")
         static_control_hint_lines.append("Tasks menu: TAB (or Ctrl+Q)")
         static_control_hint_lines.append("Character menu: Ctrl+P")
+        static_control_hint_lines.append("Teams menu: Ctrl+T")
 
         def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
             raw = os.getenv(name, "").strip()
@@ -494,6 +544,11 @@ class GameSession:
                 self._set_message(f"Не удалось сменить персонажа: {exc}")
 
         user_settings = load_user_settings()
+        host_teams_raw = user_settings.get("host_teams", [])
+        if isinstance(host_teams_raw, list):
+            self._set_team_catalog(host_teams_raw)
+        else:
+            self._set_team_catalog(None)
         local_player_name = (
             os.getenv("KSU_PLAYER_NAME", "").strip()
             or str(user_settings.get("player_name", "")).strip()
@@ -501,7 +556,7 @@ class GameSession:
             or "player"
         )
         local_team_source = os.getenv("KSU_TEAM", "").strip() or str(user_settings.get("team_id", "A")).strip()
-        local_team_id = self._normalize_team_id(local_team_source)
+        local_team_id = self._team_id_for_join(local_team_source)
         self._set_player_display_name(self._LOCAL_PLAYER_ID, local_player_name)
         self._set_player_team(self._LOCAL_PLAYER_ID, local_team_id)
         current_character_id = str(self._config.character_id).strip() or "ksu"
@@ -510,6 +565,7 @@ class GameSession:
         user_settings = dict(user_settings)
         user_settings["player_name"] = local_player_name
         user_settings["team_id"] = local_team_id
+        user_settings["host_teams"] = [dict(item) for item in self._team_catalog]
         user_settings.setdefault("character_id", current_character_id)
         try:
             save_user_settings(user_settings)
@@ -527,11 +583,15 @@ class GameSession:
             max_players=self._MAX_PLAYERS,
             discovery_port=discovery_port,
         )
+        lan_host.set_team_catalog(self._team_catalog)
         host_started = lan_host.start()
         browser = LanServerBrowser(discovery_port=discovery_port)
         browser.start()
         show_server_list = False
+        show_team_menu = False
         selected_server_idx = 0
+        team_menu_selected_idx = 0
+        team_menu_name_buffer = ""
         current_servers: list[ServerEntry] = []
         connect_requested_target: ServerEntry | None = None
         last_connected_target: ServerEntry | None = None
@@ -540,6 +600,7 @@ class GameSession:
         auto_reconnect_next_attempt_at: float | None = None
         auto_reconnect_attempts = 0
         connected_since_monotonic: float | None = None
+        last_client_rx_monotonic: float | None = None
         connected_host_summary: str | None = None
         connected_host_name: str | None = None
         connected_host_player_name: str | None = None
@@ -590,6 +651,21 @@ class GameSession:
                 ok, reason = connect_result
                 if ok:
                     connected_since_monotonic = now
+                    last_client_rx_monotonic = now
+                    join_info = browser.poll_join_info() or {}
+                    assigned_team = self._normalize_team_id(join_info.get("assigned_team_id"))
+                    teams_raw = join_info.get("teams")
+                    if isinstance(teams_raw, list):
+                        self._set_team_catalog(teams_raw)
+                    local_team_id = self._team_id_for_join(assigned_team)
+                    self._set_player_team(self._LOCAL_PLAYER_ID, local_team_id)
+                    user_settings = dict(user_settings)
+                    user_settings["team_id"] = local_team_id
+                    user_settings["host_teams"] = [dict(item) for item in self._team_catalog]
+                    try:
+                        save_user_settings(user_settings)
+                    except Exception:
+                        pass
                     if connect_requested_target is not None:
                         last_connected_target = connect_requested_target
                         connected_host_name = str(connect_requested_target.host_name).strip() or None
@@ -601,13 +677,16 @@ class GameSession:
                     auto_reconnect_active = False
                     auto_reconnect_next_attempt_at = None
                     auto_reconnect_attempts = 0
-                    self._set_message("Connected to host")
+                    self._set_message(f"Connected to host | команда: {self._team_name(local_team_id)}")
                 else:
                     if auto_reconnect_active and connect_requested_target is not None:
                         auto_reconnect_attempts += 1
                         delay = min(6.0, 1.0 + (0.75 * auto_reconnect_attempts))
                         auto_reconnect_next_attempt_at = now + delay
-                        self._set_message(f"Связь потеряна. Повтор через {delay:.1f}с")
+                        fail_reason = str(reason).strip() or "ошибка соединения"
+                        self._set_message(
+                            f"Связь потеряна ({fail_reason}). Повтор через {delay:.1f}с"
+                        )
                     else:
                         self._set_message(f"Connect failed: {reason}")
                 connect_requested_target = None
@@ -617,8 +696,10 @@ class GameSession:
                 for pid in [pid for pid in self._player_states.keys() if pid != self._LOCAL_PLAYER_ID]:
                     self.remove_player(player_id=pid)
                 browser.send_action(action=f"set_character::{current_character_id}")
+                last_client_rx_monotonic = now
             if (not is_connected) and was_connected and not browser.is_connecting():
                 connected_since_monotonic = None
+                last_client_rx_monotonic = None
                 connected_host_summary = None
                 connected_host_name = None
                 connected_host_player_name = None
@@ -631,6 +712,11 @@ class GameSession:
                 else:
                     auto_reconnect_next_attempt_at = None
                     self._set_message("Связь потеряна")
+            if is_connected and not browser.is_connecting():
+                last_rx_ts = last_client_rx_monotonic or connected_since_monotonic or now
+                if now - last_rx_ts >= 3.5:
+                    browser.disconnect()
+                    self._set_message("Связь зависла. Переподключаюсь...")
             was_connected = is_connected
             if not current_servers:
                 selected_server_idx = 0
@@ -643,12 +729,35 @@ class GameSession:
                 and last_connected_target is not None
                 and (auto_reconnect_next_attempt_at is None or now >= auto_reconnect_next_attempt_at)
             ):
+                reconnect_target = last_connected_target
+                refreshed_target = next(
+                    (
+                        entry
+                        for entry in current_servers
+                        if entry.server_id == reconnect_target.server_id
+                    ),
+                    None,
+                )
+                if refreshed_target is None:
+                    refreshed_target = next(
+                        (
+                            entry
+                            for entry in current_servers
+                            if entry.host_name == reconnect_target.host_name
+                            and entry.player_name == reconnect_target.player_name
+                            and entry.level_name == reconnect_target.level_name
+                        ),
+                        None,
+                    )
+                if refreshed_target is not None:
+                    reconnect_target = refreshed_target
+                    last_connected_target = refreshed_target
                 browser.connect_async(
-                    last_connected_target,
+                    reconnect_target,
                     player_name=local_player_name,
                     team_id=local_team_id,
                 )
-                connect_requested_target = last_connected_target
+                connect_requested_target = reconnect_target
                 delay = min(6.0, 1.0 + (0.75 * max(0, auto_reconnect_attempts)))
                 auto_reconnect_next_attempt_at = now + delay
 
@@ -673,6 +782,7 @@ class GameSession:
                     ctrl_m_pressed = event.key == pygame.K_m and (event.mod & pygame.KMOD_CTRL)
                     ctrl_q_pressed = event.key == pygame.K_q and (event.mod & pygame.KMOD_CTRL)
                     ctrl_p_pressed = event.key == pygame.K_p and (event.mod & pygame.KMOD_CTRL)
+                    ctrl_t_pressed = event.key == pygame.K_t and (event.mod & pygame.KMOD_CTRL)
                     tab_tasks_pressed = event.key == pygame.K_TAB
                     if ctrl_m_pressed:
                         if startup_character_pick_active:
@@ -689,6 +799,8 @@ class GameSession:
                             task_menu_q_hold_started_at = None
                             task_menu_q_hold_task_no = None
                             task_menu_q_hold_fired = False
+                        if show_team_menu:
+                            show_team_menu = False
                         show_server_list = not show_server_list
                         if not show_server_list:
                             reconnect_candidate = None
@@ -709,6 +821,8 @@ class GameSession:
                             task_menu_q_hold_started_at = None
                             task_menu_q_hold_task_no = None
                             task_menu_q_hold_fired = False
+                        if show_team_menu:
+                            show_team_menu = False
                         show_character_menu = not show_character_menu
                         if show_character_menu:
                             for idx, entry in enumerate(character_entries):
@@ -727,6 +841,8 @@ class GameSession:
                             reconnect_candidate = None
                         if show_character_menu:
                             show_character_menu = False
+                        if show_team_menu:
+                            show_team_menu = False
                         show_task_menu = not show_task_menu
                         if show_task_menu:
                             task_menu_section = "quests"
@@ -738,6 +854,32 @@ class GameSession:
                         task_menu_q_hold_started_at = None
                         task_menu_q_hold_task_no = None
                         task_menu_q_hold_fired = False
+                        for controller in input_controllers.values():
+                            controller.clear_pressed()
+                        continue
+                    if ctrl_t_pressed:
+                        if startup_character_pick_active:
+                            self._set_message("Сначала выбери персонажа (Q/Enter или Esc)")
+                            continue
+                        if show_server_list:
+                            show_server_list = False
+                            reconnect_candidate = None
+                        if show_character_menu:
+                            show_character_menu = False
+                        if show_task_menu:
+                            show_task_menu = False
+                            task_menu_section = "quests"
+                            task_menu_assignment_targets.clear()
+                            task_menu_q_hold_started_at = None
+                            task_menu_q_hold_task_no = None
+                            task_menu_q_hold_fired = False
+                        show_team_menu = not show_team_menu
+                        if show_team_menu:
+                            team_menu_name_buffer = ""
+                            team_ids = self._team_catalog_ids()
+                            if team_ids:
+                                current_tid = self._player_team(self._LOCAL_PLAYER_ID)
+                                team_menu_selected_idx = team_ids.index(current_tid) if current_tid in team_ids else 0
                         for controller in input_controllers.values():
                             controller.clear_pressed()
                         continue
@@ -754,6 +896,10 @@ class GameSession:
                             continue
                         if show_server_list:
                             show_server_list = False
+                            continue
+                        if show_team_menu:
+                            show_team_menu = False
+                            team_menu_name_buffer = ""
                             continue
                         if not show_task_menu:
                             self._set_message("Esc: меню закрыто")
@@ -844,6 +990,90 @@ class GameSession:
                             self._set_message(
                                 f"Connecting: {target.host_name} ({target.player_name}) [{target.level_name}]"
                             )
+                            continue
+                        continue
+
+                    if show_team_menu:
+                        if host_started and not browser.is_connected():
+                            if event.key in {pygame.K_UP, pygame.K_w, pygame.K_z}:
+                                if self._team_catalog:
+                                    team_menu_selected_idx = (team_menu_selected_idx - 1) % len(self._team_catalog)
+                                continue
+                            if event.key in {pygame.K_DOWN, pygame.K_s, pygame.K_x}:
+                                if self._team_catalog:
+                                    team_menu_selected_idx = (team_menu_selected_idx + 1) % len(self._team_catalog)
+                                continue
+                            if event.key in {pygame.K_BACKSPACE, pygame.K_DELETE}:
+                                if team_menu_name_buffer:
+                                    team_menu_name_buffer = team_menu_name_buffer[:-1]
+                                continue
+                            if event.key in {pygame.K_q, pygame.K_RETURN, pygame.K_KP_ENTER}:
+                                new_name = self._sanitize_team_name(team_menu_name_buffer)
+                                if not new_name:
+                                    team_ids = self._team_catalog_ids()
+                                    if team_ids:
+                                        picked = team_ids[max(0, min(team_menu_selected_idx, len(team_ids) - 1))]
+                                        local_team_id = picked
+                                        self._set_player_team(self._LOCAL_PLAYER_ID, local_team_id)
+                                        user_settings = dict(user_settings)
+                                        user_settings["team_id"] = local_team_id
+                                        user_settings["host_teams"] = [dict(item) for item in self._team_catalog]
+                                        save_user_settings(user_settings)
+                                        self._set_message(f"Команда: {self._team_name(local_team_id)}")
+                                else:
+                                    new_team_id = self._team_id_from_name(new_name)
+                                    if not new_team_id:
+                                        self._set_message("Введите название команды")
+                                        continue
+                                    if new_team_id in self._team_catalog_ids():
+                                        self._set_message("Такая команда уже есть")
+                                        continue
+                                    self._team_catalog.append({"id": new_team_id, "name": new_name})
+                                    self._set_team_catalog(self._team_catalog)
+                                    lan_host.set_team_catalog(self._team_catalog)
+                                    local_team_id = new_team_id
+                                    self._set_player_team(self._LOCAL_PLAYER_ID, local_team_id)
+                                    user_settings = dict(user_settings)
+                                    user_settings["team_id"] = local_team_id
+                                    user_settings["host_teams"] = [dict(item) for item in self._team_catalog]
+                                    save_user_settings(user_settings)
+                                    team_menu_name_buffer = ""
+                                    team_menu_selected_idx = len(self._team_catalog) - 1
+                                    self._set_message(f"Команда создана: {new_name}")
+                                continue
+                            if event.key == pygame.K_TAB:
+                                show_team_menu = False
+                                continue
+                            typed = str(getattr(event, "unicode", "") or "")
+                            if typed and typed.isprintable() and typed not in {"\t", "\r", "\n"}:
+                                if len(team_menu_name_buffer) < 24:
+                                    team_menu_name_buffer += typed
+                                continue
+                            continue
+                        team_ids = self._team_catalog_ids()
+                        if event.key in {pygame.K_UP, pygame.K_w, pygame.K_z}:
+                            if team_ids:
+                                team_menu_selected_idx = (team_menu_selected_idx - 1) % len(team_ids)
+                            continue
+                        if event.key in {pygame.K_DOWN, pygame.K_s, pygame.K_x}:
+                            if team_ids:
+                                team_menu_selected_idx = (team_menu_selected_idx + 1) % len(team_ids)
+                            continue
+                        if event.key in {pygame.K_q, pygame.K_RETURN, pygame.K_KP_ENTER}:
+                            if not team_ids:
+                                continue
+                            picked = team_ids[max(0, min(team_menu_selected_idx, len(team_ids) - 1))]
+                            if browser.is_connected():
+                                browser.send_action(action=f"set_team::{picked}")
+                                self._set_message(f"Запрошена смена команды: {self._team_name(picked)}")
+                            else:
+                                local_team_id = picked
+                                self._set_player_team(self._LOCAL_PLAYER_ID, local_team_id)
+                                user_settings = dict(user_settings)
+                                user_settings["team_id"] = local_team_id
+                                user_settings["host_teams"] = [dict(item) for item in self._team_catalog]
+                                save_user_settings(user_settings)
+                                self._set_message(f"Команда: {self._team_name(local_team_id)}")
                             continue
                         continue
 
@@ -1123,9 +1353,11 @@ class GameSession:
                 assigned_local = browser.connected_player_id()
                 pos_update = browser.poll_pos_update()
                 if pos_update is not None:
+                    last_client_rx_monotonic = now
                     self._apply_position_update(pos_update, world, assigned_local_id=assigned_local)
                 snapshot = browser.poll_snapshot()
                 if snapshot is not None:
+                    last_client_rx_monotonic = now
                     self._apply_network_snapshot(snapshot, world, assigned_local_id=assigned_local)
 
             self._process_async_preloads(world, object_sprites, budget_ms=1.8, max_jobs=1)
@@ -1460,6 +1692,27 @@ class GameSession:
                         lan_menu_lines.append(
                             f"{mark}{conn} {entry.host_name} | {entry.player_name} | {entry.level_name} | {entry.players}/{entry.max_players}"
                         )
+            elif show_team_menu:
+                lan_menu_lines = ["TEAMS"]
+                if host_started and not browser.is_connected():
+                    lan_menu_lines.append("HOST: создавай команды")
+                    lan_menu_lines.append("W/S: выбор | Q/Enter: выбрать | Esc: закрыть")
+                    lan_menu_lines.append(f"Новая команда: {team_menu_name_buffer or '_'}")
+                    lan_menu_lines.append("Введи имя + Q/Enter для создания")
+                else:
+                    lan_menu_lines.append("CLIENT: выбор команды")
+                    lan_menu_lines.append("W/S: выбор | Q/Enter: вступить | Esc: закрыть")
+                if not self._team_catalog:
+                    lan_menu_lines.append("Нет команд")
+                else:
+                    team_menu_selected_idx = max(0, min(team_menu_selected_idx, len(self._team_catalog) - 1))
+                    for idx, team in enumerate(self._team_catalog[:12]):
+                        mark = ">" if idx == team_menu_selected_idx else " "
+                        tid = self._normalize_team_id(team.get("id"))
+                        team_name = self._sanitize_team_name(team.get("name")) or tid
+                        me = "*" if self._player_team(self._LOCAL_PLAYER_ID) == tid else " "
+                        count = len(self._team_player_ids(tid))
+                        lan_menu_lines.append(f"{mark}{me} [{tid}] {team_name} | players:{count}")
             if show_task_menu:
                 task_panel_lines = ["TASKS DISPATCHER (Esc back)"]
                 if task_menu_section == "quests":
@@ -1627,7 +1880,12 @@ class GameSession:
                 host_title = local_host_name or local_player_name
             if self._player_states:
                 player_ids = self._sorted_player_ids_for_ui()
-                multiplayer_lines = [f"HOST: {host_title}", f"ONLINE: {len(player_ids)}/{self._MAX_PLAYERS}"]
+                team_label = self._team_name(self._player_team(self._LOCAL_PLAYER_ID))
+                multiplayer_lines = [
+                    f"HOST: {host_title}",
+                    f"ONLINE: {len(player_ids)}/{self._MAX_PLAYERS}",
+                    f"TEAM: {team_label}",
+                ]
                 for pid in player_ids[:10]:
                     prefix = ">" if pid == self._LOCAL_PLAYER_ID else "-"
                     multiplayer_lines.append(f"{prefix} {self._player_caption(pid)}")
@@ -1642,8 +1900,9 @@ class GameSession:
                     f"MATH score: {self._math_tasks.total_solved}/{self._math_tasks.total_attempts} | time {duration}"
                 )
                 dynamic_hint_lines.append(f"MATH task:{self._math_tasks.selected_task} op:{op} | solved {solved}/{target} | made {produced}/{target} | queue {pending}")
+                team_id = self._math_tasks.dispatcher_team_id or self._player_team(self._LOCAL_PLAYER_ID)
                 dynamic_hint_lines.append(
-                    f"MATH team: T{self._math_tasks.dispatcher_team_id or self._player_team(self._LOCAL_PLAYER_ID)}"
+                    f"MATH team: {self._team_name(team_id)}"
                 )
                 active_pending = self._math_tasks.active_pending_answer()
                 local_answer_turn = (
@@ -2053,6 +2312,7 @@ class GameSession:
         return {
             "level": self._config.map_path.stem,
             "players": players,
+            "teams": [dict(item) for item in self._team_catalog],
             "objects": [self._world_object_payload(obj) for obj in world.objects if not self._is_snapshot_static(obj)],
             "spray_tags": [self._spray_tag_payload(tag) for tag in self._spray_tags],
             "room_item_use_counts": room_item_use_counts,
@@ -2073,6 +2333,9 @@ class GameSession:
         payload = snapshot.get("players")
         if not isinstance(payload, list):
             return
+        teams_payload = snapshot.get("teams")
+        if isinstance(teams_payload, list):
+            self._set_team_catalog(teams_payload)
 
         assigned_remote_id = str(assigned_local_id).strip() if assigned_local_id else None
         # Keep local id stable by remapping server-assigned id to local p1.
@@ -2572,6 +2835,12 @@ class GameSession:
             return
         if action.startswith("set_character::"):
             self._handle_set_character_action(
+                action=action,
+                player_id=player_id,
+            )
+            return
+        if action.startswith("set_team::"):
+            self._handle_set_team_action(
                 action=action,
                 player_id=player_id,
             )
@@ -3149,6 +3418,28 @@ class GameSession:
         if not char_id:
             return
         self._set_player_character_id(player_id, char_id)
+
+    def _handle_set_team_action(
+        self,
+        *,
+        action: str,
+        player_id: str,
+    ) -> None:
+        token = str(action).strip()
+        parts = token.split("::", 1)
+        if len(parts) != 2:
+            return
+        prefix, team_raw = parts
+        if prefix != "set_team":
+            return
+        requested = self._normalize_team_id(team_raw)
+        if requested not in self._team_catalog_ids():
+            return
+        self._set_player_team(player_id, requested)
+        if player_id == self._LOCAL_PLAYER_ID:
+            self._set_message(f"Команда: {self._team_name(requested)}")
+        else:
+            self._set_message(f"{self._player_display_name(player_id)} -> {self._team_name(requested)}")
 
     def _try_handle_math_task_interaction(
         self,

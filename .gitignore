@@ -3,3 +3,4 @@ __pycache__/
 .DS_Store
 .venv/
 .asset_cache/
+.ksusha_game_settings.json

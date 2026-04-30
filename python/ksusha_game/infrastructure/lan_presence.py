@@ -97,6 +97,7 @@ class LanPresenceHost:
         self._pending_positions: bytes | None = None
         self._pending_snapshot: dict | None = None
         self._broadcast_event = threading.Event()
+        self._team_catalog: list[dict[str, str]] = [{"id": "A", "name": "Team A"}]
 
     @property
     def enabled(self) -> bool:
@@ -116,6 +117,14 @@ class LanPresenceHost:
     def is_joinable(self) -> bool:
         with self._lock:
             return self._joinable
+
+    def set_team_catalog(self, teams: list[dict[str, str]] | None) -> None:
+        with self._lock:
+            self._team_catalog = self._sanitize_team_catalog(teams)
+
+    def team_catalog(self) -> list[dict[str, str]]:
+        with self._lock:
+            return [dict(item) for item in self._team_catalog]
 
     def start(self) -> bool:
         if self._enabled:
@@ -244,6 +253,8 @@ class LanPresenceHost:
                         pass
 
     def _announcement_payload(self) -> bytes:
+        with self._lock:
+            team_catalog = [dict(item) for item in self._team_catalog]
         payload = {
             "type": "ksu_server_announce",
             "server_id": self.server_id,
@@ -253,6 +264,7 @@ class LanPresenceHost:
             "port": self.server_port,
             "players": self.total_players(),
             "max_players": self.max_players,
+            "teams": team_catalog,
             "ts": time.time(),
         }
         return json.dumps(payload, ensure_ascii=True).encode("utf-8")
@@ -308,6 +320,13 @@ class LanPresenceHost:
             with self._lock:
                 can_join = self._joinable and len(self._active_clients) < max(0, self.max_players - 1)
                 if is_join and can_join:
+                    team_catalog = self._team_catalog
+                    team_ids = [str(item.get("id", "")).strip().upper() for item in team_catalog]
+                    team_ids = [tid for tid in team_ids if tid]
+                    if len(team_ids) == 1:
+                        client_player_team = team_ids[0]
+                    elif client_player_team not in team_ids:
+                        client_player_team = team_ids[0] if team_ids else "A"
                     client_player_id = f"r{self._next_remote_id}"
                     self._next_remote_id += 1
                     self._active_clients[client_key] = _ClientSession(
@@ -335,6 +354,8 @@ class LanPresenceHost:
                     "players": self.total_players(),
                     "max_players": self.max_players,
                     "player_id": client_player_id,
+                    "assigned_team_id": client_player_team,
+                    "teams": self.team_catalog(),
                 }
             else:
                 reject_reason = "server_full_or_bad_request"
@@ -401,6 +422,26 @@ class LanPresenceHost:
     def _encode_line(payload: dict) -> bytes:
         return (json.dumps(payload, ensure_ascii=True) + "\n").encode("utf-8")
 
+    @staticmethod
+    def _sanitize_team_catalog(teams: list[dict[str, str]] | None) -> list[dict[str, str]]:
+        seen: set[str] = set()
+        out: list[dict[str, str]] = []
+        for item in teams or []:
+            if not isinstance(item, dict):
+                continue
+            raw_id = str(item.get("id", "")).strip().upper()
+            if not raw_id:
+                continue
+            team_id = raw_id[:12]
+            if not team_id or team_id in seen:
+                continue
+            name = str(item.get("name", "")).strip() or f"Team {team_id}"
+            seen.add(team_id)
+            out.append({"id": team_id, "name": name[:32]})
+        if not out:
+            out = [{"id": "A", "name": "Team A"}]
+        return out
+
 
 class LanServerBrowser:
     def __init__(self, *, discovery_port: int = 45891, ttl_sec: float = 3.2) -> None:
@@ -422,6 +463,7 @@ class LanServerBrowser:
 
         self._connect_thread: threading.Thread | None = None
         self._connect_result: tuple[bool, str] | None = None
+        self._join_info: dict[str, object] | None = None
         # Track last sent input to avoid sending identical packets every frame.
         self._last_sent_input: tuple[int, int, bool, float] | None = None
 
@@ -486,6 +528,7 @@ class LanServerBrowser:
         if self._connect_thread is not None and self._connect_thread.is_alive():
             return
         self._connect_result = None
+        self._join_info = None
         self._connect_thread = threading.Thread(
             target=self._connect_worker,
             args=(entry, player_name, team_id, timeout_sec),
@@ -497,6 +540,11 @@ class LanServerBrowser:
         result = self._connect_result
         self._connect_result = None
         return result
+
+    def poll_join_info(self) -> dict[str, object] | None:
+        info = self._join_info
+        self._join_info = None
+        return info
 
     def send_input_update(self, *, dx: int, dy: int, holding_pickup: bool, run_multiplier: float) -> None:
         if not self.is_connected():
@@ -564,6 +612,10 @@ class LanServerBrowser:
                 self._active_connection = sock
             self._connected_server_id = entry.server_id
             self._assigned_player_id = assigned_player_id if assigned_player_id else None
+            self._join_info = {
+                "assigned_team_id": str(data.get("assigned_team_id", "")).strip().upper() or None,
+                "teams": data.get("teams"),
+            }
             self._connect_result = (True, "ok")
             self._rx_thread = threading.Thread(
                 target=self._run_connection_reader,

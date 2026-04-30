@@ -480,7 +480,7 @@ class MathTaskEngineState:
                 assigned_by_player_id=player_id,
                 brief="Найти результат выражения",
                 details=f"Найди правильный результат для {first} {operation} {second}",
-                accepted=False,
+                accepted=True,
             )
             self.next_answer_id += 1
             self.produced_count += 1
@@ -495,10 +495,10 @@ class MathTaskEngineState:
             leader_id = str(player_id).strip() or "p1"
             assigned_by = leader_id
             round_state.assignments["pick_first"] = next_owner
-            round_state.assignment_accepted["pick_first"] = next_owner in {None, assigned_by}
+            round_state.assignment_accepted["pick_first"] = True
             round_state.assignment_assigned_by["pick_first"] = assigned_by if next_owner is not None else None
             round_state.assignments["pick_second"] = next_owner
-            round_state.assignment_accepted["pick_second"] = next_owner in {None, assigned_by}
+            round_state.assignment_accepted["pick_second"] = True
             round_state.assignment_assigned_by["pick_second"] = assigned_by if next_owner is not None else None
 
             out = MathTaskOutcome(message="Пример поставлен в очередь", spawn_digits=True, consume_digit=True)
@@ -510,7 +510,6 @@ class MathTaskEngineState:
             if assigned is not None and assigned != player_id:
                 out.message = f"Ответ делегирован игроку {assigned}. Ищи следующее число"
             elif assigned == player_id:
-                answer.accepted = True
                 out.message = "Ответ у тебя. Можно брать следующий пример"
             else:
                 out.message = "Ответ в очереди без исполнителя. Назначь игрока или реши позже"
@@ -579,7 +578,7 @@ class MathTaskEngineState:
             return f"Игрок {assignee} уже занят другой задачей"
         pending.assigned_player_id = assignee
         pending.assigned_by_player_id = requester
-        pending.accepted = assignee == requester
+        pending.accepted = True
         return f"Задача #{pending.answer_id}: ответ назначен игроку {assignee}"
 
     def reassign_round_stage(
@@ -613,7 +612,7 @@ class MathTaskEngineState:
         if self._is_player_busy(player_id=assignee, exclude_stage=stage_key):
             return f"Игрок {assignee} уже занят другой задачей"
         self.current_round.assignments[stage_key] = assignee
-        self.current_round.assignment_accepted[stage_key] = assignee == requester
+        self.current_round.assignment_accepted[stage_key] = True
         self.current_round.assignment_assigned_by[stage_key] = requester
         stage_label = "первое число" if stage_key == "pick_first" else "второе число"
         return f"Этап '{stage_label}' назначен игроку {assignee}"
