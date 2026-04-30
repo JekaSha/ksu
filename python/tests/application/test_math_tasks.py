@@ -87,10 +87,7 @@ def test_assigned_player_must_solve_answer() -> None:
     wrong_player = state.pick_answer(player_id=wrong_assignee, answer_value=pending.correct_answer)
     assert "назначен" in (wrong_player.message or "")
     if assignee == "p2":
-        not_accepted = state.pick_answer(player_id=assignee, answer_value=pending.correct_answer)
-        assert "прими задачу" in (not_accepted.message or "").lower()
-        accept_msg = state.accept_pending_answer(answer_id=pending.answer_id, player_id=assignee)
-        assert "Принято" in accept_msg
+        assert pending.accepted is False
     right_player = state.pick_answer(player_id=assignee, answer_value=pending.correct_answer)
     assert "Верно" in (right_player.message or "")
     assert state.solved_count == 1

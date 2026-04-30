@@ -2821,6 +2821,22 @@ class GameSession:
             active_pending = self._math_tasks.active_pending_answer()
             if (
                 active_pending is not None
+                and active_pending.assigned_player_id == player_id
+            ):
+                if not self._has_math_answer_objects(world):
+                    solved_before = int(self._math_tasks.solved_count)
+                    outcome = self._math_tasks.pick_answer(
+                        player_id=player_id,
+                        answer_value=digit,
+                    )
+                    if int(self._math_tasks.solved_count) > solved_before:
+                        world.remove_object(target.object_id)
+                    self._apply_math_task_outcome(outcome, world)
+                else:
+                    self._set_message("Сначала реши назначенный тебе результат")
+                return True
+            if (
+                active_pending is not None
                 and not self._has_math_answer_objects(world)
                 and round_state is not None
                 and round_state.stage == "pick_first"

@@ -439,6 +439,10 @@ class MathTaskEngineState:
             if owner not in {None, player_id}:
                 return MathTaskOutcome(message="Это число назначено другому игроку")
             if self._player_has_assigned_pending_answer(player_id=player_id) and owner != player_id:
+                active = self.active_pending_answer()
+                if active is not None:
+                    expr = f"{active.first_digit}{active.operation}{active.second_digit}"
+                    return MathTaskOutcome(message=f"Сначала реши свой результат: {expr}=?")
                 return MathTaskOutcome(message="Сначала реши назначенный тебе результат")
             if owner == player_id and not round_state.assignment_accepted.get("pick_first", True):
                 return MathTaskOutcome(message="Сначала прими задачу: найти первое число")
@@ -451,6 +455,10 @@ class MathTaskEngineState:
             if owner not in {None, player_id}:
                 return MathTaskOutcome(message="Это число назначено другому игроку")
             if self._player_has_assigned_pending_answer(player_id=player_id) and owner != player_id:
+                active = self.active_pending_answer()
+                if active is not None:
+                    expr = f"{active.first_digit}{active.operation}{active.second_digit}"
+                    return MathTaskOutcome(message=f"Сначала реши свой результат: {expr}=?")
                 return MathTaskOutcome(message="Сначала реши назначенный тебе результат")
             if owner == player_id and not round_state.assignment_accepted.get("pick_second", True):
                 return MathTaskOutcome(message="Сначала прими задачу: найти второе число")
@@ -519,7 +527,7 @@ class MathTaskEngineState:
         if assigned is not None and assigned != player_id:
             return MathTaskOutcome(message=f"Этот ответ назначен игроку {assigned}")
         if assigned is not None and assigned == player_id and not pending.accepted:
-            return MathTaskOutcome(message="Сначала прими задачу на ответ")
+            pending.accepted = True
         self.total_attempts += 1
         if int(answer_value) == int(pending.correct_answer):
             pending.solved = True
