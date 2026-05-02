@@ -407,77 +407,7 @@
       "top_opening_occlude_depth": 70
     }
   ],
-  "object_kinds": {
-    "backpack": {
-      "blocking": false,
-      "cycle_sprites": true,
-      "occlude_top": false,
-      "pickup_item_id": "backpack",
-      "weight_kg": 4.0
-    },
-    "math_book": {
-      "blocking": false,
-      "cycle_sprites": false,
-      "occlude_top": false,
-      "weight_kg": 0.8
-    },
-    "sofa": {
-      "blocking": true,
-      "collider": [
-        128,
-        72
-      ],
-      "cycle_sprites": true,
-      "occlude_top": true,
-      "occlude_split": 0.56,
-      "jump_platform": [
-        108,
-        44,
-        -24
-      ],
-      "weight_kg": 70.0
-    },
-    "plant": {
-      "blocking": true,
-      "collider": [
-        56,
-        40
-      ],
-      "cycle_sprites": false,
-      "occlude_top": true,
-      "occlude_split": 0.62,
-      "weight_kg": 12.0
-    },
-    "key": {
-      "blocking": false,
-      "cycle_sprites": true,
-      "occlude_top": false,
-      "pickup_item_id": "key",
-      "weight_kg": 0.3
-    },
-    "ballon": {
-      "blocking": false,
-      "cycle_sprites": false,
-      "occlude_top": false,
-      "pickup_item_id": "ballon",
-      "weight_kg": 1.2
-    },
-    "door": {
-      "blocking": true,
-      "height": 316,
-      "spray_zoom_coef": 1.0,
-      "cycle_sprites": false,
-      "occlude_top": true,
-      "transitions": {
-        "unlock": {
-          "state": 1,
-          "blocking": false
-        }
-      },
-      "weight_kg": 120.0,
-      "occlude_split": 0.74
-    }
-  },
+  "object_kinds": {},
   "objects": [
     {
       "id": "door_room_1",
@@ -729,6 +659,13 @@
       "kind": "backpack",
       "x": 400,
       "y": 1510,
+      "state": 0
+    },
+    {
+      "id": "skateboard_main",
+      "kind": "skateboard",
+      "x": 470,
+      "y": 1512,
       "state": 0
     },
     {

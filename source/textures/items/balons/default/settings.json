@@ -1,6 +1,14 @@
 {
   "id": "default",
   "item_id": "ballon",
+  "object_kind": "ballon",
+  "object_defaults": {
+    "blocking": false,
+    "cycle_sprites": false,
+    "occlude_top": false,
+    "pickup_item_id": "ballon",
+    "weight_kg": 1.2
+  },
   "sprite_path": "source/textures/items/ballon/ballon.png",
   "world_size": [78, 110],
   "icon_size": [30, 42],

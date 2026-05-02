@@ -87,7 +87,7 @@ class LanPresenceHost:
         self._next_remote_id = 2
         self._lock = threading.Lock()
         self._events: list[HostEvent] = []
-        self._remote_inputs: dict[str, tuple[int, int, bool, float]] = {}
+        self._remote_inputs: dict[str, tuple[int, int, bool, float, bool]] = {}
         self._remote_actions: list[tuple[str, str]] = []
         self._enabled = False
         self._joinable = True
@@ -182,7 +182,7 @@ class LanPresenceHost:
             out, self._events = self._events, []
         return out
 
-    def poll_remote_inputs(self) -> list[tuple[str, int, int, bool, float]]:
+    def poll_remote_inputs(self) -> list[tuple[str, int, int, bool, float, bool]]:
         with self._lock:
             items = [(pid, *vals) for pid, vals in self._remote_inputs.items()]
             self._remote_inputs.clear()
@@ -382,13 +382,14 @@ class LanPresenceHost:
                         dy = int(data.get("dy", 0))
                         holding = bool(data.get("holding_pickup", False))
                         run = float(data.get("run_multiplier", 1.0))
+                        ride_hold = bool(data.get("ride_hold", False))
                     except Exception:
                         continue
                     dx = 0 if dx == 0 else (1 if dx > 0 else -1)
                     dy = 0 if dy == 0 else (1 if dy > 0 else -1)
                     run = max(1.0, min(4.0, run))
                     with self._lock:
-                        self._remote_inputs[client_player_id] = (dx, dy, holding, run)
+                        self._remote_inputs[client_player_id] = (dx, dy, holding, run, ride_hold)
                 elif msg_type == "action":
                     action = str(data.get("action", "")).strip()
                     if not action:
@@ -465,7 +466,7 @@ class LanServerBrowser:
         self._connect_result: tuple[bool, str] | None = None
         self._join_info: dict[str, object] | None = None
         # Track last sent input to avoid sending identical packets every frame.
-        self._last_sent_input: tuple[int, int, bool, float] | None = None
+        self._last_sent_input: tuple[int, int, bool, float, bool] | None = None
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -546,10 +547,18 @@ class LanServerBrowser:
         self._join_info = None
         return info
 
-    def send_input_update(self, *, dx: int, dy: int, holding_pickup: bool, run_multiplier: float) -> None:
+    def send_input_update(
+        self,
+        *,
+        dx: int,
+        dy: int,
+        holding_pickup: bool,
+        run_multiplier: float,
+        ride_hold: bool = False,
+    ) -> None:
         if not self.is_connected():
             return
-        new_input = (int(dx), int(dy), bool(holding_pickup), float(run_multiplier))
+        new_input = (int(dx), int(dy), bool(holding_pickup), float(run_multiplier), bool(ride_hold))
         if new_input == self._last_sent_input:
             return  # deduplicate: skip identical frames
         self._last_sent_input = new_input
@@ -559,6 +568,7 @@ class LanServerBrowser:
             "dy": new_input[1],
             "holding_pickup": new_input[2],
             "run_multiplier": new_input[3],
+            "ride_hold": new_input[4],
         }
         self._send_json(payload)
 

@@ -137,6 +137,17 @@ class SpriteSheetLoader:
         if runtime.component_pick != "none":
             frames_raw = [self._filter_frame_component(frame, runtime.component_pick) for frame in frames_raw]
         frames_raw = [self._trim_top_fringe_noise(frame) for frame in frames_raw]
+        # "component_pick:none" is used for authored overlays like skateboard sheets.
+        # For those sheets, relocating detached top parts may incorrectly duplicate
+        # board fragments near the body; keep only top-artifact dropping.
+        frames_raw = [
+            self._relocate_detached_top_component_below(
+                frame,
+                strip_only=runtime.component_pick == "none",
+            )
+            for frame in frames_raw
+        ]
+        frames_raw = [self._drop_detached_top_artifact(frame) for frame in frames_raw]
         if runtime.alignment_mode == "raw_cell":
             return frames_raw
 
@@ -534,7 +545,7 @@ class SpriteSheetLoader:
         return None
 
     def _cache_variant_token(self, sheet_path: Path) -> str:
-        token_parts = ["walk_v9"]
+        token_parts = ["walk_v11"]
         try:
             stat = sheet_path.stat()
             token_parts.append(f"sheet:{stat.st_mtime_ns}:{stat.st_size}")
@@ -605,6 +616,71 @@ class SpriteSheetLoader:
         del alpha_px
         return out
 
+    def _drop_detached_top_artifact(self, frame: pygame.Surface) -> pygame.Surface:
+        alpha_cutoff = self._config.alpha_component_cutoff
+        components = self._extract_components(frame, alpha_cutoff=alpha_cutoff, min_area=8)
+        if len(components) <= 1:
+            return frame
+        body = max(components, key=lambda r: r.width * r.height)
+        top_edge_limit = max(8, int(frame.get_height() * 0.14))
+        out = frame.copy()
+        alpha_px = pygame.surfarray.pixels_alpha(out)
+        changed = False
+        for rect in components:
+            if rect == body:
+                continue
+            if rect.bottom >= body.top:
+                continue
+            if rect.top > top_edge_limit:
+                continue
+            alpha_px[rect.x : rect.x + rect.width, rect.y : rect.y + rect.height] = 0
+            changed = True
+        del alpha_px
+        return out if changed else frame
+
+    def _relocate_detached_top_component_below(
+        self,
+        frame: pygame.Surface,
+        *,
+        strip_only: bool = False,
+    ) -> pygame.Surface:
+        alpha_cutoff = self._config.alpha_component_cutoff
+        components = self._extract_components(frame, alpha_cutoff=alpha_cutoff, min_area=8)
+        if len(components) <= 1:
+            return frame
+        body = max(components, key=lambda r: r.width * r.height)
+        top_edge_limit = max(8, int(frame.get_height() * 0.14))
+        top_parts = [r for r in components if r != body and r.bottom <= body.top + 4 and r.top <= top_edge_limit]
+        if not top_parts:
+            return frame
+        has_bottom = any(r != body and r.top >= body.bottom - 4 for r in components)
+        if has_bottom:
+            return frame
+
+        out = frame.copy()
+        alpha_px = pygame.surfarray.pixels_alpha(out)
+        for rect in top_parts:
+            alpha_px[rect.x : rect.x + rect.width, rect.y : rect.y + rect.height] = 0
+        del alpha_px
+
+        body_cx = body.centerx
+        bottom_y = body.bottom
+        for rect in top_parts:
+            source_rect = rect
+            if strip_only and rect.height >= 14:
+                strip_h = max(6, int(round(rect.height * 0.36)))
+                source_rect = pygame.Rect(rect.x, rect.bottom - strip_h, rect.width, strip_h)
+            patch = frame.subsurface(source_rect).copy()
+            target_x = int(round(body_cx - rect.width / 2))
+            target_x = max(0, min(out.get_width() - patch.get_width(), target_x))
+            if strip_only:
+                target_y = min(out.get_height() - patch.get_height(), bottom_y - max(1, int(round(patch.get_height() * 0.25))))
+            else:
+                target_y = min(out.get_height() - patch.get_height(), bottom_y - max(2, int(round(patch.get_height() * 0.35))))
+            target_y = max(0, target_y)
+            out.blit(patch, (target_x, target_y))
+        return out
+
     def _parse_frame_columns(self, raw: object, *, columns: int) -> list[int] | None:
         if not isinstance(raw, list):
             return None
@@ -652,17 +728,23 @@ class SpriteSheetLoader:
 
         pad = 6
         keep_zone = selected.inflate(pad * 2, pad * 2)
-        down_allow = max(14, int(selected.height * 0.32))
+        down_allow = max(34, int(selected.height * 0.78))
         out = pygame.Surface(frame.get_size(), pygame.SRCALPHA)
         for rect in components:
             if rect == selected or keep_zone.colliderect(rect):
                 out.blit(frame, (rect.x, rect.y), rect)
                 continue
             # Keep detached footwear-like islands: below the body and horizontally close.
-            below_body = rect.top >= (selected.centery - 4) and rect.top <= (selected.bottom + down_allow)
+            below_body = rect.top >= (selected.centery - 8) and rect.top <= (selected.bottom + down_allow)
             x_overlap = min(rect.right, selected.right) - max(rect.x, selected.x)
-            near_x = x_overlap > 0 or abs(rect.centerx - selected.centerx) <= max(10, selected.width // 3)
-            if below_body and near_x:
+            near_x = x_overlap > 0 or abs(rect.centerx - selected.centerx) <= max(24, int(selected.width * 0.90))
+            # Preserve skateboard-like detached platforms below the character body.
+            is_platform = (
+                rect.top >= selected.centery
+                and rect.width >= max(18, int(selected.width * 0.55))
+                and abs(rect.centerx - selected.centerx) <= max(30, selected.width)
+            )
+            if (below_body and near_x) or is_platform:
                 out.blit(frame, (rect.x, rect.y), rect)
         return out
 
@@ -954,6 +1036,37 @@ class ScaledAnimationCache:
     def __init__(self, base_frames: dict[Direction, list[pygame.Surface]]) -> None:
         self._base_frames = base_frames
         self._cache: dict[int, dict[Direction, list[pygame.Surface]]] = {}
+
+    def base_frame_size(self, direction: Direction) -> tuple[int, int]:
+        frames = self._base_frames.get(direction)
+        if not frames:
+            return 1, 1
+        frame = frames[0]
+        return max(1, frame.get_width()), max(1, frame.get_height())
+
+    def base_body_height(self, direction: Direction, *, min_alpha: int = 20) -> int:
+        frames = self._base_frames.get(direction)
+        if not frames:
+            return 1
+        frame = frames[0]
+        body = frame.get_bounding_rect(min_alpha=max(1, int(min_alpha)))
+        if body.height <= 0:
+            return max(1, frame.get_height())
+        return max(1, body.height)
+
+    def nominal_body_height(self, *, min_alpha: int = 20) -> int:
+        heights: list[int] = []
+        cutoff = max(1, int(min_alpha))
+        for frames in self._base_frames.values():
+            if not frames:
+                continue
+            body = frames[0].get_bounding_rect(min_alpha=cutoff)
+            h = body.height if body.height > 0 else frames[0].get_height()
+            heights.append(max(1, int(h)))
+        if not heights:
+            return 1
+        heights.sort()
+        return heights[len(heights) // 2]
 
     def frames_for_height(self, target_height: int) -> dict[Direction, list[pygame.Surface]]:
         if target_height in self._cache:

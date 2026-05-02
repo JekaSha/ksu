@@ -2282,6 +2282,8 @@ class WorldRenderer:
             base = object_sprites.ballon_sprite_for_object(obj)
         elif obj.kind == "key":
             base = object_sprites.key_set().get(obj.state)
+        elif obj.kind == "skateboard":
+            base = object_sprites.skateboard_set().get(obj.state)
         elif obj.kind == "door":
             base = object_sprites.door_set(obj.door_orientation).get(obj.state)
         elif obj.kind == "math_book":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import random
+import time
 
 
 @dataclass
@@ -191,6 +192,10 @@ class MathTaskEngineState:
     next_answer_id: int = 1
     dispatcher_player_id: str | None = None
     dispatcher_team_id: str | None = None
+    run_started_at_ts: float | None = None
+    run_contributions: dict[str, dict[str, int]] = field(default_factory=dict)
+    completion_summary_seq: int = 0
+    last_completion_summary: dict[str, object] | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -212,6 +217,18 @@ class MathTaskEngineState:
             "next_answer_id": self.next_answer_id,
             "dispatcher_player_id": self.dispatcher_player_id,
             "dispatcher_team_id": self.dispatcher_team_id,
+            "run_started_at_ts": self.run_started_at_ts,
+            "run_contributions": {
+                str(pid): {
+                    "pick_first": int(stats.get("pick_first", 0)),
+                    "pick_second": int(stats.get("pick_second", 0)),
+                    "answer": int(stats.get("answer", 0)),
+                }
+                for pid, stats in self.run_contributions.items()
+                if str(pid).strip()
+            },
+            "completion_summary_seq": int(self.completion_summary_seq),
+            "last_completion_summary": dict(self.last_completion_summary) if self.last_completion_summary else None,
         }
 
     @classmethod
@@ -245,6 +262,23 @@ class MathTaskEngineState:
         )
         raw_team = payload.get("dispatcher_team_id")
         out.dispatcher_team_id = str(raw_team).strip() if raw_team is not None and str(raw_team).strip() else None
+        raw_run_started = payload.get("run_started_at_ts")
+        out.run_started_at_ts = float(raw_run_started) if isinstance(raw_run_started, (int, float)) else None
+        raw_contrib = payload.get("run_contributions", {})
+        if isinstance(raw_contrib, dict):
+            for pid, item in raw_contrib.items():
+                player_id = str(pid).strip()
+                if not player_id or not isinstance(item, dict):
+                    continue
+                out.run_contributions[player_id] = {
+                    "pick_first": max(0, int(item.get("pick_first", 0) or 0)),
+                    "pick_second": max(0, int(item.get("pick_second", 0) or 0)),
+                    "answer": max(0, int(item.get("answer", 0) or 0)),
+                }
+        out.completion_summary_seq = max(0, int(payload.get("completion_summary_seq", 0) or 0))
+        raw_summary = payload.get("last_completion_summary")
+        if isinstance(raw_summary, dict):
+            out.last_completion_summary = dict(raw_summary)
         pending_raw = payload.get("pending_answers", [])
         if isinstance(pending_raw, list):
             for item in pending_raw:
@@ -308,6 +342,70 @@ class MathTaskEngineState:
             return "-"
         return "+"
 
+    def _ensure_player_contribution(self, player_id: str) -> dict[str, int] | None:
+        pid = str(player_id).strip()
+        if not pid:
+            return None
+        current = self.run_contributions.get(pid)
+        if current is None:
+            current = {"pick_first": 0, "pick_second": 0, "answer": 0}
+            self.run_contributions[pid] = current
+        return current
+
+    def _inc_contribution(self, *, player_id: str, kind: str) -> None:
+        if kind not in {"pick_first", "pick_second", "answer"}:
+            return
+        stats = self._ensure_player_contribution(player_id)
+        if stats is None:
+            return
+        stats[kind] = max(0, int(stats.get(kind, 0))) + 1
+
+    def _task_title(self, task_no: int | None) -> str:
+        if task_no == 1:
+            return "сложение"
+        if task_no == 2:
+            return "вычитание"
+        return "в разработке"
+
+    def _build_completion_summary(self, *, completed_by_player_id: str, now_ts: float) -> None:
+        self.completion_summary_seq += 1
+        run_started = float(self.run_started_at_ts) if self.run_started_at_ts is not None else float(now_ts)
+        duration_sec = max(0.0, float(now_ts) - run_started)
+        rows: list[dict[str, object]] = []
+        for pid, stats in self.run_contributions.items():
+            pick_first = max(0, int(stats.get("pick_first", 0)))
+            pick_second = max(0, int(stats.get("pick_second", 0)))
+            answer = max(0, int(stats.get("answer", 0)))
+            total = pick_first + pick_second + answer
+            rows.append(
+                {
+                    "player_id": pid,
+                    "pick_first": pick_first,
+                    "pick_second": pick_second,
+                    "answer": answer,
+                    "total": total,
+                }
+            )
+        rows.sort(key=lambda item: (-int(item.get("total", 0)), -int(item.get("answer", 0)), str(item.get("player_id", ""))))
+        self.last_completion_summary = {
+            "summary_id": int(self.completion_summary_seq),
+            "task_no": int(self.selected_task or 0),
+            "task_title": self._task_title(self.selected_task),
+            "team_id": str(self.dispatcher_team_id).strip() if self.dispatcher_team_id else None,
+            "iterations_target": int(self.iterations_target),
+            "produced_count": int(self.produced_count),
+            "solved_count": int(self.solved_count),
+            "duration_sec": float(duration_sec),
+            "completed_by": str(completed_by_player_id).strip() or None,
+            "completed_at_ts": float(now_ts),
+            "rows": rows,
+        }
+
+    def latest_completion_summary(self) -> dict[str, object] | None:
+        if self.last_completion_summary is None:
+            return None
+        return dict(self.last_completion_summary)
+
     def _activate_supported_task(
         self,
         *,
@@ -328,6 +426,8 @@ class MathTaskEngineState:
         self.pending_answers = []
         self.active_answer_id = None
         self.next_answer_id = 1
+        self.run_started_at_ts = float(now_ts)
+        self.run_contributions = {}
         leader_id = str(player_id).strip() or "p1"
         self.current_round = MathRoundState(
             stage="pick_first",
@@ -448,6 +548,7 @@ class MathTaskEngineState:
                 return MathTaskOutcome(message="Сначала прими задачу: найти первое число")
             round_state.first_digit = value
             round_state.stage = "pick_second"
+            self._inc_contribution(player_id=player_id, kind="pick_first")
             op = round_state.operation
             return MathTaskOutcome(message=f"Операция: {op}. Найди второе число", consume_digit=True)
         if round_state.stage == "pick_second":
@@ -486,6 +587,7 @@ class MathTaskEngineState:
             self.produced_count += 1
             self.round_index += 1
             self.pending_answers.append(answer)
+            self._inc_contribution(player_id=player_id, kind="pick_second")
             round_state.first_digit = None
             round_state.stage = "pick_first"
             next_owner = self._resolve_next_stage_owner(
@@ -516,7 +618,7 @@ class MathTaskEngineState:
             return out
         return MathTaskOutcome(message=None)
 
-    def pick_answer(self, *, player_id: str, answer_value: int) -> MathTaskOutcome:
+    def pick_answer(self, *, player_id: str, answer_value: int, now_ts: float | None = None) -> MathTaskOutcome:
         if not self.active or self.selected_task not in {1, 2}:
             return MathTaskOutcome(message=None)
         pending = self.active_pending_answer()
@@ -532,6 +634,7 @@ class MathTaskEngineState:
             pending.solved = True
             self.solved_count += 1
             self.total_solved += 1
+            self._inc_contribution(player_id=player_id, kind="answer")
             out = MathTaskOutcome(clear_answers=True)
             self._activate_next_pending()
             if self.active_answer_id is not None:
@@ -541,6 +644,10 @@ class MathTaskEngineState:
             if self.solved_count >= self.iterations_target and self.produced_count >= self.iterations_target:
                 self.active = False
                 self.current_round = None
+                self._build_completion_summary(
+                    completed_by_player_id=player_id,
+                    now_ts=float(now_ts) if now_ts is not None else time.time(),
+                )
                 out.clear_digits = True
                 out.message = f"Серия завершена! Решено {self.solved_count}/{self.iterations_target}"
                 return out

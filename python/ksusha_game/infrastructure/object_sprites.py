@@ -128,6 +128,36 @@ class ObjectSpriteLibrary:
         self._cache[key] = result
         return result
 
+    def skateboard_set(self) -> ObjectSpriteSet:
+        key = "skateboard"
+        if key in self._cache:
+            return self._cache[key]
+        item_dir = self._project_root / "source/textures/items/skateboard"
+        plain_path = item_dir / "skateboard.png"
+        chroma_path = item_dir / "skateboard_chroma.png"
+        target_size = self._load_kind_world_size("skateboard") or (110, 38)
+        sprite: pygame.Surface
+        if chroma_path.exists():
+            sprite = self._load_single_sprite_with_chroma(
+                path=chroma_path,
+                target_size=target_size,
+                green_delta=34,
+                green_min=92,
+            )
+        elif plain_path.exists():
+            raw = pygame.image.load(str(plain_path)).convert_alpha()
+            sprite = self._fit_to_target(raw, target_size)
+        else:
+            fallback = pygame.Surface(target_size, pygame.SRCALPHA)
+            pygame.draw.rect(fallback, (46, 42, 40), pygame.Rect(6, 10, target_size[0] - 12, target_size[1] - 14), 0, 8)
+            pygame.draw.rect(fallback, (222, 118, 84), pygame.Rect(8, 12, target_size[0] - 16, target_size[1] - 18), 0, 8)
+            pygame.draw.circle(fallback, (34, 34, 34), (24, target_size[1] - 4), 4)
+            pygame.draw.circle(fallback, (34, 34, 34), (target_size[0] - 24, target_size[1] - 4), 4)
+            sprite = fallback
+        result = ObjectSpriteSet(variants=[sprite])
+        self._cache[key] = result
+        return result
+
     def ballon_set(self) -> ObjectSpriteSet:
         key = "ballon"
         if key in self._cache:
@@ -798,6 +828,14 @@ class ObjectSpriteLibrary:
             icon = base if key_color is None else self._tint_icon(base, key_color, strength=1.0)
             self._icon_cache[item_id] = icon
             return icon
+        if item_id.startswith("__bag_slot__:"):
+            owner_item_id = item_id.split(":", 1)[1].strip()
+            if owner_item_id:
+                return self.icon_for_item(owner_item_id)
+        if item_id == "skateboard":
+            icon = pygame.transform.scale(self.skateboard_set().get(0), (42, 22))
+            self._icon_cache[item_id] = icon
+            return icon
         raise KeyError(f"Unknown item icon: {item_id}")
 
     def cached_icon_for_item(self, item_id: str) -> pygame.Surface | None:
@@ -816,6 +854,8 @@ class ObjectSpriteLibrary:
             return len(self.ballon_set().variants)
         if object_kind == "door":
             return len(self.door_set("top").variants)
+        if object_kind == "skateboard":
+            return len(self.skateboard_set().variants)
         if object_kind == "math_book":
             return 1
         if object_kind == "math_digit":

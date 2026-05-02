@@ -1,0 +1,22 @@
+{
+  "id": "skateboard",
+  "item_id": "skateboard",
+  "object_kind": "skateboard",
+  "object_defaults": {
+    "blocking": false,
+    "cycle_sprites": false,
+    "occlude_top": false,
+    "pickup_item_id": "skateboard",
+    "weight_kg": 2.4
+  },
+  "world_size": [80, 52],
+  "weight_kg": 2.4,
+  "can_store_in_backpack": true,
+  "requires_backpack": true,
+  "backpack_slots_required": 2,
+  "use_effect": {
+    "movement_mode": "horizontal_only",
+    "required_skill": "skateboard",
+    "animation_variant": "skate"
+  }
+}

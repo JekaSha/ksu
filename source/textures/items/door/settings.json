@@ -1,0 +1,18 @@
+{
+  "object_kind": "door",
+  "object_defaults": {
+    "blocking": true,
+    "height": 316,
+    "spray_zoom_coef": 1.0,
+    "cycle_sprites": false,
+    "occlude_top": true,
+    "occlude_split": 0.74,
+    "transitions": {
+      "unlock": {
+        "state": 1,
+        "blocking": false
+      }
+    },
+    "weight_kg": 120.0
+  }
+}

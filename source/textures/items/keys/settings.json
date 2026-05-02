@@ -1,3 +1,11 @@
 {
+  "object_kind": "key",
+  "object_defaults": {
+    "blocking": false,
+    "cycle_sprites": true,
+    "occlude_top": false,
+    "pickup_item_id": "key",
+    "weight_kg": 0.3
+  },
   "world_size": [58, 42]
 }

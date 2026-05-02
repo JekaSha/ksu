@@ -20,6 +20,10 @@ from ksusha_game.config import (
     list_available_characters,
     load_user_settings,
     resolve_character_config,
+    resolve_character_physical_stats,
+    resolve_character_render_scale,
+    resolve_character_sheet_path,
+    resolve_character_skill,
     save_user_settings,
 )
 from ksusha_game.domain.direction import Direction, FACING_VECTOR
@@ -46,6 +50,16 @@ from ksusha_game.infrastructure.world_setup import apply_interior_physics, objec
 from ksusha_game.presentation.world_renderer import WorldRenderer
 
 
+def _scancode(name: str) -> int:
+    value = getattr(pygame, f"SCANCODE_{name}", None)
+    if isinstance(value, int):
+        return value
+    legacy_value = getattr(pygame, f"KSCAN_{name}", None)
+    if isinstance(legacy_value, int):
+        return legacy_value
+    return -1
+
+
 class GameSession:
     _MAX_PLAYERS = 5
     _MAX_LOCAL_PLAYERS = 1
@@ -56,6 +70,7 @@ class GameSession:
     _NEAR_INTERACT_GAP = 14.0
     _NEAR_PICKUP_GAP = 18.0
     _LOCAL_PLAYER_ID = "p1"
+    _BACKPACK_SLOT_MARKER_PREFIX = "__bag_slot__:"
     _MATH_BOOK_KIND = "math_book"
     _MATH_DIGIT_KIND = "math_digit"
     _MATH_ANSWER_KIND = "math_answer"
@@ -70,6 +85,66 @@ class GameSession:
     # Exclusions: pickup_item_id (picked up → removed), lock_key_sets (unlockable),
     # transitions (state machine), math-related kinds (removed on interact).
     _SNAPSHOT_MUTABLE_KINDS: frozenset[str] = frozenset({"math_book", "math_digit", "math_answer"})
+    _LAYOUT_INDEPENDENT_KEY_BY_SCANCODE: dict[int, int] = {
+        _scancode("Q"): pygame.K_q,
+        _scancode("W"): pygame.K_w,
+        _scancode("E"): pygame.K_e,
+        _scancode("R"): pygame.K_r,
+        _scancode("T"): pygame.K_t,
+        _scancode("Y"): pygame.K_y,
+        _scancode("U"): pygame.K_u,
+        _scancode("I"): pygame.K_i,
+        _scancode("O"): pygame.K_o,
+        _scancode("P"): pygame.K_p,
+        _scancode("A"): pygame.K_a,
+        _scancode("S"): pygame.K_s,
+        _scancode("D"): pygame.K_d,
+        _scancode("F"): pygame.K_f,
+        _scancode("G"): pygame.K_g,
+        _scancode("H"): pygame.K_h,
+        _scancode("J"): pygame.K_j,
+        _scancode("K"): pygame.K_k,
+        _scancode("L"): pygame.K_l,
+        _scancode("Z"): pygame.K_z,
+        _scancode("X"): pygame.K_x,
+        _scancode("C"): pygame.K_c,
+        _scancode("V"): pygame.K_v,
+        _scancode("B"): pygame.K_b,
+        _scancode("N"): pygame.K_n,
+        _scancode("M"): pygame.K_m,
+        _scancode("0"): pygame.K_0,
+        _scancode("1"): pygame.K_1,
+        _scancode("2"): pygame.K_2,
+        _scancode("3"): pygame.K_3,
+        _scancode("4"): pygame.K_4,
+        _scancode("5"): pygame.K_5,
+        _scancode("6"): pygame.K_6,
+        _scancode("7"): pygame.K_7,
+        _scancode("8"): pygame.K_8,
+        _scancode("9"): pygame.K_9,
+        _scancode("MINUS"): pygame.K_MINUS,
+        _scancode("EQUALS"): pygame.K_EQUALS,
+        _scancode("LEFTBRACKET"): pygame.K_LEFTBRACKET,
+        _scancode("RIGHTBRACKET"): pygame.K_RIGHTBRACKET,
+        _scancode("SEMICOLON"): pygame.K_SEMICOLON,
+        _scancode("APOSTROPHE"): pygame.K_QUOTE,
+        _scancode("COMMA"): pygame.K_COMMA,
+        _scancode("PERIOD"): pygame.K_PERIOD,
+        _scancode("SLASH"): pygame.K_SLASH,
+        _scancode("BACKSLASH"): pygame.K_BACKSLASH,
+        _scancode("GRAVE"): pygame.K_BACKQUOTE,
+        _scancode("LEFT"): pygame.K_LEFT,
+        _scancode("RIGHT"): pygame.K_RIGHT,
+        _scancode("UP"): pygame.K_UP,
+        _scancode("DOWN"): pygame.K_DOWN,
+        _scancode("TAB"): pygame.K_TAB,
+        _scancode("SPACE"): pygame.K_SPACE,
+        _scancode("ESCAPE"): pygame.K_ESCAPE,
+        _scancode("RETURN"): pygame.K_RETURN,
+        _scancode("KP_ENTER"): pygame.K_KP_ENTER,
+        _scancode("BACKSPACE"): pygame.K_BACKSPACE,
+        _scancode("DELETE"): pygame.K_DELETE,
+    }
 
     @staticmethod
     def _is_snapshot_static(obj: "WorldObject") -> bool:
@@ -113,7 +188,7 @@ class GameSession:
         self._async_preload_queue: deque[tuple[str, str]] = deque()
         self._async_preload_pending: set[tuple[str, str]] = set()
         self._command_queue: deque[PlayerActionCommand] = deque()
-        self._movement_inputs: dict[str, tuple[int, int, bool, float]] = {}
+        self._movement_inputs: dict[str, tuple[int, int, bool, float, bool]] = {}
         self._active_player_context_id: str = self._LOCAL_PLAYER_ID
         self._math_tasks = MathTaskEngineState()
         self._math_spawn_seq = 0
@@ -140,6 +215,13 @@ class GameSession:
             raise RuntimeError("Local player state is not initialized")
         return state
 
+    @classmethod
+    def _layout_neutral_event_key(cls, event: pygame.event.Event) -> int:
+        event_key = int(getattr(event, "key", 0))
+        event_scancode = int(getattr(event, "scancode", -1))
+        mapped = cls._LAYOUT_INDEPENDENT_KEY_BY_SCANCODE.get(event_scancode)
+        return int(mapped) if mapped is not None else event_key
+
     def _context_player_state(self) -> SessionPlayerState:
         state = self._player_state(self._active_player_context_id)
         if state is None:
@@ -164,6 +246,70 @@ class GameSession:
         team = self._player_team(pid)
         team_part = f" @T{team}" if team else ""
         return f"{self._player_display_name(pid)} [{pid}]{team_part}"
+
+    @staticmethod
+    def _math_task_title(task_no: int | None) -> str:
+        if task_no == 1:
+            return "сложение"
+        if task_no == 2:
+            return "вычитание"
+        if task_no == 3:
+            return "выбор +/-"
+        return "в разработке"
+
+    def _build_math_completion_lines(
+        self,
+        *,
+        summary: dict[str, object],
+        selected_action_idx: int,
+    ) -> list[str]:
+        task_no = int(summary.get("task_no", 0) or 0)
+        task_title = str(summary.get("task_title", "")).strip() or self._math_task_title(task_no)
+        duration_sec = max(0.0, float(summary.get("duration_sec", 0.0) or 0.0))
+        duration_text = f"{int(duration_sec // 60):02d}:{int(duration_sec % 60):02d}"
+        solved = max(0, int(summary.get("solved_count", 0) or 0))
+        target = max(1, int(summary.get("iterations_target", 1) or 1))
+        team_name = self._team_name(summary.get("team_id"))
+        rows_raw = summary.get("rows", [])
+        rows = rows_raw if isinstance(rows_raw, list) else []
+        lines: list[str] = [
+            "ИТОГИ КОМАНДЫ",
+            f"Задача {task_no}: {task_title}",
+            f"Команда: {team_name}",
+            f"Решено: {solved}/{target} | время: {duration_text}",
+            "",
+        ]
+        if not rows:
+            lines.append("Статистика пуста")
+        else:
+            lines.append("Кто сколько сделал:")
+            top_item = rows[0] if rows and isinstance(rows[0], dict) else None
+            if isinstance(top_item, dict):
+                top_pid = str(top_item.get("player_id", "")).strip()
+                if top_pid:
+                    top_name = self._player_display_name(top_pid)
+                    top_total = max(0, int(top_item.get("total", 0) or 0))
+                    lines.append(f"Лидер: {top_name} ({top_total})")
+            for item in rows[:8]:
+                if not isinstance(item, dict):
+                    continue
+                pid = str(item.get("player_id", "")).strip()
+                if not pid:
+                    continue
+                name = self._player_display_name(pid)
+                answers = max(0, int(item.get("answer", 0) or 0))
+                first = max(0, int(item.get("pick_first", 0) or 0))
+                second = max(0, int(item.get("pick_second", 0) or 0))
+                lines.append(f"- найти результат {name}: {answers} шт.")
+                lines.append(f"- найти первое число {name}: {first} шт.")
+                lines.append(f"- найти второе число {name}: {second} шт.")
+        lines.append("")
+        actions = ["Повторить задачу", "Следующая задача/уровень"]
+        for idx, label in enumerate(actions):
+            mark = ">" if idx == selected_action_idx else " "
+            lines.append(f"{mark} {label}")
+        lines.append("Z/X: выбор | Q/Enter: подтвердить | Esc: закрыть")
+        return lines
 
     def _sorted_player_ids_for_ui(self) -> list[str]:
         player_ids = list(self._player_states.keys())
@@ -252,6 +398,26 @@ class GameSession:
         _skin_pool_dir, _sprite_path, _backpack_path, resolved = resolve_character_config(token)
         self._player_character_ids[pid] = resolved
 
+    @staticmethod
+    def _stats_with_character_overrides(base: PlayerStats, character_id: str | None) -> PlayerStats:
+        weight_kg, height_cm = resolve_character_physical_stats(character_id)
+        return PlayerStats(
+            speed=float(base.speed),
+            vision=float(base.vision),
+            jump_power=float(base.jump_power),
+            weight_kg=float(weight_kg) if weight_kg is not None else float(base.weight_kg),
+            height_cm=float(height_cm) if height_cm is not None else float(base.height_cm),
+        )
+
+    def _apply_character_stats_to_player(self, *, player_id: str, base_stats: PlayerStats) -> None:
+        state = self._player_state(player_id)
+        if state is None:
+            return
+        state.player.stats = self._stats_with_character_overrides(
+            base=base_stats,
+            character_id=self._player_character_id(player_id),
+        )
+
     def _player_character_id(self, player_id: str) -> str:
         pid = str(player_id).strip()
         if not pid:
@@ -260,6 +426,10 @@ class GameSession:
         if token:
             return token
         return str(self._config.character_id).strip() or "ksu"
+
+    def _player_has_skill(self, player_id: str, skill_id: str) -> bool:
+        char_id = self._player_character_id(player_id)
+        return resolve_character_skill(char_id, skill_id)
 
     def _build_math_inbox_rows(self, *, player_id: str) -> list[tuple[str, str, str | None, str | None]]:
         pid = str(player_id).strip()
@@ -430,7 +600,9 @@ class GameSession:
             spawn_x=float(world.spawn_x),
             spawn_y=float(world.spawn_y),
             stats=world.player_stats,
+            character_id=self._config.character_id,
         )
+        self._seed_local_test_inventory(world)
         requested_locals_raw = os.getenv("KSU_LOCAL_PLAYERS", "").strip()
         if requested_locals_raw:
             try:
@@ -468,12 +640,12 @@ class GameSession:
                 return f"{h:02d}:{m:02d}:{s:02d}"
             return f"{m:02d}:{s:02d}"
 
-        character_animation_caches: dict[str, tuple[ScaledAnimationCache, ScaledAnimationCache]] = {}
+        character_animation_caches: dict[str, dict[str, ScaledAnimationCache]] = {}
 
-        def _animation_caches_for_character(char_id: str) -> tuple[ScaledAnimationCache, ScaledAnimationCache]:
+        def _animation_caches_for_character(char_id: str) -> dict[str, ScaledAnimationCache]:
             token = str(char_id).strip()
             if not token:
-                return walk_cache, backpack_cache
+                return {"walk": walk_cache, "backpack": backpack_cache}
             cached_pair = character_animation_caches.get(token)
             if cached_pair is not None:
                 return cached_pair
@@ -485,12 +657,17 @@ class GameSession:
                     return resolved_cached
                 walk_anim = ScaledAnimationCache(loader.load_walk_frames(project_root / sprite_path))
                 backpack_anim = ScaledAnimationCache(loader.load_walk_frames(project_root / backpack_path))
-                pair = (walk_anim, backpack_anim)
-                character_animation_caches[resolved] = pair
-                character_animation_caches[token] = pair
-                return pair
+                result = {"walk": walk_anim, "backpack": backpack_anim}
+                skate_path = resolve_character_sheet_path(resolved, "skate")
+                if skate_path is None:
+                    skate_path = resolve_character_sheet_path(resolved, "skateboard")
+                if skate_path is not None:
+                    result["skate"] = ScaledAnimationCache(loader.load_walk_frames(project_root / skate_path))
+                character_animation_caches[resolved] = result
+                character_animation_caches[token] = result
+                return result
             except Exception:
-                return walk_cache, backpack_cache
+                return {"walk": walk_cache, "backpack": backpack_cache}
 
         def _build_character_preview(char_id: str) -> pygame.Surface | None:
             token = str(char_id).strip()
@@ -529,8 +706,18 @@ class GameSession:
                 runtime_sprite_path = sprite_path
                 runtime_backpack_sprite_path = backpack_path
                 current_character_id = resolved
-                character_animation_caches[resolved] = (walk_cache, backpack_cache)
+                resolved_cache = {"walk": walk_cache, "backpack": backpack_cache}
+                skate_path = resolve_character_sheet_path(resolved, "skate")
+                if skate_path is None:
+                    skate_path = resolve_character_sheet_path(resolved, "skateboard")
+                if skate_path is not None:
+                    resolved_cache["skate"] = ScaledAnimationCache(loader.load_walk_frames(project_root / skate_path))
+                character_animation_caches[resolved] = resolved_cache
                 self._set_player_character_id(self._LOCAL_PLAYER_ID, resolved)
+                self._apply_character_stats_to_player(
+                    player_id=self._LOCAL_PLAYER_ID,
+                    base_stats=world.player_stats,
+                )
                 user_settings = dict(user_settings)
                 user_settings["character_id"] = resolved
                 user_settings["player_name"] = local_player_name
@@ -561,7 +748,17 @@ class GameSession:
         self._set_player_team(self._LOCAL_PLAYER_ID, local_team_id)
         current_character_id = str(self._config.character_id).strip() or "ksu"
         self._set_player_character_id(self._LOCAL_PLAYER_ID, current_character_id)
-        character_animation_caches[current_character_id] = (walk_cache, backpack_cache)
+        self._apply_character_stats_to_player(
+            player_id=self._LOCAL_PLAYER_ID,
+            base_stats=world.player_stats,
+        )
+        init_cache = {"walk": walk_cache, "backpack": backpack_cache}
+        init_skate_path = resolve_character_sheet_path(current_character_id, "skate")
+        if init_skate_path is None:
+            init_skate_path = resolve_character_sheet_path(current_character_id, "skateboard")
+        if init_skate_path is not None:
+            init_cache["skate"] = ScaledAnimationCache(loader.load_walk_frames(project_root / init_skate_path))
+        character_animation_caches[current_character_id] = init_cache
         user_settings = dict(user_settings)
         user_settings["player_name"] = local_player_name
         user_settings["team_id"] = local_team_id
@@ -620,6 +817,9 @@ class GameSession:
         task_menu_q_hold_task_no: int | None = None
         task_menu_q_hold_fired = False
         task_menu_q_hold_required_sec = 5.0
+        task_result_modal_open = False
+        task_result_modal_selected = 0
+        task_result_seen_summary_id = 0
         character_entries = list_available_characters()
         if not character_entries:
             character_entries = [{"id": current_character_id, "name": current_character_id.upper()}]
@@ -722,6 +922,17 @@ class GameSession:
                 selected_server_idx = 0
             else:
                 selected_server_idx = max(0, min(selected_server_idx, len(current_servers) - 1))
+            latest_task_summary = self._math_tasks.latest_completion_summary()
+            if self._math_tasks.active:
+                task_result_modal_open = False
+            elif isinstance(latest_task_summary, dict):
+                summary_id = max(0, int(latest_task_summary.get("summary_id", 0) or 0))
+                if summary_id > task_result_seen_summary_id:
+                    task_result_seen_summary_id = summary_id
+                    summary_team = str(latest_task_summary.get("team_id", "")).strip()
+                    if not summary_team or self._player_team(self._LOCAL_PLAYER_ID) == self._normalize_team_id(summary_team):
+                        task_result_modal_open = True
+                        task_result_modal_selected = 0
             if (
                 auto_reconnect_active
                 and not browser.is_connected()
@@ -765,7 +976,8 @@ class GameSession:
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.KEYUP:
-                    if event.key == pygame.K_q:
+                    event_key = self._layout_neutral_event_key(event)
+                    if event_key == pygame.K_q:
                         task_menu_q_hold_started_at = None
                         task_menu_q_hold_task_no = None
                         task_menu_q_hold_fired = False
@@ -779,11 +991,45 @@ class GameSession:
                     for controller in input_controllers.values():
                         controller.clear_pressed()
                 elif event.type == pygame.KEYDOWN:
-                    ctrl_m_pressed = event.key == pygame.K_m and (event.mod & pygame.KMOD_CTRL)
-                    ctrl_q_pressed = event.key == pygame.K_q and (event.mod & pygame.KMOD_CTRL)
-                    ctrl_p_pressed = event.key == pygame.K_p and (event.mod & pygame.KMOD_CTRL)
-                    ctrl_t_pressed = event.key == pygame.K_t and (event.mod & pygame.KMOD_CTRL)
-                    tab_tasks_pressed = event.key == pygame.K_TAB
+                    event_key = self._layout_neutral_event_key(event)
+                    ctrl_m_pressed = event_key == pygame.K_m and (event.mod & pygame.KMOD_CTRL)
+                    ctrl_q_pressed = event_key == pygame.K_q and (event.mod & pygame.KMOD_CTRL)
+                    ctrl_p_pressed = event_key == pygame.K_p and (event.mod & pygame.KMOD_CTRL)
+                    ctrl_t_pressed = event_key == pygame.K_t and (event.mod & pygame.KMOD_CTRL)
+                    tab_tasks_pressed = event_key == pygame.K_TAB
+                    if task_result_modal_open and isinstance(latest_task_summary, dict):
+                        if event_key in {pygame.K_z, pygame.K_LEFT, pygame.K_a}:
+                            task_result_modal_selected = (task_result_modal_selected - 1) % 2
+                            continue
+                        if event_key in {pygame.K_x, pygame.K_RIGHT, pygame.K_d}:
+                            task_result_modal_selected = (task_result_modal_selected + 1) % 2
+                            continue
+                        if event_key in {pygame.K_ESCAPE}:
+                            task_result_modal_open = False
+                            continue
+                        if event_key in {pygame.K_q, pygame.K_RETURN, pygame.K_KP_ENTER}:
+                            task_no = max(1, int(latest_task_summary.get("task_no", 1) or 1))
+                            if task_result_modal_selected == 0:
+                                action = f"task_restart_{task_no}"
+                                self._set_message(f"Повтор задачи {task_no}")
+                            else:
+                                next_task = task_no + 1
+                                if next_task > 9:
+                                    next_task = 1
+                                action = f"task_select_{next_task}"
+                                self._set_message(f"Переход к задаче {next_task}")
+                            if browser.is_connected():
+                                browser.send_action(action=action)
+                            else:
+                                self.queue_player_action(
+                                    player_id=self._LOCAL_PLAYER_ID,
+                                    action=action,
+                                    issued_at=now,
+                                )
+                            task_result_modal_open = False
+                            continue
+                        # while summary modal is open, block other hotkeys.
+                        continue
                     if ctrl_m_pressed:
                         if startup_character_pick_active:
                             self._set_message("Сначала выбери персонажа (Q/Enter или Esc)")
@@ -883,7 +1129,7 @@ class GameSession:
                         for controller in input_controllers.values():
                             controller.clear_pressed()
                         continue
-                    if event.key == pygame.K_ESCAPE:
+                    if event_key == pygame.K_ESCAPE:
                         if reconnect_candidate is not None:
                             reconnect_candidate = None
                             self._set_message("Reconnect canceled")
@@ -909,19 +1155,19 @@ class GameSession:
                         if entry_count <= 0:
                             show_character_menu = False
                             continue
-                        if event.key in {pygame.K_LEFT, pygame.K_z, pygame.K_a}:
+                        if event_key in {pygame.K_LEFT, pygame.K_z, pygame.K_a}:
                             character_menu_selected = (character_menu_selected - 1) % entry_count
                             continue
-                        if event.key in {pygame.K_RIGHT, pygame.K_x, pygame.K_d}:
+                        if event_key in {pygame.K_RIGHT, pygame.K_x, pygame.K_d}:
                             character_menu_selected = (character_menu_selected + 1) % entry_count
                             continue
-                        if event.key in {pygame.K_UP, pygame.K_w}:
+                        if event_key in {pygame.K_UP, pygame.K_w}:
                             character_menu_selected = (character_menu_selected - character_menu_cols) % entry_count
                             continue
-                        if event.key in {pygame.K_DOWN, pygame.K_s}:
+                        if event_key in {pygame.K_DOWN, pygame.K_s}:
                             character_menu_selected = (character_menu_selected + character_menu_cols) % entry_count
                             continue
-                        if event.key in {pygame.K_q, pygame.K_RETURN, pygame.K_KP_ENTER}:
+                        if event_key in {pygame.K_q, pygame.K_RETURN, pygame.K_KP_ENTER}:
                             selected_entry = character_entries[character_menu_selected]
                             selected_char_id = str(selected_entry.get("id", "")).strip()
                             if selected_char_id:
@@ -932,7 +1178,7 @@ class GameSession:
                         continue
                     if show_server_list:
                         if reconnect_candidate is not None:
-                            if event.key in {pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_y}:
+                            if event_key in {pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_y}:
                                 target = reconnect_candidate
                                 reconnect_candidate = None
                                 auto_reconnect_active = False
@@ -950,20 +1196,20 @@ class GameSession:
                                 self._set_message(
                                     f"Reconnecting: {target.host_name} ({target.player_name}) [{target.level_name}]"
                                 )
-                            elif event.key in {pygame.K_n, pygame.K_ESCAPE}:
+                            elif event_key in {pygame.K_n, pygame.K_ESCAPE}:
                                 reconnect_candidate = None
                                 self._set_message("Reconnect canceled")
                             continue
 
-                        if event.key in {pygame.K_UP, pygame.K_w}:
+                        if event_key in {pygame.K_UP, pygame.K_w}:
                             if current_servers:
                                 selected_server_idx = (selected_server_idx - 1) % len(current_servers)
                             continue
-                        if event.key in {pygame.K_DOWN, pygame.K_s}:
+                        if event_key in {pygame.K_DOWN, pygame.K_s}:
                             if current_servers:
                                 selected_server_idx = (selected_server_idx + 1) % len(current_servers)
                             continue
-                        if event.key in {pygame.K_RETURN, pygame.K_KP_ENTER}:
+                        if event_key in {pygame.K_RETURN, pygame.K_KP_ENTER}:
                             if not current_servers:
                                 self._set_message("No LAN servers found")
                                 continue
@@ -995,19 +1241,19 @@ class GameSession:
 
                     if show_team_menu:
                         if host_started and not browser.is_connected():
-                            if event.key in {pygame.K_UP, pygame.K_w, pygame.K_z}:
+                            if event_key in {pygame.K_UP, pygame.K_w, pygame.K_z}:
                                 if self._team_catalog:
                                     team_menu_selected_idx = (team_menu_selected_idx - 1) % len(self._team_catalog)
                                 continue
-                            if event.key in {pygame.K_DOWN, pygame.K_s, pygame.K_x}:
+                            if event_key in {pygame.K_DOWN, pygame.K_s, pygame.K_x}:
                                 if self._team_catalog:
                                     team_menu_selected_idx = (team_menu_selected_idx + 1) % len(self._team_catalog)
                                 continue
-                            if event.key in {pygame.K_BACKSPACE, pygame.K_DELETE}:
+                            if event_key in {pygame.K_BACKSPACE, pygame.K_DELETE}:
                                 if team_menu_name_buffer:
                                     team_menu_name_buffer = team_menu_name_buffer[:-1]
                                 continue
-                            if event.key in {pygame.K_q, pygame.K_RETURN, pygame.K_KP_ENTER}:
+                            if event_key in {pygame.K_q, pygame.K_RETURN, pygame.K_KP_ENTER}:
                                 new_name = self._sanitize_team_name(team_menu_name_buffer)
                                 if not new_name:
                                     team_ids = self._team_catalog_ids()
@@ -1041,7 +1287,7 @@ class GameSession:
                                     team_menu_selected_idx = len(self._team_catalog) - 1
                                     self._set_message(f"Команда создана: {new_name}")
                                 continue
-                            if event.key == pygame.K_TAB:
+                            if event_key == pygame.K_TAB:
                                 show_team_menu = False
                                 continue
                             typed = str(getattr(event, "unicode", "") or "")
@@ -1051,15 +1297,15 @@ class GameSession:
                                 continue
                             continue
                         team_ids = self._team_catalog_ids()
-                        if event.key in {pygame.K_UP, pygame.K_w, pygame.K_z}:
+                        if event_key in {pygame.K_UP, pygame.K_w, pygame.K_z}:
                             if team_ids:
                                 team_menu_selected_idx = (team_menu_selected_idx - 1) % len(team_ids)
                             continue
-                        if event.key in {pygame.K_DOWN, pygame.K_s, pygame.K_x}:
+                        if event_key in {pygame.K_DOWN, pygame.K_s, pygame.K_x}:
                             if team_ids:
                                 team_menu_selected_idx = (team_menu_selected_idx + 1) % len(team_ids)
                             continue
-                        if event.key in {pygame.K_q, pygame.K_RETURN, pygame.K_KP_ENTER}:
+                        if event_key in {pygame.K_q, pygame.K_RETURN, pygame.K_KP_ENTER}:
                             if not team_ids:
                                 continue
                             picked = team_ids[max(0, min(team_menu_selected_idx, len(team_ids) - 1))]
@@ -1077,7 +1323,7 @@ class GameSession:
                             continue
                         continue
 
-                    if show_task_menu and event.key not in {
+                    if show_task_menu and event_key not in {
                         pygame.K_e,
                         pygame.K_r,
                         pygame.K_g,
@@ -1088,7 +1334,7 @@ class GameSession:
                         has_math_quest = self._math_tasks.has_math_quest
                         dispatcher_team = self._math_tasks.dispatcher_team_id or self._player_team(self._LOCAL_PLAYER_ID)
                         inbox_rows = self._build_math_inbox_rows(player_id=self._LOCAL_PLAYER_ID)
-                        if event.key == pygame.K_ESCAPE:
+                        if event_key == pygame.K_ESCAPE:
                             if task_menu_section == "quests":
                                 show_task_menu = False
                                 task_menu_section = "quests"
@@ -1099,14 +1345,14 @@ class GameSession:
                             else:
                                 task_menu_section = "tasks"
                             continue
-                        if event.key == pygame.K_1:
+                        if event_key == pygame.K_1:
                             task_menu_section = "quests"
                             continue
-                        if event.key == pygame.K_2 and has_math_quest:
+                        if event_key == pygame.K_2 and has_math_quest:
                             task_menu_section = "tasks"
                             continue
                         if (
-                            event.key == pygame.K_3
+                            event_key == pygame.K_3
                             and self._math_tasks.active
                             and self._math_tasks.current_round is not None
                         ):
@@ -1115,30 +1361,30 @@ class GameSession:
                                 continue
                             task_menu_section = "assign"
                             continue
-                        if event.key == pygame.K_4 and self._math_tasks.active:
+                        if event_key == pygame.K_4 and self._math_tasks.active:
                             task_menu_section = "inbox"
                             continue
                         if task_menu_section == "quests":
-                            if event.key == pygame.K_z:
+                            if event_key == pygame.K_z:
                                 task_menu_selected_quest = max(0, task_menu_selected_quest - 1)
                                 continue
-                            if event.key == pygame.K_x:
+                            if event_key == pygame.K_x:
                                 task_menu_selected_quest = min(0, task_menu_selected_quest + 1)
                                 continue
-                            if event.key == pygame.K_q:
+                            if event_key == pygame.K_q:
                                 if not has_math_quest:
                                     self._set_message("Сначала найди книгу математики")
                                 else:
                                     task_menu_section = "tasks"
                                 continue
                         elif task_menu_section == "tasks":
-                            if event.key == pygame.K_z:
+                            if event_key == pygame.K_z:
                                 task_menu_selected_task = (task_menu_selected_task - 1) % 9
                                 continue
-                            if event.key == pygame.K_x:
+                            if event_key == pygame.K_x:
                                 task_menu_selected_task = (task_menu_selected_task + 1) % 9
                                 continue
-                            if event.key == pygame.K_r:
+                            if event_key == pygame.K_r:
                                 if not self._math_tasks.active:
                                     self._set_message("Сначала запусти задачу 1 или 2")
                                 elif self._math_tasks.dispatcher_player_id not in {None, self._LOCAL_PLAYER_ID}:
@@ -1148,7 +1394,7 @@ class GameSession:
                                     task_menu_selected_assignment = 0
                                     task_menu_assignment_targets.clear()
                                 continue
-                            if event.key == pygame.K_q:
+                            if event_key == pygame.K_q:
                                 if not has_math_quest:
                                     self._set_message("Сначала найди книгу математики")
                                     continue
@@ -1180,17 +1426,17 @@ class GameSession:
                                 continue
                         elif task_menu_section == "inbox":
                             if not inbox_rows:
-                                if event.key == pygame.K_q:
+                                if event_key == pygame.K_q:
                                     self._set_message("Для тебя пока нет новых задач")
                                 continue
                             task_menu_selected_inbox = max(0, min(task_menu_selected_inbox, len(inbox_rows) - 1))
-                            if event.key == pygame.K_z:
+                            if event_key == pygame.K_z:
                                 task_menu_selected_inbox = (task_menu_selected_inbox - 1) % len(inbox_rows)
                                 continue
-                            if event.key == pygame.K_x:
+                            if event_key == pygame.K_x:
                                 task_menu_selected_inbox = (task_menu_selected_inbox + 1) % len(inbox_rows)
                                 continue
-                            if event.key == pygame.K_q:
+                            if event_key == pygame.K_q:
                                 row_key, row_title, _assigned_by, _details = inbox_rows[task_menu_selected_inbox]
                                 if row_key.startswith("stage:"):
                                     stage_key = row_key.split(":", 1)[1]
@@ -1235,7 +1481,7 @@ class GameSession:
                                 if row_key in row_keys and assignee in self._player_states
                             }
                             if not assignment_rows:
-                                if event.key == pygame.K_q:
+                                if event_key == pygame.K_q:
                                     self._set_message("Нет задач для делегирования")
                                 continue
                             dispatcher_team = self._math_tasks.dispatcher_team_id or self._player_team(self._LOCAL_PLAYER_ID)
@@ -1248,14 +1494,14 @@ class GameSession:
                                 0,
                                 min(task_menu_selected_assignment, len(assignment_rows) - 1),
                             )
-                            if event.key == pygame.K_z:
+                            if event_key == pygame.K_z:
                                 task_menu_selected_assignment = (task_menu_selected_assignment - 1) % len(assignment_rows)
                                 continue
-                            if event.key == pygame.K_x:
+                            if event_key == pygame.K_x:
                                 task_menu_selected_assignment = (task_menu_selected_assignment + 1) % len(assignment_rows)
                                 continue
                             selected_row_key, selected_row_label = assignment_rows[task_menu_selected_assignment]
-                            if event.key in {pygame.K_c, pygame.K_v}:
+                            if event_key in {pygame.K_c, pygame.K_v}:
                                 preview_assignee = task_menu_assignment_targets.get(selected_row_key)
                                 if not preview_assignee or preview_assignee not in team_player_ids:
                                     if selected_row_key.startswith("stage:") and round_state is not None:
@@ -1273,7 +1519,7 @@ class GameSession:
                                         preview_assignee = selected_pending.assigned_player_id if selected_pending is not None else None
                                 if not preview_assignee or preview_assignee not in team_player_ids:
                                     preview_assignee = team_player_ids[0]
-                                shift = -1 if event.key == pygame.K_c else 1
+                                shift = -1 if event_key == pygame.K_c else 1
                                 base_idx = team_player_ids.index(preview_assignee)
                                 next_assignee = team_player_ids[(base_idx + shift) % len(team_player_ids)]
                                 task_menu_assignment_targets[selected_row_key] = next_assignee
@@ -1282,7 +1528,7 @@ class GameSession:
                                     duration_sec=3.2,
                                 )
                                 continue
-                            if event.key == pygame.K_q:
+                            if event_key == pygame.K_q:
                                 target_assignee = task_menu_assignment_targets.get(selected_row_key)
                                 if not target_assignee or target_assignee not in team_player_ids:
                                     target_assignee = team_player_ids[0]
@@ -1338,13 +1584,14 @@ class GameSession:
             if host_started:
                 for host_event in lan_host.poll_events():
                     self._apply_host_event(host_event, world)
-                for pid, dx, dy, holding, run in lan_host.poll_remote_inputs():
+                for pid, dx, dy, holding, run, ride_hold in lan_host.poll_remote_inputs():
                     self.set_player_movement_input(
                         player_id=pid,
                         dx=dx,
                         dy=dy,
                         holding_pickup=holding,
                         run_multiplier=run,
+                        ride_hold=ride_hold,
                     )
                 for pid, action in lan_host.poll_remote_actions():
                     self.queue_player_action(player_id=pid, action=action)
@@ -1394,9 +1641,20 @@ class GameSession:
                         backpack_sprite_path=runtime_backpack_sprite_path,
                     )
                     character_animation_caches.clear()
-                    character_animation_caches[current_character_id] = (walk_cache, backpack_cache)
-                    for state in self._player_states.values():
-                        state.player.stats = world.player_stats
+                    reload_cache = {"walk": walk_cache, "backpack": backpack_cache}
+                    reload_skate_path = resolve_character_sheet_path(current_character_id, "skate")
+                    if reload_skate_path is None:
+                        reload_skate_path = resolve_character_sheet_path(current_character_id, "skateboard")
+                    if reload_skate_path is not None:
+                        reload_cache["skate"] = ScaledAnimationCache(
+                            loader.load_walk_frames(project_root / reload_skate_path)
+                        )
+                    character_animation_caches[current_character_id] = reload_cache
+                    for pid, state in self._player_states.items():
+                        self._apply_character_stats_to_player(
+                            player_id=pid,
+                            base_stats=world.player_stats,
+                        )
                         state.grabbed_object_id = None
                         state.door_overlap_ids.clear()
                         state.spray_spent_slots.clear()
@@ -1440,6 +1698,7 @@ class GameSession:
             for player_id, controller in input_controllers.items():
                 dx, dy = controller.read_direction(keys)
                 holding_pickup = controller.is_action_pressed(keys, "pickup")
+                ride_hold = controller.is_action_pressed(keys, "inventory_move")
                 run_boost = controller.speed_multiplier(now, dx, dy)
                 if player_id == self._LOCAL_PLAYER_ID and browser.is_connected():
                     browser.send_input_update(
@@ -1447,6 +1706,7 @@ class GameSession:
                         dy=dy,
                         holding_pickup=holding_pickup,
                         run_multiplier=run_boost,
+                        ride_hold=ride_hold,
                     )
                     self.set_player_movement_input(
                         player_id=player_id,
@@ -1454,6 +1714,7 @@ class GameSession:
                         dy=0,
                         holding_pickup=False,
                         run_multiplier=1.0,
+                        ride_hold=False,
                     )
                 else:
                     self.set_player_movement_input(
@@ -1462,6 +1723,7 @@ class GameSession:
                         dy=dy,
                         holding_pickup=holding_pickup,
                         run_multiplier=run_boost,
+                        ride_hold=ride_hold,
                     )
 
             local_inventory = self._primary_player_state().inventory
@@ -1478,36 +1740,75 @@ class GameSession:
                     player = state.player
                     inventory = state.inventory
                     self._sync_inventory_extension_from_active_item(inventory, world)
+                    input_dx, input_dy, _tmp_holding, _tmp_run, ride_hold = self._movement_inputs.get(
+                        player_id, (0, 0, False, 1.0, False)
+                    )
+                    self._sync_active_ride_state(
+                        player_id=player_id,
+                        state=state,
+                        world=world,
+                        ride_hold=ride_hold,
+                        dx=input_dx,
+                        dy=input_dy,
+                    )
                     selected_item = inventory.selected_item()
                     selected_slot_index = inventory.active_index
 
                     is_local = player_id == self._LOCAL_PLAYER_ID
-                    dx, dy, holding_pickup, run_boost = self._movement_inputs.get(player_id, (0, 0, False, 1.0))
+                    dx, dy, holding_pickup, run_boost, _ride_hold = self._movement_inputs.get(
+                        player_id, (0, 0, False, 1.0, False)
+                    )
+                    if state.active_ride_item_id:
+                        dy = 0
                     spray_holding = holding_pickup and self._is_spray_item(selected_item)
                     drag_hold = holding_pickup
 
                     wearing_backpack = self._inventory_has_item(inventory, "backpack")
                     player_character_id = self._player_character_id(player_id)
-                    walk_anim, backpack_anim = _animation_caches_for_character(player_character_id)
+                    character_anims = _animation_caches_for_character(player_character_id)
+                    walk_anim = character_anims["walk"]
+                    backpack_anim = character_anims["backpack"]
                     animation_cache = backpack_anim if wearing_backpack else walk_anim
-                    frames_by_dir = animation_cache.frames_for_height(target_h)
+                    visual_target_h = max(28, target_h)
+                    if state.active_ride_item_id:
+                        ride_scale = resolve_character_render_scale(player_character_id, "render_scale_with_ride", 1.0)
+                        visual_target_h = max(28, int(round(visual_target_h * ride_scale)))
+                    else:
+                        no_ride_scale = resolve_character_render_scale(player_character_id, "render_scale_without_ride", 1.0)
+                        visual_target_h = max(28, int(round(visual_target_h * no_ride_scale)))
+                    frames_by_dir = animation_cache.frames_for_height(visual_target_h)
+                    ride_frames_by_dir: dict[Direction, list[pygame.Surface]] | None = None
+                    if state.active_ride_item_id:
+                        ride_variant = self._item_effect_animation_variant(state.active_ride_item_id, world)
+                        ride_anim = character_anims.get(ride_variant)
+                        if ride_anim is None:
+                            ride_anim = character_anims.get("skate")
+                        if ride_anim is not None:
+                            ride_frames_by_dir = ride_anim.frames_for_height(visual_target_h)
                     if net_client_mode:
                         # Host-authoritative mode: do not locally simulate players,
                         # otherwise zero-input frames reset walk_time and kill animation.
                         current_frames = frames_by_dir[player.facing]
                         frame_index = int(player.walk_time) % len(current_frames)
                         current_frame = current_frames[frame_index]
-                        self._last_player_sprite_size = (current_frame.get_width(), current_frame.get_height())
+                        display_frame = current_frame
+                        if ride_frames_by_dir is not None:
+                            ride_frames = ride_frames_by_dir.get(player.facing)
+                            if ride_frames:
+                                display_frame = ride_frames[frame_index % len(ride_frames)]
+                        self._last_player_sprite_size = (display_frame.get_width(), display_frame.get_height())
                         moving = player.walk_time > 0.001
                         bob = math.sin(player.walk_time * 2.0 * math.pi / len(current_frames)) * (2 if moving else 0)
                         jump_y = player.jump_offset()
-                        player_center = (
-                            player.x + current_frame.get_width() / 2,
-                            player.y + current_frame.get_height() / 2,
+                        player_center = self._center_for_display_frame(
+                            base_frame=current_frame,
+                            display_frame=display_frame,
+                            player_x=player.x,
+                            player_y=player.y,
                         )
                         left_facing = player.facing in {Direction.LEFT, Direction.UP_LEFT, Direction.DOWN_LEFT}
-                        render_item = (player_center, current_frame, bob + jump_y, left_facing)
-                        player_portraits[player_id] = current_frame
+                        render_item = (player_center, display_frame, bob + jump_y, left_facing)
+                        player_portraits[player_id] = display_frame
                         if is_local:
                             local_render = render_item
                             local_wearing_backpack = wearing_backpack
@@ -1524,6 +1825,8 @@ class GameSession:
                         * player.stats.speed_multiplier()
                     )
                     speed *= run_boost
+                    if state.active_ride_item_id:
+                        speed *= 3.0
                     speed *= self._drag_movement_speed_factor(
                         holding_pickup=drag_hold,
                         input_dx=dx,
@@ -1610,20 +1913,25 @@ class GameSession:
                     current_frames = frames_by_dir[player.facing]
                     frame_index = int(player.walk_time) % len(current_frames)
                     current_frame = current_frames[frame_index]
+                    display_frame = current_frame
+                    if ride_frames_by_dir is not None:
+                        ride_frames = ride_frames_by_dir.get(player.facing)
+                        if ride_frames:
+                            display_frame = ride_frames[frame_index % len(ride_frames)]
                     bob = math.sin(player.walk_time * 2.0 * math.pi / len(current_frames)) * (2 if moving else 0)
                     jump_y = player.jump_offset()
                     self._update_spray_recharge_by_door_crossing(
                         player=player,
-                        sprite_w=current_frame.get_width(),
-                        sprite_h=current_frame.get_height(),
+                        sprite_w=display_frame.get_width(),
+                        sprite_h=display_frame.get_height(),
                         world=world,
                         object_sprites=object_sprites,
                     )
                     spray_area_id = self._area_id_for_player(
                         world=world,
                         player=player,
-                        sprite_w=current_frame.get_width(),
-                        sprite_h=current_frame.get_height(),
+                        sprite_w=display_frame.get_width(),
+                        sprite_h=display_frame.get_height(),
                     )
                     self._sync_interaction_state_on_area_change(spray_area_id)
                     self._update_spray_painting(
@@ -1633,19 +1941,21 @@ class GameSession:
                         selected_spray_slot_index=selected_slot_index,
                         spray_area_id=spray_area_id,
                         player=player,
-                        player_sprite_w=current_frame.get_width(),
-                        player_sprite_h=current_frame.get_height(),
+                        player_sprite_w=display_frame.get_width(),
+                        player_sprite_h=display_frame.get_height(),
                         world=world,
                         object_sprites=object_sprites,
                     )
 
-                    player_center = (
-                        player.x + current_frame.get_width() / 2,
-                        player.y + current_frame.get_height() / 2,
+                    player_center = self._center_for_display_frame(
+                        base_frame=current_frame,
+                        display_frame=display_frame,
+                        player_x=player.x,
+                        player_y=player.y,
                     )
                     left_facing = player.facing in {Direction.LEFT, Direction.UP_LEFT, Direction.DOWN_LEFT}
-                    render_item = (player_center, current_frame, bob + jump_y, left_facing)
-                    player_portraits[player_id] = current_frame
+                    render_item = (player_center, display_frame, bob + jump_y, left_facing)
+                    player_portraits[player_id] = display_frame
                     if is_local:
                         local_render = render_item
                         local_wearing_backpack = wearing_backpack
@@ -1665,6 +1975,7 @@ class GameSession:
             task_assignments_lines: list[str] | None = None
             task_assignments_rows: list[tuple[str, str | None]] | None = None
             lan_menu_lines: list[str] | None = None
+            task_result_lines: list[str] | None = None
             character_picker: dict[str, object] | None = None
             if show_server_list:
                 lan_menu_lines = ["LAN HOSTS", "W/S or UP/DOWN: select | ENTER: connect | ESC: close"]
@@ -1852,6 +2163,12 @@ class GameSession:
                     task_panel_lines.append("1: разделы | 2: задачи | 3: диспетчер | 4: inbox")
                     task_panel_lines.append("Z/X: выбор | C/V: исполнитель | Q: применить | Esc: назад")
                     task_panel_lines.append("Статус: wait=не подтверждено, draft=изменение не применено")
+            if task_result_modal_open and isinstance(latest_task_summary, dict):
+                task_result_lines = self._build_math_completion_lines(
+                    summary=latest_task_summary,
+                    selected_action_idx=task_result_modal_selected,
+                )
+                lan_menu_lines = task_result_lines
             if show_character_menu:
                 entries_payload: list[dict[str, object]] = []
                 for idx, item in enumerate(character_entries):
@@ -2141,10 +2458,57 @@ class GameSession:
         if selected_item is None:
             self._set_message("Нечего выбрасывать")
             return False
+        if self._is_backpack_slot_marker_token(selected_item):
+            self._set_message("Выбери сам предмет для выброса")
+            return False
         if selected_item == "backpack" and self._extra_slots_have_items(state.inventory):
             self._set_message("Сначала выньте предметы из доп. слотов рюкзака")
             return False
         return True
+
+    def _seed_local_test_inventory(self, world: WorldMap) -> None:
+        state = self._player_state(self._LOCAL_PLAYER_ID)
+        if state is None:
+            return
+        inventory = state.inventory
+        backpack_id = "backpack"
+        skate_id = "skateboard"
+
+        if not self._inventory_has_item(inventory, backpack_id):
+            placed = False
+            for idx in range(min(inventory.capacity, len(inventory.slots))):
+                if inventory.slots[idx] is None:
+                    inventory.slots[idx] = backpack_id
+                    inventory.active_index = idx
+                    placed = True
+                    break
+            if not placed and inventory.slots:
+                inventory.slots[0] = backpack_id
+                inventory.active_index = 0
+
+        # Expand inventory via backpack before placing 2-slot skateboard.
+        head_idx, _marker_idx = self._find_backpack_item_pair_slots(inventory, backpack_id)
+        if head_idx is not None:
+            inventory.active_index = head_idx
+        self._sync_inventory_extension_from_active_item(inventory, world)
+
+        if not self._inventory_has_item(inventory, skate_id):
+            slots_required = self._item_backpack_slots_required(skate_id, world)
+            if slots_required > 1:
+                if not self._add_item_to_backpack_slots(inventory, skate_id, slots_required):
+                    inventory.add_item(skate_id)
+            else:
+                inventory.add_item(skate_id)
+
+        skate_head_idx, _ = self._find_backpack_item_pair_slots(inventory, skate_id)
+        if skate_head_idx is not None:
+            inventory.active_index = skate_head_idx
+        else:
+            for idx in range(min(inventory.capacity, len(inventory.slots))):
+                if str(inventory.slots[idx] or "").strip().lower() == skate_id:
+                    inventory.active_index = idx
+                    break
+        self._sync_inventory_extension_from_active_item(inventory, world)
 
     def queue_player_action(self, *, player_id: str, action: str, issued_at: float | None = None) -> None:
         when = time.monotonic() if issued_at is None else float(issued_at)
@@ -2158,11 +2522,12 @@ class GameSession:
         dy: int,
         holding_pickup: bool = False,
         run_multiplier: float = 1.0,
+        ride_hold: bool = False,
     ) -> None:
         norm_dx = 0 if dx == 0 else (1 if dx > 0 else -1)
         norm_dy = 0 if dy == 0 else (1 if dy > 0 else -1)
         run = max(1.0, float(run_multiplier))
-        self._movement_inputs[player_id] = (norm_dx, norm_dy, bool(holding_pickup), run)
+        self._movement_inputs[player_id] = (norm_dx, norm_dy, bool(holding_pickup), run, bool(ride_hold))
 
     def add_player(
         self,
@@ -2179,15 +2544,19 @@ class GameSession:
             return
         if len(self._player_states) >= self._MAX_PLAYERS:
             return
+        self._set_player_character_id(player_id, character_id)
+        resolved_stats = self._stats_with_character_overrides(
+            base=stats,
+            character_id=self._player_character_id(player_id),
+        )
         self._player_states[player_id] = SessionPlayerState(
-            player=Player(x=float(spawn_x), y=float(spawn_y), stats=stats),
+            player=Player(x=float(spawn_x), y=float(spawn_y), stats=resolved_stats),
             inventory=Inventory(base_capacity=base_inventory_capacity, capacity=base_inventory_capacity),
         )
         self._set_player_display_name(player_id, player_id)
         if team_id is not None:
             self._set_player_team(player_id, team_id)
-        self._set_player_character_id(player_id, character_id)
-        self._movement_inputs[player_id] = (0, 0, False, 1.0)
+        self._movement_inputs[player_id] = (0, 0, False, 1.0, False)
 
     def remove_player(self, *, player_id: str) -> None:
         if player_id == self._LOCAL_PLAYER_ID:
@@ -2252,6 +2621,7 @@ class GameSession:
                 "f": s.player.facing.value,
                 "wt": round(float(s.player.walk_time), 3),
                 "jt": round(float(s.player.jump_time_left), 3),
+                "ri": (str(s.active_ride_item_id).strip().lower() if s.active_ride_item_id else ""),
             }
             for pid, s in self._player_states.items()
         ]
@@ -2285,6 +2655,8 @@ class GameSession:
                 state.player.facing = Direction(str(item.get("f", state.player.facing.value)))
                 state.player.walk_time = float(item.get("wt", state.player.walk_time))
                 state.player.jump_time_left = max(0.0, float(item.get("jt", state.player.jump_time_left)))
+                ride_item_id = str(item.get("ri", state.active_ride_item_id or "")).strip().lower()
+                state.active_ride_item_id = ride_item_id or None
             except Exception:
                 continue
 
@@ -2302,6 +2674,7 @@ class GameSession:
                     "facing": state.player.facing.value,
                     "walk_time": float(state.player.walk_time),
                     "jump_time_left": float(state.player.jump_time_left),
+                    "ride_item_id": (str(state.active_ride_item_id).strip().lower() if state.active_ride_item_id else ""),
                     "inventory": self._inventory_payload(state.inventory),
                 }
             )
@@ -2380,6 +2753,10 @@ class GameSession:
             self._set_player_display_name(player_id, item.get("name"))
             self._set_player_team(player_id, item.get("team"))
             self._set_player_character_id(player_id, item.get("character_id"))
+            self._apply_character_stats_to_player(
+                player_id=player_id,
+                base_stats=world.player_stats,
+            )
             state = self._player_state(player_id)
             if state is None:
                 continue
@@ -2390,6 +2767,8 @@ class GameSession:
                 state.player.facing = Direction(facing_raw)
                 state.player.walk_time = float(item.get("walk_time", state.player.walk_time))
                 state.player.jump_time_left = max(0.0, float(item.get("jump_time_left", state.player.jump_time_left)))
+                ride_item_id = str(item.get("ride_item_id", state.active_ride_item_id or "")).strip().lower()
+                state.active_ride_item_id = ride_item_id or None
                 inventory_payload = item.get("inventory")
                 if isinstance(inventory_payload, dict):
                     self._apply_inventory_payload(state.inventory, inventory_payload)
@@ -2837,6 +3216,7 @@ class GameSession:
             self._handle_set_character_action(
                 action=action,
                 player_id=player_id,
+                world=world,
             )
             return
         if action.startswith("set_team::"):
@@ -2847,7 +3227,8 @@ class GameSession:
             return
 
         if action == "inventory_move":
-            self._toggle_inventory_move_mode(inventory, world)
+            # Q is handled as held input in movement loop (ride while key is pressed).
+            # Do not treat it as a toggle action here.
             return
 
         if inventory.move_mode:
@@ -3058,20 +3439,37 @@ class GameSession:
         if item_id is None:
             return False
 
-        if not inventory.add_item(item_id):
+        normalized_item = str(item_id).strip().lower()
+        if self._item_requires_backpack(normalized_item, world):
+            if not self._inventory_has_item(inventory, "backpack"):
+                self._set_message("Нужен рюкзак")
+                return False
+            slots_required = self._item_backpack_slots_required(normalized_item, world)
+            if slots_required > 1:
+                head_idx, marker_idx = self._find_backpack_item_pair_slots(inventory, normalized_item)
+                if head_idx is not None or marker_idx is not None:
+                    self._set_message("Этот предмет уже в рюкзаке")
+                    return False
+                if not self._add_item_to_backpack_slots(inventory, normalized_item, slots_required):
+                    self._set_message("В рюкзаке мало места")
+                    return False
+            elif not inventory.add_item(normalized_item):
+                self._set_message("Инвентарь заполнен")
+                return False
+        elif not inventory.add_item(normalized_item):
             self._set_message("Инвентарь заполнен")
             return False
 
         if self._grabbed_object_id == target.object_id:
             self._grabbed_object_id = None
         world.remove_object(target.object_id)
-        self._queue_async_preload("item_icon", item_id)
-        if self._is_spray_item(item_id):
-            self._queue_async_preload("spray_profile", self._spray_profile_for_item(item_id, world))
-        if item_id == "backpack":
+        self._queue_async_preload("item_icon", normalized_item)
+        if self._is_spray_item(normalized_item):
+            self._queue_async_preload("spray_profile", self._spray_profile_for_item(normalized_item, world))
+        if normalized_item == "backpack":
             self._set_message("Рюкзак поднят")
         else:
-            self._set_message(f"Предмет поднят: {item_id}")
+            self._set_message(f"Предмет поднят: {normalized_item}")
         return True
 
     def _pickup_item_id_for_target(self, target: WorldObject, world: WorldMap) -> str | None:
@@ -3175,10 +3573,9 @@ class GameSession:
         inventory: Inventory,
         object_sprites: ObjectSpriteLibrary,
     ) -> None:
-        if self._try_handle_math_task_interaction(world, player, object_sprites):
-            return
-
         if self._try_pickup(world, player, inventory, object_sprites):
+            return
+        if self._try_handle_math_task_interaction(world, player, object_sprites):
             return
 
         # E priority: closest reachable target first, then forward/farther target.
@@ -3406,6 +3803,7 @@ class GameSession:
         *,
         action: str,
         player_id: str,
+        world: WorldMap,
     ) -> None:
         token = str(action).strip()
         parts = token.split("::", 1)
@@ -3418,6 +3816,10 @@ class GameSession:
         if not char_id:
             return
         self._set_player_character_id(player_id, char_id)
+        self._apply_character_stats_to_player(
+            player_id=player_id,
+            base_stats=world.player_stats,
+        )
 
     def _handle_set_team_action(
         self,
@@ -3478,6 +3880,7 @@ class GameSession:
                     outcome = self._math_tasks.pick_answer(
                         player_id=player_id,
                         answer_value=digit,
+                        now_ts=time.time(),
                     )
                     if int(self._math_tasks.solved_count) > solved_before:
                         world.remove_object(target.object_id)
@@ -3496,6 +3899,7 @@ class GameSession:
                 outcome = self._math_tasks.pick_answer(
                     player_id=player_id,
                     answer_value=digit,
+                    now_ts=time.time(),
                 )
                 if int(self._math_tasks.solved_count) > solved_before:
                     world.remove_object(target.object_id)
@@ -3526,6 +3930,7 @@ class GameSession:
             outcome = self._math_tasks.pick_answer(
                 player_id=player_id,
                 answer_value=answer_value,
+                now_ts=time.time(),
             )
             self._apply_math_task_outcome(outcome, world)
             return True
@@ -3898,14 +4303,26 @@ class GameSession:
         inventory: Inventory,
     ) -> None:
         selected_item = inventory.selected_item()
+        selected_token = str(selected_item or "").strip().lower()
+        player_state = self._player_state(self._active_player_context_id)
+        if self._is_backpack_slot_marker_token(selected_token):
+            owner_item = self._backpack_slot_marker_item_id(selected_token)
+            self._set_message(f"Выбери сам предмет ({owner_item}) для выброса")
+            return
         if selected_item == "backpack":
             if self._extra_slots_have_items(inventory):
                 self._set_message("Сначала выньте предметы из доп. слотов рюкзака")
                 return
-        item_id = inventory.remove_selected()
+        if self._item_backpack_slots_required(selected_token, world) > 1:
+            removed = self._remove_backpack_item_pair(inventory, selected_token)
+            item_id = selected_token if removed else None
+        else:
+            item_id = inventory.remove_selected()
         if item_id is None:
             self._set_message("Нечего выбрасывать")
             return
+        if player_state is not None and player_state.active_ride_item_id == selected_token:
+            player_state.active_ride_item_id = None
         inventory.cancel_move_mode()
         if self._is_spray_item(item_id):
             # Fresh can in the same slot should not inherit spent state.
@@ -3961,6 +4378,22 @@ class GameSession:
                 )
             )
             self._set_message("Балон выброшен")
+            return
+
+        drop_kind = str(world.item_drop_kind.get(item_id, "")).strip()
+        if drop_kind:
+            self._drop_counter += 1
+            world.add_object(
+                WorldObject(
+                    object_id=f"{drop_kind}_drop_{self._drop_counter}",
+                    kind=drop_kind,
+                    x=drop_x,
+                    y=drop_y,
+                    state=0,
+                    pickup_item_id=item_id,
+                )
+            )
+            self._set_message(f"Предмет выброшен: {item_id}")
             return
 
         self._set_message("Предмет выброшен")
@@ -4940,6 +5373,8 @@ class GameSession:
             return sprites.ballon_sprite_for_object(obj)
         if obj.kind == "key":
             return sprites.key_set().get(obj.state)
+        if obj.kind == "skateboard":
+            return sprites.skateboard_set().get(obj.state)
         if obj.kind == "door":
             return sprites.door_set(obj.door_orientation).get(obj.state)
         if obj.kind == self._MATH_BOOK_KIND:
@@ -4965,6 +5400,183 @@ class GameSession:
             if target == "backpack" and (token == "bag" or token.startswith("backpack") or token.startswith("bag_")):
                 return True
         return False
+
+    @classmethod
+    def _is_backpack_slot_marker_token(cls, item_id: str | None) -> bool:
+        token = str(item_id or "").strip().lower()
+        return token.startswith(cls._BACKPACK_SLOT_MARKER_PREFIX)
+
+    @classmethod
+    def _backpack_slot_marker_for_item(cls, item_id: str) -> str:
+        return f"{cls._BACKPACK_SLOT_MARKER_PREFIX}{str(item_id).strip().lower()}"
+
+    @classmethod
+    def _backpack_slot_marker_item_id(cls, marker_token: str | None) -> str:
+        token = str(marker_token or "").strip().lower()
+        if not token.startswith(cls._BACKPACK_SLOT_MARKER_PREFIX):
+            return ""
+        return token[len(cls._BACKPACK_SLOT_MARKER_PREFIX) :].strip().lower()
+
+    def _item_use_effect(self, item_id: str, world: WorldMap) -> dict[str, object]:
+        token = str(item_id).strip().lower()
+        if not token:
+            return {}
+        raw = world.item_use_effects.get(token)
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _item_has_horizontal_ride_effect(self, item_id: str, world: WorldMap) -> bool:
+        effect = self._item_use_effect(item_id, world)
+        mode = str(effect.get("movement_mode", "")).strip().lower()
+        return mode == "horizontal_only"
+
+    def _item_effect_animation_variant(self, item_id: str, world: WorldMap) -> str:
+        effect = self._item_use_effect(item_id, world)
+        variant = str(effect.get("animation_variant", "")).strip().lower()
+        return variant or "skate"
+
+    def _center_for_display_frame(
+        self,
+        *,
+        base_frame: pygame.Surface,
+        display_frame: pygame.Surface,
+        player_x: float,
+        player_y: float,
+    ) -> tuple[float, float]:
+        alpha_cutoff = max(1, self._config.sprite_sheet.alpha_component_cutoff)
+        base_body = base_frame.get_bounding_rect(min_alpha=alpha_cutoff)
+        if base_body.width <= 0 or base_body.height <= 0:
+            base_body = base_frame.get_rect()
+        display_body = display_frame.get_bounding_rect(min_alpha=alpha_cutoff)
+        if display_body.width <= 0 or display_body.height <= 0:
+            display_body = display_frame.get_rect()
+
+        # Keep visible body/head stable and let extra canvas grow downward (skateboard zone).
+        anchor_world_x = player_x + base_body.centerx
+        anchor_world_top = player_y + base_body.top
+        center_x = anchor_world_x - display_body.centerx + (display_frame.get_width() / 2.0)
+        center_y = anchor_world_top - display_body.top + (display_frame.get_height() / 2.0)
+        return center_x, center_y
+
+    def _player_can_use_item_effect(self, *, player_id: str, item_id: str, world: WorldMap) -> bool:
+        effect = self._item_use_effect(item_id, world)
+        required_skill = str(effect.get("required_skill", "")).strip().lower()
+        if not required_skill:
+            return True
+        return self._player_has_skill(player_id, required_skill)
+
+    def _item_requires_backpack(self, item_id: str, world: WorldMap) -> bool:
+        token = str(item_id).strip().lower()
+        if not token:
+            return False
+        return bool(world.item_requires_backpack.get(token, False))
+
+    def _item_backpack_slots_required(self, item_id: str, world: WorldMap) -> int:
+        token = str(item_id).strip().lower()
+        if not token:
+            return 1
+        raw = world.item_backpack_slots_required.get(token, 1)
+        try:
+            parsed = max(1, int(raw))
+        except (TypeError, ValueError):
+            parsed = 1
+        return parsed
+
+    def _find_free_extra_slots(self, inventory: Inventory, count: int) -> list[int]:
+        if count <= 0:
+            return []
+        free: list[int] = []
+        for idx in inventory.extra_indices():
+            if idx >= len(inventory.slots):
+                continue
+            if inventory.slots[idx] is None:
+                free.append(idx)
+                if len(free) >= count:
+                    break
+        return free
+
+    def _find_backpack_item_pair_slots(self, inventory: Inventory, item_id: str) -> tuple[int | None, int | None]:
+        head_token = str(item_id).strip().lower()
+        marker_token = self._backpack_slot_marker_for_item(head_token)
+        head_idx: int | None = None
+        marker_idx: int | None = None
+        for idx, slot_item in enumerate(inventory.slots):
+            token = str(slot_item or "").strip().lower()
+            if token == head_token:
+                head_idx = idx
+            elif token == marker_token:
+                marker_idx = idx
+        return head_idx, marker_idx
+
+    def _add_item_to_backpack_slots(self, inventory: Inventory, item_id: str, slots_required: int) -> bool:
+        token = str(item_id).strip().lower()
+        if not token:
+            return False
+        needed = max(1, int(slots_required))
+        free_slots = self._find_free_extra_slots(inventory, needed)
+        if len(free_slots) < needed:
+            return False
+        head = free_slots[0]
+        inventory.slots[head] = token
+        marker_token = self._backpack_slot_marker_for_item(token)
+        for idx in free_slots[1:]:
+            inventory.slots[idx] = marker_token
+        return True
+
+    def _remove_backpack_item_pair(self, inventory: Inventory, item_id: str) -> bool:
+        head_idx, marker_idx = self._find_backpack_item_pair_slots(inventory, item_id)
+        if head_idx is None and marker_idx is None:
+            return False
+        if head_idx is not None:
+            inventory.slots[head_idx] = None
+        if marker_idx is not None:
+            inventory.slots[marker_idx] = None
+        return True
+
+    def _sync_active_ride_state(
+        self,
+        *,
+        player_id: str,
+        state: SessionPlayerState,
+        world: WorldMap,
+        ride_hold: bool,
+        dx: int,
+        dy: int,
+    ) -> None:
+        if not ride_hold:
+            state.active_ride_item_id = None
+            return
+        if dy != 0:
+            # Any vertical intent immediately disables ride mode.
+            state.active_ride_item_id = None
+            return
+        inventory = state.inventory
+        selected = str(inventory.selected_item() or "").strip().lower()
+        if self._is_backpack_slot_marker_token(selected):
+            owner_item = self._backpack_slot_marker_item_id(selected)
+            if owner_item:
+                selected = owner_item
+        if not selected:
+            state.active_ride_item_id = None
+            return
+        if not self._item_has_horizontal_ride_effect(selected, world):
+            state.active_ride_item_id = None
+            return
+        if not self._inventory_has_item(inventory, "backpack"):
+            state.active_ride_item_id = None
+            return
+        if not self._player_can_use_item_effect(player_id=player_id, item_id=selected, world=world):
+            state.active_ride_item_id = None
+            return
+        if self._item_requires_backpack(selected, world):
+            required_slots = self._item_backpack_slots_required(selected, world)
+            if required_slots > 1:
+                head_idx, marker_idx = self._find_backpack_item_pair_slots(inventory, selected)
+                if head_idx is None or marker_idx is None:
+                    state.active_ride_item_id = None
+                    return
+        # Hold-Q mode: active only while key is held and selection is valid.
+        # dx may be 0 (standing on board), movement still remains horizontal-only.
+        state.active_ride_item_id = selected
 
     def _sync_inventory_extension_from_active_item(self, inventory: Inventory, world: WorldMap) -> None:
         selected = inventory.selected_item()
@@ -5078,6 +5690,16 @@ class GameSession:
             return False
         if src == dst:
             return True
+        src_token = str(src_item).strip().lower()
+        dst_token = str(dst_item or "").strip().lower()
+        if self._is_backpack_slot_marker_token(src_token) or self._is_backpack_slot_marker_token(dst_token):
+            self._set_message("Предмет из связки рюкзака нельзя переносить вручную")
+            return False
+        if self._item_backpack_slots_required(src_token, world) > 1 or (
+            dst_token and self._item_backpack_slots_required(dst_token, world) > 1
+        ):
+            self._set_message("Многослотовый предмет нельзя переносить вручную")
+            return False
 
         if inventory.is_extra_slot(dst):
             if str(src_item).strip().lower() == "backpack":

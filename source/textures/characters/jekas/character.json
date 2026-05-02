@@ -1,9 +1,13 @@
 {
   "id": "jekas",
   "name": "Jekas",
+  "skills": {
+    "skateboard": true
+  },
   "sheets": {
     "walk": "walk/jekas.png",
-    "backpack": "backpack/jekas_with_bag.png"
+    "backpack": "backpack/jekas_with_bag.png",
+    "skate": "walk/jekas_skate.png"
   },
   "default_sheet": "walk",
   "backpack_sheet": "backpack",

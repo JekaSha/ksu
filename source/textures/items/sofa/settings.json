@@ -1,3 +1,14 @@
 {
-  "world_size": [200, 200]
+  "object_kind": "sofa",
+  "object_defaults": {
+    "blocking": true,
+    "collider": [128, 72],
+    "cycle_sprites": true,
+    "occlude_top": true,
+    "occlude_split": 0.56,
+    "jump_platform": [108, 44, -24],
+    "weight_kg": 50.0
+  },
+  "world_size": [200, 200],
+  "weight_kg": 50.0
 }

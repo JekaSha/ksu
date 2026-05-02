@@ -2,9 +2,15 @@
   "character": {
     "id": "jekas",
     "name": "Jekas",
+    "render_scale_without_ride": 1.0,
+    "render_scale_with_ride": 1.0,
+    "skills": {
+      "skateboard": true
+    },
     "sheets": {
       "walk": "walk/jekas.png",
-      "backpack": "backpack/jekas_with_bag.png"
+      "backpack": "backpack/jekas_with_bag.png",
+      "skate": "walk/jekas_skate.png"
     },
     "default_sheet": "walk",
     "backpack_sheet": "backpack",
@@ -45,6 +51,17 @@
       "detect_content_rect": false,
       "offset": [1, 1],
       "cell_size": [198, 198]
+    },
+    "walk/jekas_skate.png": {
+      "component_pick": "none",
+      "chroma_soften_spill": false,
+      "mirror_directions": {
+        "right": "left",
+        "up_right": "up_left",
+        "down_right": "down_left"
+      },
+      "output_size": [172, 188],
+      "body_height": null
     },
     "backpack/jekas_with_bag.png": {}
   }

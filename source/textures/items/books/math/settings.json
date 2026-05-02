@@ -1,6 +1,13 @@
 {
   "id": "book_math",
   "name": "Математика",
+  "object_kind": "math_book",
+  "object_defaults": {
+    "blocking": false,
+    "cycle_sprites": false,
+    "occlude_top": false,
+    "weight_kg": 0.8
+  },
   "kind": "book",
   "sprite": "book_math.png",
   "size": {

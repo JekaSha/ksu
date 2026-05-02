@@ -1,6 +1,14 @@
 {
   "id": "backpack",
   "item_id": "backpack",
+  "object_kind": "backpack",
+  "object_defaults": {
+    "blocking": false,
+    "cycle_sprites": true,
+    "occlude_top": false,
+    "pickup_item_id": "backpack",
+    "weight_kg": 4.0
+  },
   "world_size": [84, 84],
   "weight_kg": 4.0,
   "inventory_slots_bonus": 5,

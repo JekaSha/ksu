@@ -10,6 +10,7 @@ from ksusha_game.domain.player import Player
 class SessionPlayerState:
     player: Player
     inventory: Inventory
+    active_ride_item_id: str | None = None
     standing_on_object_id: str | None = None
     grabbed_object_id: str | None = None
     spray_active_target: tuple[str, str] | None = None

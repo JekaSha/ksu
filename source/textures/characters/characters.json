@@ -1,0 +1,46 @@
+{
+  "characters": [
+    {
+      "id": "ksu",
+      "name": "Ksusha",
+      "sheets": {
+        "walk": "walk/ksu.png",
+        "walk_with_bag": "walk/ksu_with_bag.png",
+        "backpack": "backpack/ksu_with_bag.png"
+      },
+      "default_sheet": "walk",
+      "backpack_sheet": "backpack",
+      "skin_pool_subdir": "walk"
+    },
+    {
+      "id": "jekas",
+      "name": "Jekas",
+      "weight_kg": 78,
+      "height_cm": 180,
+      "skills": {
+        "skateboard": true
+      },
+      "sheets": {
+        "walk": "walk/jekas.png",
+        "backpack": "backpack/jekas_with_bag.png",
+        "skate": "walk/jekas_skate.png"
+      },
+      "default_sheet": "walk",
+      "backpack_sheet": "backpack",
+      "skin_pool_subdir": "walk"
+    },
+    {
+      "id": "lisa",
+      "name": "Lisa",
+      "weight_kg": 50,
+      "height_cm": 165,
+      "sheets": {
+        "walk": "walk/lisa.png",
+        "backpack": "backpack/lisa_with_bag.png"
+      },
+      "default_sheet": "walk",
+      "backpack_sheet": "backpack",
+      "skin_pool_subdir": "walk"
+    }
+  ]
+}

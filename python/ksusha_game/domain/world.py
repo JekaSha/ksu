@@ -216,6 +216,10 @@ class WorldMap:
     item_inventory_bonus_slots: dict[str, int] = field(default_factory=dict)
     item_inventory_bonus_weight_limit_kg: dict[str, float] = field(default_factory=dict)
     item_backpack_storable: dict[str, bool] = field(default_factory=dict)
+    item_requires_backpack: dict[str, bool] = field(default_factory=dict)
+    item_backpack_slots_required: dict[str, int] = field(default_factory=dict)
+    item_drop_kind: dict[str, str] = field(default_factory=dict)
+    item_use_effects: dict[str, dict[str, object]] = field(default_factory=dict)
     item_room_use_limits: dict[str, int] = field(default_factory=dict)
     spray_profiles: dict[str, list[str]] = field(default_factory=dict)
     item_spray_profiles: dict[str, str] = field(default_factory=dict)
@@ -278,5 +282,3 @@ class WorldMap:
             if room.x <= x < room.x + room.width and room.y <= y < room.y + room.height:
                 return room.room_id
         return None
-
-

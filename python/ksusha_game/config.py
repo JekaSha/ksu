@@ -9,6 +9,7 @@ from ksusha_game.domain.direction import Direction
 
 _DEFAULT_CHARACTER_ID = "ksu"
 _USER_SETTINGS_PATH = Path(".ksusha_game_settings.json")
+_CHARACTER_REGISTRY_PATH = Path("source/textures/characters/characters.json")
 
 
 @dataclass(frozen=True)
@@ -121,9 +122,49 @@ def _load_character_manifest(character_dir: Path) -> dict | None:
     return None
 
 
+def _load_character_registry(characters_root: Path = Path("source/textures/characters")) -> dict[str, dict]:
+    root = Path(characters_root)
+    registry_path = root / _CHARACTER_REGISTRY_PATH.name
+    if not registry_path.exists():
+        return {}
+    try:
+        raw = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+    manifests: list[dict] = []
+    if isinstance(raw, dict):
+        chars_raw = raw.get("characters")
+        if isinstance(chars_raw, list):
+            manifests = [item for item in chars_raw if isinstance(item, dict)]
+        elif raw and all(isinstance(v, dict) for v in raw.values()):
+            # Alternative format: {"ksu": {...}, "jekas": {...}}
+            for char_id, payload in raw.items():
+                item = dict(payload)
+                item.setdefault("id", str(char_id))
+                manifests.append(item)
+
+    out: dict[str, dict] = {}
+    for manifest in manifests:
+        payload = manifest.get("character") if isinstance(manifest.get("character"), dict) else manifest
+        if not isinstance(payload, dict):
+            continue
+        char_id = str(payload.get("id", "")).strip()
+        if not char_id:
+            continue
+        out[char_id] = payload
+    return out
+
+
 def list_available_characters(characters_root: Path = Path("source/textures/characters")) -> list[dict[str, str]]:
     root = Path(characters_root)
     out: list[dict[str, str]] = []
+    registry = _load_character_registry(root)
+    if registry:
+        for char_id, manifest in registry.items():
+            display_name = str(manifest.get("name", char_id.capitalize())).strip() or char_id
+            out.append({"id": char_id, "name": display_name})
+        return out
     if not root.exists():
         return out
     for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
@@ -141,11 +182,15 @@ def list_available_characters(characters_root: Path = Path("source/textures/char
 
 
 def resolve_character_config(character_id: str | None = None) -> tuple[Path, Path, Path, str]:
+    characters_root = Path("source/textures/characters")
     character = str(character_id or "").strip() or _resolve_character_id()
-    character_dir = Path("source/textures/characters") / character
-    manifest = _load_character_manifest(character_dir)
+    registry = _load_character_registry(characters_root)
+    manifest = registry.get(character)
+    character_dir = characters_root / character
     if manifest is None:
-        fallback_character_dir = Path("source/textures/characters") / _DEFAULT_CHARACTER_ID
+        manifest = _load_character_manifest(character_dir)
+    if manifest is None:
+        fallback_character_dir = characters_root / _DEFAULT_CHARACTER_ID
         fallback_skin_pool_dir = fallback_character_dir / "walk"
         return (
             fallback_skin_pool_dir,
@@ -153,6 +198,8 @@ def resolve_character_config(character_id: str | None = None) -> tuple[Path, Pat
             fallback_character_dir / "backpack/ksu_with_bag.png",
             _DEFAULT_CHARACTER_ID,
         )
+    resolved_character = str(manifest.get("id", character)).strip() or character
+    character_dir = characters_root / resolved_character
 
     sheets_raw = manifest.get("sheets", {})
     sheets = sheets_raw if isinstance(sheets_raw, dict) else {}
@@ -181,7 +228,119 @@ def resolve_character_config(character_id: str | None = None) -> tuple[Path, Pat
     else:
         skin_pool_dir = sprite_path.parent
 
-    return skin_pool_dir, sprite_path, backpack_path, character
+    return skin_pool_dir, sprite_path, backpack_path, resolved_character
+
+
+def resolve_character_physical_stats(character_id: str | None = None) -> tuple[float | None, float | None]:
+    characters_root = Path("source/textures/characters")
+    character = str(character_id or "").strip() or _resolve_character_id()
+    registry = _load_character_registry(characters_root)
+    manifest = registry.get(character)
+    if manifest is None:
+        character_dir = characters_root / character
+        manifest = _load_character_manifest(character_dir)
+    if manifest is None:
+        return None, None
+
+    stats_raw = manifest.get("stats")
+    stats = stats_raw if isinstance(stats_raw, dict) else {}
+
+    def _read_float(*values: object) -> float | None:
+        for raw in values:
+            if raw is None:
+                continue
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    weight_kg = _read_float(
+        stats.get("weight_kg"),
+        stats.get("weight"),
+        manifest.get("weight_kg"),
+        manifest.get("weight"),
+    )
+    height_cm = _read_float(
+        stats.get("height_cm"),
+        stats.get("height"),
+        manifest.get("height_cm"),
+        manifest.get("height"),
+    )
+    return weight_kg, height_cm
+
+
+def resolve_character_skill(character_id: str | None, skill_id: str) -> bool:
+    token = str(skill_id or "").strip().lower()
+    if not token:
+        return False
+    characters_root = Path("source/textures/characters")
+    character = str(character_id or "").strip() or _resolve_character_id()
+    registry = _load_character_registry(characters_root)
+    manifest = registry.get(character)
+    if manifest is None:
+        character_dir = characters_root / character
+        manifest = _load_character_manifest(character_dir)
+    if manifest is None:
+        return False
+    skills_raw = manifest.get("skills")
+    if isinstance(skills_raw, dict):
+        value = skills_raw.get(token)
+        if value is None:
+            return False
+        return bool(value)
+    if isinstance(skills_raw, list):
+        return token in {str(item).strip().lower() for item in skills_raw if str(item).strip()}
+    return False
+
+
+def resolve_character_sheet_path(character_id: str | None, sheet_id: str) -> Path | None:
+    sheet_token = str(sheet_id or "").strip()
+    if not sheet_token:
+        return None
+    characters_root = Path("source/textures/characters")
+    character = str(character_id or "").strip() or _resolve_character_id()
+    registry = _load_character_registry(characters_root)
+    manifest = registry.get(character)
+    if manifest is None:
+        character_dir = characters_root / character
+        manifest = _load_character_manifest(character_dir)
+    if manifest is None:
+        return None
+    resolved_character = str(manifest.get("id", character)).strip() or character
+    character_dir = characters_root / resolved_character
+    sheets_raw = manifest.get("sheets")
+    sheets = sheets_raw if isinstance(sheets_raw, dict) else {}
+    rel = str(sheets.get(sheet_token, "")).strip()
+    if not rel:
+        return None
+    path = character_dir / rel
+    if not path.exists():
+        return None
+    return path
+
+
+def resolve_character_render_scale(character_id: str | None, scale_key: str, default: float = 1.0) -> float:
+    key = str(scale_key or "").strip()
+    if not key:
+        return float(default)
+    characters_root = Path("source/textures/characters")
+    character = str(character_id or "").strip() or _resolve_character_id()
+    registry = _load_character_registry(characters_root)
+    manifest = registry.get(character)
+    if manifest is None:
+        character_dir = characters_root / character
+        manifest = _load_character_manifest(character_dir)
+    if manifest is None:
+        return float(default)
+    raw = manifest.get(key)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+    if value <= 0:
+        return float(default)
+    return value
 
 
 def get_default_config() -> GameConfig:

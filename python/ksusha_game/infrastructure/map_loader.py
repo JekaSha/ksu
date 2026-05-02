@@ -121,7 +121,22 @@ class MapLoader:
         graffiti_specs = self._load_graffiti_specs(Path(str(graffity_root_raw)))
         item_settings = self._load_item_settings(Path("source/textures/items"))
 
-        object_kinds: dict[str, dict] = raw.get("object_kinds", {})
+        object_kinds_raw = raw.get("object_kinds", {})
+        object_kinds: dict[str, dict] = object_kinds_raw if isinstance(object_kinds_raw, dict) else {}
+        object_kind_asset_settings = self._load_object_kind_settings(Path("source/textures/items"))
+
+        def _kind_defaults(kind: str) -> dict:
+            kind_token = str(kind).strip()
+            asset_defaults: dict = {}
+            for candidate in (kind_token, f"{kind_token}s", f"{kind_token}es"):
+                raw_candidate = object_kind_asset_settings.get(candidate)
+                if isinstance(raw_candidate, dict):
+                    asset_defaults = dict(raw_candidate)
+                    break
+            map_defaults_raw = object_kinds.get(kind_token, {})
+            map_defaults = map_defaults_raw if isinstance(map_defaults_raw, dict) else {}
+            # Priority: asset settings defaults -> map kind defaults override.
+            return {**asset_defaults, **map_defaults}
         raw_item_weights = raw.get("item_weights", {})
         item_weights: dict[str, float] = {}
         if isinstance(raw_item_weights, dict):
@@ -144,6 +159,10 @@ class MapLoader:
         item_inventory_bonus_slots: dict[str, int] = {}
         item_inventory_bonus_weight_limit_kg: dict[str, float] = {}
         item_backpack_storable: dict[str, bool] = {}
+        item_requires_backpack: dict[str, bool] = {}
+        item_backpack_slots_required: dict[str, int] = {}
+        item_drop_kind: dict[str, str] = {}
+        item_use_effects: dict[str, dict[str, object]] = {}
         for item_id, spec in item_settings.items():
             raw_bonus = spec.get("inventory_slots_bonus", spec.get("inventory_bonus_slots", 0))
             try:
@@ -166,6 +185,23 @@ class MapLoader:
 
             if "can_store_in_backpack" in spec:
                 item_backpack_storable[item_id] = bool(spec.get("can_store_in_backpack"))
+            if "requires_backpack" in spec:
+                item_requires_backpack[item_id] = bool(spec.get("requires_backpack"))
+            raw_slots_required = spec.get("backpack_slots_required")
+            if raw_slots_required is not None:
+                try:
+                    parsed_slots_required = max(1, int(raw_slots_required))
+                except (TypeError, ValueError):
+                    parsed_slots_required = 1
+                if parsed_slots_required > 1:
+                    item_backpack_slots_required[item_id] = parsed_slots_required
+            raw_drop_kind = spec.get("object_kind")
+            drop_kind = str(raw_drop_kind).strip() if raw_drop_kind is not None else ""
+            if drop_kind:
+                item_drop_kind[item_id] = drop_kind
+            use_effect_raw = spec.get("use_effect")
+            if isinstance(use_effect_raw, dict):
+                item_use_effects[item_id] = dict(use_effect_raw)
 
         raw_item_bonus_slots = raw.get("item_inventory_bonus_slots", {})
         if isinstance(raw_item_bonus_slots, dict):
@@ -185,9 +221,37 @@ class MapLoader:
         if isinstance(raw_item_backpack_storable, dict):
             for key, value in raw_item_backpack_storable.items():
                 item_backpack_storable[str(key)] = bool(value)
-        raw_default_balloon_weight = object_kinds.get("ballon", {}).get(
+        raw_item_requires_backpack = raw.get("item_requires_backpack", {})
+        if isinstance(raw_item_requires_backpack, dict):
+            for key, value in raw_item_requires_backpack.items():
+                item_requires_backpack[str(key)] = bool(value)
+        raw_item_backpack_slots_required = raw.get("item_backpack_slots_required", {})
+        if isinstance(raw_item_backpack_slots_required, dict):
+            for key, value in raw_item_backpack_slots_required.items():
+                try:
+                    parsed_slots_required = max(1, int(value))
+                except (TypeError, ValueError):
+                    continue
+                if parsed_slots_required > 1:
+                    item_backpack_slots_required[str(key)] = parsed_slots_required
+        raw_item_drop_kind = raw.get("item_drop_kind", {})
+        if isinstance(raw_item_drop_kind, dict):
+            for key, value in raw_item_drop_kind.items():
+                item_key = str(key).strip()
+                kind_token = str(value).strip()
+                if item_key and kind_token:
+                    item_drop_kind[item_key] = kind_token
+        raw_item_use_effects = raw.get("item_use_effects", {})
+        if isinstance(raw_item_use_effects, dict):
+            for key, value in raw_item_use_effects.items():
+                item_key = str(key).strip()
+                if not item_key or not isinstance(value, dict):
+                    continue
+                item_use_effects[item_key] = dict(value)
+        balloon_kind_defaults = _kind_defaults("ballon")
+        raw_default_balloon_weight = balloon_kind_defaults.get(
             "weight_kg",
-            object_kinds.get("ballon", {}).get("weight", 0.0),
+            balloon_kind_defaults.get("weight", 0.0),
         )
         try:
             default_balloon_weight = max(0.0, float(raw_default_balloon_weight))
@@ -290,7 +354,7 @@ class MapLoader:
 
         for item in raw["objects"]:
             kind = item["kind"]
-            kind_defaults = object_kinds.get(kind, {})
+            kind_defaults = _kind_defaults(kind)
             merged = {**kind_defaults, **item}
 
             collider = merged.get("collider")
@@ -515,6 +579,10 @@ class MapLoader:
             item_inventory_bonus_slots=item_inventory_bonus_slots,
             item_inventory_bonus_weight_limit_kg=item_inventory_bonus_weight_limit_kg,
             item_backpack_storable=item_backpack_storable,
+            item_requires_backpack=item_requires_backpack,
+            item_backpack_slots_required=item_backpack_slots_required,
+            item_drop_kind=item_drop_kind,
+            item_use_effects=item_use_effects,
             item_room_use_limits=item_room_use_limits,
             spray_profiles=spray_profiles,
             item_spray_profiles=item_spray_profiles,
@@ -742,4 +810,94 @@ class MapLoader:
             if not item_id:
                 continue
             out[item_id] = raw
+        return out
+
+    def _load_object_kind_settings(self, items_root: Path) -> dict[str, dict]:
+        root = items_root if items_root.is_absolute() else self._project_root / items_root
+        out: dict[str, dict] = {}
+        if not root.exists():
+            return out
+        known_fields = {
+            "blocking",
+            "collider",
+            "cycle_sprites",
+            "occlude_top",
+            "occlude_split",
+            "jump_platform",
+            "pickup_item_id",
+            "required_item_id",
+            "consume_required_item",
+            "weight_kg",
+            "weight",
+            "spray_zoom_coef",
+            "graffiti_zoom_coef",
+            "width",
+            "height",
+            "transitions",
+            "door_orientation",
+            "state",
+            "use_set_state",
+            "use_set_blocking",
+        }
+
+        settings_paths: list[Path] = []
+        for path in sorted(root.rglob("settings.json")):
+            settings_paths.append(path)
+        for path in sorted(root.rglob("setting.json")):
+            if path not in settings_paths:
+                settings_paths.append(path)
+
+        for path in settings_paths:
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+
+            kinds: list[str] = []
+            raw_kind = raw.get("object_kind")
+            if raw_kind is not None:
+                token = str(raw_kind).strip().lower()
+                if token:
+                    kinds.append(token)
+            raw_kinds = raw.get("object_kinds")
+            if isinstance(raw_kinds, list):
+                for item in raw_kinds:
+                    token = str(item).strip().lower()
+                    if token and token not in kinds:
+                        kinds.append(token)
+
+            if not kinds:
+                # Backward-compatible fallback for old one-level settings:
+                # source/textures/items/<kind>/settings.json
+                try:
+                    rel = path.relative_to(root)
+                except ValueError:
+                    rel = path
+                parts = rel.parts
+                if len(parts) == 2:
+                    folder_kind = str(parts[0]).strip().lower()
+                    if folder_kind:
+                        kinds.append(folder_kind)
+
+            if not kinds:
+                continue
+
+            raw_defaults = raw.get("object_defaults")
+            defaults: dict[str, object]
+            if isinstance(raw_defaults, dict):
+                defaults = dict(raw_defaults)
+            else:
+                defaults = {}
+                for key in known_fields:
+                    if key in raw:
+                        defaults[key] = raw[key]
+            if not defaults:
+                continue
+
+            for kind in kinds:
+                previous = out.get(kind, {})
+                merged = {**previous, **defaults}
+                out[kind] = merged
         return out
