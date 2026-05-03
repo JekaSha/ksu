@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import json
 import socket
@@ -211,7 +212,8 @@ class LanPresenceHost:
 
     def _run_broadcast(self) -> None:
         while not self._stop.is_set():
-            self._broadcast_event.wait(timeout=0.002)
+            # Event-driven send; timeout only as a safety wake-up.
+            self._broadcast_event.wait(timeout=0.02)
             self._broadcast_event.clear()
             with self._lock:
                 pos = self._pending_positions
@@ -461,12 +463,15 @@ class LanServerBrowser:
         self._latest_snapshot: dict | None = None
         self._latest_pos_update: dict | None = None
         self._rx_thread: threading.Thread | None = None
+        self._tx_thread: threading.Thread | None = None
 
         self._connect_thread: threading.Thread | None = None
         self._connect_result: tuple[bool, str] | None = None
         self._join_info: dict[str, object] | None = None
         # Track last sent input to avoid sending identical packets every frame.
         self._last_sent_input: tuple[int, int, bool, float, bool] | None = None
+        self._outbound_queue: deque[bytes] = deque()
+        self._outbound_event = threading.Event()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -508,11 +513,9 @@ class LanServerBrowser:
         with self._send_lock:
             conn = self._active_connection
             self._active_connection = None
+            self._outbound_queue.clear()
+        self._outbound_event.set()
         if conn is not None:
-            try:
-                conn.sendall(self._encode_line({"type": "disconnect"}))
-            except Exception:
-                pass
             try:
                 conn.close()
             except Exception:
@@ -633,6 +636,11 @@ class LanServerBrowser:
                 daemon=True,
             )
             self._rx_thread.start()
+            self._tx_thread = threading.Thread(
+                target=self._run_connection_writer,
+                daemon=True,
+            )
+            self._tx_thread.start()
         except Exception as exc:
             try:
                 sock.close()
@@ -665,15 +673,37 @@ class LanServerBrowser:
                     with self._lock:
                         self._latest_pos_update = pos  # keep only latest
 
+    def _run_connection_writer(self) -> None:
+        while self.is_connected():
+            payload: bytes | None = None
+            conn: socket.socket | None = None
+            with self._send_lock:
+                conn = self._active_connection
+                if self._outbound_queue:
+                    payload = self._outbound_queue.popleft()
+            if conn is None:
+                break
+            if payload is None:
+                self._outbound_event.wait(timeout=0.04)
+                self._outbound_event.clear()
+                continue
+            try:
+                conn.sendall(payload)
+            except OSError:
+                self.disconnect()
+                break
+
     def _send_json(self, payload: dict) -> None:
+        encoded = self._encode_line(payload)
         with self._send_lock:
             conn = self._active_connection
             if conn is None:
                 return
-            try:
-                conn.sendall(self._encode_line(payload))
-            except OSError:
-                self.disconnect()
+            # Keep latency stable under transient stalls: drop oldest frames if queue grows.
+            if len(self._outbound_queue) >= 256:
+                self._outbound_queue.popleft()
+            self._outbound_queue.append(encoded)
+        self._outbound_event.set()
 
     def _run_listener(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
