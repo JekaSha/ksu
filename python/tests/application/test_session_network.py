@@ -505,15 +505,15 @@ class TestApplyHostEvent:
         session._apply_host_event(event, world)
         assert "r2" in session._player_states
 
-    def test_join_spawns_on_first_player_position(self):
+    def test_join_spawns_nearby_when_first_player_position_is_occupied(self):
         session = make_session()
         world = make_world()
         add(session, "p1", x=100.0, y=120.0)
         event = HostEvent(type="join", player_id="r2", player_name="Alice", player_team="B")
         session._apply_host_event(event, world)
         state = session._player_states["r2"].player
-        assert state.x == pytest.approx(100.0)
-        assert state.y == pytest.approx(120.0)
+        dist = math.hypot(state.x - 100.0, state.y - 120.0)
+        assert dist >= 30.0
 
     def test_join_spawns_nearby_when_first_position_occupied(self):
         session = make_session()

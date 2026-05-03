@@ -2666,16 +2666,12 @@ class GameSession:
     ) -> tuple[float, float]:
         ax = float(anchor_x)
         ay = float(anchor_y)
-        anchor_pid = str(anchor_player_id).strip() if anchor_player_id is not None else None
         min_dist = float(self._JOIN_SPAWN_MIN_DISTANCE)
 
         # Default rule: join at the first player's position.
-        # If that point is occupied by another player, find a nearby random point.
+        # If that point is occupied, find a nearby random point.
         occupied = False
-        for pid, state in self._player_states.items():
-            token = str(pid).strip()
-            if anchor_pid and token == anchor_pid:
-                continue
+        for state in self._player_states.values():
             if math.hypot(float(state.player.x) - ax, float(state.player.y) - ay) < 1.0:
                 occupied = True
                 break
