@@ -6,6 +6,8 @@ No actual sockets or pygame display are opened.
 """
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from ksusha_game.infrastructure.lan_presence import HostEvent
@@ -372,6 +374,22 @@ class TestApplyNetworkSnapshotPlayers:
         assert len(world.objects) == 1
         assert world.objects[0].object_id == "new1"
 
+    def test_static_local_map_objects_not_preserved_over_host_snapshot(self):
+        session = make_session()
+        world = make_world()
+        world.objects = [WorldObject(object_id="old_static", kind="plant", x=10.0, y=11.0)]
+        session._map_static_object_ids = {"old_static"}
+        add(session, "p1")
+        host_obj = WorldObject(object_id="host_sofa", kind="sofa", x=70.0, y=80.0, state=1, blocking=True)
+        session_for_payload = make_session()
+        snap = {
+            "level": GameConfig().map_path.stem,
+            "players": [self._make_player_entry("p1")],
+            "objects": [session_for_payload._world_object_payload(host_obj)],
+        }
+        session._apply_network_snapshot(snap, world)
+        assert [obj.object_id for obj in world.objects] == ["host_sofa"]
+
     def test_spray_tags_replaced_from_snapshot(self):
         session = make_session()
         world = make_world()
@@ -461,6 +479,18 @@ class TestBuildNetworkSnapshot:
         assert session_client._player_states["p1"].player.x == pytest.approx(120.0)
         assert session_client._player_states["p1"].player.y == pytest.approx(250.0)
 
+    def test_includes_static_and_mutable_objects(self):
+        session = make_session()
+        world = make_world()
+        add(session, "p1")
+        world.objects = [
+            WorldObject(object_id="plant_static", kind="plant", x=1.0, y=2.0),
+            WorldObject(object_id="door_mutable", kind="door", x=3.0, y=4.0, state=1, blocking=True),
+        ]
+        snap = session._build_network_snapshot(world)
+        ids = {obj["object_id"] for obj in snap["objects"]}
+        assert ids == {"plant_static", "door_mutable"}
+
 
 # ---------------------------------------------------------------------------
 # _apply_host_event
@@ -474,6 +504,28 @@ class TestApplyHostEvent:
         event = HostEvent(type="join", player_id="r2", player_name="Alice", player_team="B")
         session._apply_host_event(event, world)
         assert "r2" in session._player_states
+
+    def test_join_spawns_on_first_player_position(self):
+        session = make_session()
+        world = make_world()
+        add(session, "p1", x=100.0, y=120.0)
+        event = HostEvent(type="join", player_id="r2", player_name="Alice", player_team="B")
+        session._apply_host_event(event, world)
+        state = session._player_states["r2"].player
+        assert state.x == pytest.approx(100.0)
+        assert state.y == pytest.approx(120.0)
+
+    def test_join_spawns_nearby_when_first_position_occupied(self):
+        session = make_session()
+        world = make_world()
+        add(session, "p1", x=100.0, y=100.0)
+        # Another player already occupies the same point as first player.
+        add(session, "p9", x=100.0, y=100.0)
+        event = HostEvent(type="join", player_id="r2", player_name="Alice", player_team="B")
+        session._apply_host_event(event, world)
+        state = session._player_states["r2"].player
+        dist = math.hypot(state.x - 100.0, state.y - 100.0)
+        assert dist >= 30.0
 
     def test_join_without_local_player_is_no_op(self):
         session = make_session()

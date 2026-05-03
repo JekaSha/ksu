@@ -79,11 +79,8 @@ class GameSession:
         _MATH_DIGIT_KIND,
         _MATH_ANSWER_KIND,
     )
-    # Objects with none of these properties are permanent map fixtures that never
-    # change during play. They are omitted from periodic snapshots to cut payload;
-    # clients preserve them from the initial map load.
-    # Exclusions: pickup_item_id (picked up → removed), lock_key_sets (unlockable),
-    # transitions (state machine), math-related kinds (removed on interact).
+    # Legacy helper kept for compatibility. Object replication is host-authoritative:
+    # clients should receive full object state from host snapshots.
     _SNAPSHOT_MUTABLE_KINDS: frozenset[str] = frozenset({"math_book", "math_digit", "math_answer"})
     _LAYOUT_INDEPENDENT_KEY_BY_SCANCODE: dict[int, int] = {
         _scancode("Q"): pygame.K_q,
@@ -168,6 +165,8 @@ class GameSession:
         "use",
         "jump",
     )
+    _JOIN_SPAWN_MIN_DISTANCE = 30.0
+    _JOIN_SPAWN_MAX_RADIUS = 180.0
 
     def __init__(self, config: GameConfig) -> None:
         self._config = config
@@ -195,9 +194,7 @@ class GameSession:
         self._math_rng = random.Random()
         self._network_raw_to_local_player_ids: dict[str, str] = {}
         self._network_local_to_raw_player_ids: dict[str, str] = {}
-        # IDs of static map objects (plants, decorative sofas) that are omitted from
-        # periodic snapshots and preserved client-side from the initial map load.
-        # Populated once in _load_runtime_resources; stays empty in unit tests.
+        # Reserved for compatibility with older saves/tests.
         self._map_static_object_ids: set[str] = set()
         # Per-frame caches: rebuilt once per frame after world mutations, before physics.
         self._frame_blocking_objects: list[WorldObject] = []
@@ -2531,12 +2528,7 @@ class GameSession:
         if not world.spray_profiles:
             self._queue_async_preload("spray_profile", "")
         apply_interior_physics(world, object_sprites)
-        # Snapshot bandwidth optimization: track IDs of truly static map objects (no
-        # pickups, locks, transitions, or animation) so they can be omitted from the
-        # periodic 5 Hz snapshot and preserved client-side instead.
-        self._map_static_object_ids = {
-            obj.object_id for obj in world.objects if self._is_snapshot_static(obj)
-        }
+        self._map_static_object_ids = set()
         walk_src = sprite_path if sprite_path is not None else self._config.sprite_path
         backpack_src = backpack_sprite_path if backpack_sprite_path is not None else self._config.backpack_sprite_path
         walk_cache = ScaledAnimationCache(loader.load_walk_frames(project_root / walk_src))
@@ -2664,6 +2656,53 @@ class GameSession:
             self._set_player_team(player_id, team_id)
         self._movement_inputs[player_id] = (0, 0, False, 1.0, False)
 
+    def _resolve_join_spawn_position(
+        self,
+        *,
+        world: WorldMap,
+        anchor_x: float,
+        anchor_y: float,
+        anchor_player_id: str | None,
+    ) -> tuple[float, float]:
+        ax = float(anchor_x)
+        ay = float(anchor_y)
+        anchor_pid = str(anchor_player_id).strip() if anchor_player_id is not None else None
+        min_dist = float(self._JOIN_SPAWN_MIN_DISTANCE)
+
+        # Default rule: join at the first player's position.
+        # If that point is occupied by another player, find a nearby random point.
+        occupied = False
+        for pid, state in self._player_states.items():
+            token = str(pid).strip()
+            if anchor_pid and token == anchor_pid:
+                continue
+            if math.hypot(float(state.player.x) - ax, float(state.player.y) - ay) < 1.0:
+                occupied = True
+                break
+        if not occupied:
+            return ax, ay
+
+        max_radius = max(min_dist, float(self._JOIN_SPAWN_MAX_RADIUS))
+        for _ in range(96):
+            radius = self._math_rng.uniform(min_dist, max_radius)
+            angle = self._math_rng.uniform(0.0, math.tau)
+            px = ax + math.cos(angle) * radius
+            py = ay + math.sin(angle) * radius
+            px = max(0.0, min(float(world.width), px))
+            py = max(0.0, min(float(world.height), py))
+            blocked = False
+            for other in self._player_states.values():
+                if math.hypot(float(other.player.x) - px, float(other.player.y) - py) < min_dist:
+                    blocked = True
+                    break
+            if not blocked:
+                return px, py
+
+        # Deterministic fallback when nearby space is crowded.
+        fallback_x = max(0.0, min(float(world.width), ax + min_dist))
+        fallback_y = max(0.0, min(float(world.height), ay))
+        return fallback_x, fallback_y
+
     def remove_player(self, *, player_id: str) -> None:
         if player_id == self._LOCAL_PLAYER_ID:
             return
@@ -2688,8 +2727,12 @@ class GameSession:
             base = self._player_state(self._LOCAL_PLAYER_ID)
             if base is None:
                 return
-            spawn_x = float(base.player.x + 44.0)
-            spawn_y = float(base.player.y + 28.0)
+            spawn_x, spawn_y = self._resolve_join_spawn_position(
+                world=world,
+                anchor_x=float(base.player.x),
+                anchor_y=float(base.player.y),
+                anchor_player_id=self._LOCAL_PLAYER_ID,
+            )
             self.add_player(
                 player_id=host_event.player_id,
                 spawn_x=spawn_x,
@@ -2796,7 +2839,8 @@ class GameSession:
             "level": self._config.map_path.stem,
             "players": players,
             "teams": [dict(item) for item in self._team_catalog],
-            "objects": [self._world_object_payload(obj) for obj in world.objects if not self._is_snapshot_static(obj)],
+            # Host-authoritative replication: send all objects (coords + state).
+            "objects": [self._world_object_payload(obj) for obj in world.objects],
             "spray_tags": [self._spray_tag_payload(tag) for tag in self._spray_tags],
             "room_item_use_counts": room_item_use_counts,
             "math_tasks": self._math_tasks.to_payload(),
@@ -2923,17 +2967,7 @@ class GameSession:
                 obj = self._world_object_from_payload(raw_obj)
                 if obj is not None:
                     restored_objects.append(obj)
-            # Static map objects (plants, decorative sofas) are omitted from periodic
-            # snapshots to cut payload. Restore them from the current world using the
-            # known-static IDs collected at map load — snapshot is authoritative for
-            # everything else (mutable objects, pickups, doors).
-            snapshot_ids = {obj.object_id for obj in restored_objects}
-            preserved_static = [
-                obj for obj in world.objects
-                if obj.object_id in self._map_static_object_ids
-                and obj.object_id not in snapshot_ids
-            ]
-            world.objects = preserved_static + restored_objects
+            world.objects = restored_objects
             known_object_ids = {obj.object_id for obj in world.objects}
             for state in self._player_states.values():
                 if state.grabbed_object_id and state.grabbed_object_id not in known_object_ids:
