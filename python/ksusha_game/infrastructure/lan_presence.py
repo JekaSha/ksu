@@ -711,9 +711,9 @@ class LanServerBrowser:
                 except Exception:
                     players = 1
                 try:
-                    max_players = max(1, int(data.get("max_players", 5)))
+                    max_players = max(1, int(data.get("max_players", 10)))
                 except Exception:
-                    max_players = 5
+                    max_players = 10
 
                 entry = ServerEntry(
                     server_id=sid,

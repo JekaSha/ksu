@@ -4,6 +4,11 @@
     "name": "Jekas",
     "render_scale_without_ride": 1.0,
     "render_scale_with_ride": 1.15,
+    "sheet_scales": {
+      "walk": 1.0,
+      "backpack": 1.0,
+      "skate": 1.15
+    },
     "skills": {
       "skateboard": true
     },

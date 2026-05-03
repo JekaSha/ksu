@@ -168,6 +168,64 @@ class TestRemovePlayer:
         assert session._math_tasks.dispatcher_player_id == "p1"
 
 
+class TestTeamChange:
+    def test_team_change_releases_assignments_outside_dispatcher_team(self, session, stats):
+        add(session, "p1", stats)
+        add(session, "p2", stats)
+        session._set_team_catalog([{"id": "A", "name": "Team A"}, {"id": "B", "name": "Team B"}])
+        session._set_player_team("p1", "A")
+        session._set_player_team("p2", "A")
+        session._math_tasks.unlock_math_quest()
+        session._math_tasks.select_task(player_id="p1", task_no=1, now_ts=1.0, team_id="A")
+        rng = random.Random(123)
+        session._math_tasks.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
+        session._math_tasks.pick_digit(player_id="p1", digit=3, rng=rng, online_player_ids=["p1", "p2"])
+        pending = session._math_tasks.active_pending_answer()
+        assert pending is not None
+        assert pending.assigned_player_id == "p2"
+
+        session._handle_set_team_action(action="set_team::B", player_id="p2")
+
+        assert session._player_team("p2") == "B"
+        assert pending.assigned_player_id is None
+
+    def test_team_change_clears_stage_assignments_outside_dispatcher_team(self, session, stats):
+        add(session, "p1", stats)
+        add(session, "p2", stats)
+        session._set_team_catalog([{"id": "A", "name": "Team A"}, {"id": "B", "name": "Team B"}])
+        session._set_player_team("p1", "A")
+        session._set_player_team("p2", "A")
+        session._math_tasks.unlock_math_quest()
+        session._math_tasks.select_task(player_id="p1", task_no=1, now_ts=1.0, team_id="A")
+        msg = session._math_tasks.reassign_round_stage(
+            stage="pick_first",
+            assignee_player_id="p2",
+            requested_by_player_id="p1",
+            online_player_ids=["p1", "p2"],
+        )
+        assert "назначен" in msg
+
+        session._handle_set_team_action(action="set_team::B", player_id="p2")
+
+        assert session._math_tasks.current_round is not None
+        assert session._math_tasks.current_round.assignments["pick_first"] is None
+
+    def test_team_change_reelects_dispatcher_inside_same_team(self, session, stats):
+        add(session, "p1", stats)
+        add(session, "p2", stats)
+        session._set_team_catalog([{"id": "A", "name": "Team A"}, {"id": "B", "name": "Team B"}])
+        session._set_player_team("p1", "A")
+        session._set_player_team("p2", "A")
+        session._math_tasks.unlock_math_quest()
+        session._math_tasks.select_task(player_id="p1", task_no=1, now_ts=1.0, team_id="A")
+        assert session._math_tasks.dispatcher_player_id == "p1"
+
+        session._handle_set_team_action(action="set_team::B", player_id="p1")
+
+        assert session._player_team("p1") == "B"
+        assert session._math_tasks.dispatcher_player_id == "p2"
+
+
 # ---------------------------------------------------------------------------
 # set_player_movement_input
 # ---------------------------------------------------------------------------

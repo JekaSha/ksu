@@ -332,6 +332,82 @@ def resolve_character_sheet_path(character_id: str | None, sheet_id: str) -> Pat
     return path
 
 
+def resolve_character_sheet_bundle(
+    character_id: str | None,
+) -> tuple[str, dict[str, Path], str, str]:
+    """Return (resolved_character_id, sheet_paths, default_sheet_id, backpack_sheet_id)."""
+    characters_root = Path("source/textures/characters")
+    character = str(character_id or "").strip() or _resolve_character_id()
+    manifest = _resolve_character_manifest(character, characters_root)
+    if manifest is None:
+        fallback_dir = characters_root / _DEFAULT_CHARACTER_ID
+        fallback_sheet = fallback_dir / "walk/ksu.png"
+        return (
+            _DEFAULT_CHARACTER_ID,
+            {"walk": fallback_sheet, "backpack": fallback_dir / "backpack/ksu_with_bag.png"},
+            "walk",
+            "backpack",
+        )
+
+    resolved_character = str(manifest.get("id", character)).strip() or character
+    character_dir = characters_root / resolved_character
+    sheets_raw = manifest.get("sheets")
+    sheets = sheets_raw if isinstance(sheets_raw, dict) else {}
+    default_sheet_id = str(manifest.get("default_sheet", "walk")).strip() or "walk"
+    backpack_sheet_id = str(manifest.get("backpack_sheet", default_sheet_id)).strip() or default_sheet_id
+
+    out: dict[str, Path] = {}
+    for key, rel in sheets.items():
+        sheet_id = str(key).strip()
+        rel_token = str(rel).strip()
+        if not sheet_id or not rel_token:
+            continue
+        path = character_dir / rel_token
+        if path.exists():
+            out[sheet_id] = path
+
+    # Keep compatibility fallbacks when manifest is incomplete.
+    if default_sheet_id not in out:
+        fallback = character_dir / "walk/ksu.png"
+        if fallback.exists():
+            out[default_sheet_id] = fallback
+    if backpack_sheet_id not in out:
+        fallback_backpack = character_dir / "backpack/ksu_with_bag.png"
+        if fallback_backpack.exists():
+            out[backpack_sheet_id] = fallback_backpack
+
+    return resolved_character, out, default_sheet_id, backpack_sheet_id
+
+
+def resolve_character_sheet_scale(character_id: str | None, sheet_id: str, default: float = 1.0) -> float:
+    token = str(sheet_id or "").strip()
+    if not token:
+        return float(default)
+    characters_root = Path("source/textures/characters")
+    character = str(character_id or "").strip() or _resolve_character_id()
+    manifest = _resolve_character_manifest(character, characters_root)
+    if manifest is None:
+        return float(default)
+
+    # Preferred: explicit per-sheet scale map.
+    map_raw = manifest.get("sheet_scales")
+    sheet_scales = map_raw if isinstance(map_raw, dict) else {}
+    raw = sheet_scales.get(token)
+    if raw is None:
+        # Backward compatibility with old global keys.
+        if token in {"skate", "skateboard"}:
+            raw = manifest.get("render_scale_with_ride")
+        else:
+            raw = manifest.get("render_scale_without_ride")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+    if value <= 0:
+        return float(default)
+    return value
+
+
 def resolve_character_render_scale(character_id: str | None, scale_key: str, default: float = 1.0) -> float:
     key = str(scale_key or "").strip()
     if not key:

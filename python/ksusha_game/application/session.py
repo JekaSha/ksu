@@ -21,8 +21,8 @@ from ksusha_game.config import (
     load_user_settings,
     resolve_character_config,
     resolve_character_physical_stats,
-    resolve_character_render_scale,
-    resolve_character_sheet_path,
+    resolve_character_sheet_bundle,
+    resolve_character_sheet_scale,
     resolve_character_skill,
     save_user_settings,
 )
@@ -61,7 +61,7 @@ def _scancode(name: str) -> int:
 
 
 class GameSession:
-    _MAX_PLAYERS = 5
+    _MAX_PLAYERS = 10
     _MAX_LOCAL_PLAYERS = 1
     _GRAB_MAX_DISTANCE = 104.0
     _DRAG_ACTIVE_DISTANCE = 118.0
@@ -377,6 +377,34 @@ class GameSession:
             return
         self._player_teams[pid] = self._normalize_team_id(team_id)
 
+    def _apply_player_team_change(self, *, player_id: str, team_id: str | None) -> None:
+        pid = str(player_id).strip()
+        if not pid:
+            return
+        previous = self._player_team(pid)
+        next_team = self._normalize_team_id(team_id)
+        self._set_player_team(pid, next_team)
+        dispatcher_team_raw = self._math_tasks.dispatcher_team_id
+        if dispatcher_team_raw is None:
+            return
+        dispatcher_team = self._normalize_team_id(dispatcher_team_raw)
+        if previous == dispatcher_team and next_team != dispatcher_team:
+            team_online = self._team_player_ids(dispatcher_team)
+            self._math_tasks.on_player_left(
+                player_id=pid,
+                online_player_ids=list(self._player_states.keys()),
+                online_team_player_ids=team_online,
+            )
+            return
+        if (
+            previous != dispatcher_team
+            and next_team == dispatcher_team
+            and self._math_tasks.dispatcher_player_id is None
+        ):
+            team_online = self._team_player_ids(dispatcher_team)
+            if team_online:
+                self._math_tasks.dispatcher_player_id = sorted(team_online)[0]
+
     def _player_team(self, player_id: str) -> str:
         pid = str(player_id).strip()
         if not pid:
@@ -641,34 +669,53 @@ class GameSession:
                 return f"{h:02d}:{m:02d}:{s:02d}"
             return f"{m:02d}:{s:02d}"
 
-        character_animation_caches: dict[str, dict[str, ScaledAnimationCache]] = {}
+        character_animation_caches: dict[str, dict[str, object]] = {}
 
-        def _animation_caches_for_character(char_id: str) -> dict[str, ScaledAnimationCache]:
+        def _fallback_character_bundle() -> dict[str, object]:
+            sheets: dict[str, ScaledAnimationCache] = {
+                "walk": walk_cache,
+                "backpack": backpack_cache,
+            }
+            return {
+                "sheets": sheets,
+                "default_sheet_id": "walk",
+                "backpack_sheet_id": "backpack",
+            }
+
+        def _character_animation_bundle(char_id: str) -> dict[str, object]:
             token = str(char_id).strip()
             if not token:
-                return {"walk": walk_cache, "backpack": backpack_cache}
-            cached_pair = character_animation_caches.get(token)
-            if cached_pair is not None:
-                return cached_pair
+                return _fallback_character_bundle()
+            cached_bundle = character_animation_caches.get(token)
+            if cached_bundle is not None:
+                return cached_bundle
             try:
-                _skin_pool_dir, sprite_path, backpack_path, resolved = resolve_character_config(token)
+                _skin_pool_dir, _sprite_path, _backpack_path, resolved = resolve_character_config(token)
                 resolved_cached = character_animation_caches.get(resolved)
                 if resolved_cached is not None:
                     character_animation_caches[token] = resolved_cached
                     return resolved_cached
-                walk_anim = ScaledAnimationCache(loader.load_walk_frames(project_root / sprite_path))
-                backpack_anim = ScaledAnimationCache(loader.load_walk_frames(project_root / backpack_path))
-                result = {"walk": walk_anim, "backpack": backpack_anim}
-                skate_path = resolve_character_sheet_path(resolved, "skate")
-                if skate_path is None:
-                    skate_path = resolve_character_sheet_path(resolved, "skateboard")
-                if skate_path is not None:
-                    result["skate"] = ScaledAnimationCache(loader.load_walk_frames(project_root / skate_path))
-                character_animation_caches[resolved] = result
-                character_animation_caches[token] = result
-                return result
+                _resolved, sheet_paths, default_sheet_id, backpack_sheet_id = resolve_character_sheet_bundle(resolved)
+                sheets: dict[str, ScaledAnimationCache] = {}
+                for sheet_id, sheet_path in sheet_paths.items():
+                    sheets[sheet_id] = ScaledAnimationCache(loader.load_walk_frames(project_root / sheet_path))
+                if default_sheet_id not in sheets:
+                    sheets[default_sheet_id] = walk_cache
+                if backpack_sheet_id not in sheets:
+                    sheets[backpack_sheet_id] = backpack_cache
+                # Compatibility aliases for legacy code paths.
+                sheets.setdefault("walk", sheets[default_sheet_id])
+                sheets.setdefault("backpack", sheets[backpack_sheet_id])
+                bundle: dict[str, object] = {
+                    "sheets": sheets,
+                    "default_sheet_id": default_sheet_id,
+                    "backpack_sheet_id": backpack_sheet_id,
+                }
+                character_animation_caches[resolved] = bundle
+                character_animation_caches[token] = bundle
+                return bundle
             except Exception:
-                return {"walk": walk_cache, "backpack": backpack_cache}
+                return _fallback_character_bundle()
 
         def _build_character_preview(char_id: str) -> pygame.Surface | None:
             token = str(char_id).strip()
@@ -678,8 +725,14 @@ class GameSession:
             if cached_preview is not None:
                 return cached_preview
             try:
-                _skin_pool_dir, sprite_path, _backpack_path, _resolved = resolve_character_config(token)
-                anim = ScaledAnimationCache(loader.load_walk_frames(project_root / sprite_path))
+                bundle = _character_animation_bundle(token)
+                sheets = bundle.get("sheets")
+                default_sheet_id = str(bundle.get("default_sheet_id", "walk"))
+                if not isinstance(sheets, dict):
+                    return None
+                anim = sheets.get(default_sheet_id) or sheets.get("walk")
+                if not isinstance(anim, ScaledAnimationCache):
+                    return None
                 # Build large preview first, then downscale in UI to preserve detail.
                 frame = anim.frames_for_height(260)[Direction.DOWN][0]
                 max_side = 118
@@ -702,18 +755,24 @@ class GameSession:
                 return
             try:
                 _skin_pool_dir, sprite_path, backpack_path, resolved = resolve_character_config(token)
-                walk_cache = ScaledAnimationCache(loader.load_walk_frames(project_root / sprite_path))
-                backpack_cache = ScaledAnimationCache(loader.load_walk_frames(project_root / backpack_path))
+                bundle = _character_animation_bundle(resolved)
+                sheets = bundle.get("sheets")
+                default_sheet_id = str(bundle.get("default_sheet_id", "walk"))
+                backpack_sheet_id = str(bundle.get("backpack_sheet_id", default_sheet_id))
+                if not isinstance(sheets, dict):
+                    raise ValueError("invalid character sheets bundle")
+                walk_cache_candidate = sheets.get(default_sheet_id) or sheets.get("walk")
+                backpack_cache_candidate = sheets.get(backpack_sheet_id) or sheets.get("backpack")
+                if not isinstance(walk_cache_candidate, ScaledAnimationCache) or not isinstance(
+                    backpack_cache_candidate, ScaledAnimationCache
+                ):
+                    raise ValueError("missing base animation sheets")
+                walk_cache = walk_cache_candidate
+                backpack_cache = backpack_cache_candidate
                 runtime_sprite_path = sprite_path
                 runtime_backpack_sprite_path = backpack_path
                 current_character_id = resolved
-                resolved_cache = {"walk": walk_cache, "backpack": backpack_cache}
-                skate_path = resolve_character_sheet_path(resolved, "skate")
-                if skate_path is None:
-                    skate_path = resolve_character_sheet_path(resolved, "skateboard")
-                if skate_path is not None:
-                    resolved_cache["skate"] = ScaledAnimationCache(loader.load_walk_frames(project_root / skate_path))
-                character_animation_caches[resolved] = resolved_cache
+                character_animation_caches[resolved] = bundle
                 self._set_player_character_id(self._LOCAL_PLAYER_ID, resolved)
                 self._apply_character_stats_to_player(
                     player_id=self._LOCAL_PLAYER_ID,
@@ -753,13 +812,7 @@ class GameSession:
             player_id=self._LOCAL_PLAYER_ID,
             base_stats=world.player_stats,
         )
-        init_cache = {"walk": walk_cache, "backpack": backpack_cache}
-        init_skate_path = resolve_character_sheet_path(current_character_id, "skate")
-        if init_skate_path is None:
-            init_skate_path = resolve_character_sheet_path(current_character_id, "skateboard")
-        if init_skate_path is not None:
-            init_cache["skate"] = ScaledAnimationCache(loader.load_walk_frames(project_root / init_skate_path))
-        character_animation_caches[current_character_id] = init_cache
+        character_animation_caches[current_character_id] = _character_animation_bundle(current_character_id)
         user_settings = dict(user_settings)
         user_settings["player_name"] = local_player_name
         user_settings["team_id"] = local_team_id
@@ -830,6 +883,7 @@ class GameSession:
                 break
         was_connected = False
         last_snapshot_sent_at = 0.0
+        last_position_sent_at = 0.0
         if host_started:
             self._set_message(f"LAN server visible: {local_host_name}:{server_port}")
         else:
@@ -844,6 +898,7 @@ class GameSession:
         while running:
             dt = clock.tick(self._config.window.fps) / 1000.0
             now = time.monotonic()
+            network_state_dirty = False
             reload_requested = False
             lan_host.set_joinable(not (browser.is_connected() or browser.is_connecting()))
             current_servers = [s for s in browser.servers() if s.server_id != lan_host.server_id]
@@ -859,7 +914,10 @@ class GameSession:
                     if isinstance(teams_raw, list):
                         self._set_team_catalog(teams_raw)
                     local_team_id = self._team_id_for_join(assigned_team)
-                    self._set_player_team(self._LOCAL_PLAYER_ID, local_team_id)
+                    self._apply_player_team_change(
+                        player_id=self._LOCAL_PLAYER_ID,
+                        team_id=local_team_id,
+                    )
                     user_settings = dict(user_settings)
                     user_settings["team_id"] = local_team_id
                     user_settings["host_teams"] = [dict(item) for item in self._team_catalog]
@@ -1315,7 +1373,10 @@ class GameSession:
                                 self._set_message(f"Запрошена смена команды: {self._team_name(picked)}")
                             else:
                                 local_team_id = picked
-                                self._set_player_team(self._LOCAL_PLAYER_ID, local_team_id)
+                                self._apply_player_team_change(
+                                    player_id=self._LOCAL_PLAYER_ID,
+                                    team_id=local_team_id,
+                                )
                                 user_settings = dict(user_settings)
                                 user_settings["team_id"] = local_team_id
                                 user_settings["host_teams"] = [dict(item) for item in self._team_catalog]
@@ -1585,7 +1646,9 @@ class GameSession:
             if host_started:
                 for host_event in lan_host.poll_events():
                     self._apply_host_event(host_event, world)
-                for pid, dx, dy, holding, run, ride_hold in lan_host.poll_remote_inputs():
+                    network_state_dirty = True
+                remote_inputs = lan_host.poll_remote_inputs()
+                for pid, dx, dy, holding, run, ride_hold in remote_inputs:
                     self.set_player_movement_input(
                         player_id=pid,
                         dx=dx,
@@ -1594,8 +1657,11 @@ class GameSession:
                         run_multiplier=run,
                         ride_hold=ride_hold,
                     )
-                for pid, action in lan_host.poll_remote_actions():
+                remote_actions = lan_host.poll_remote_actions()
+                for pid, action in remote_actions:
                     self.queue_player_action(player_id=pid, action=action)
+                if remote_actions:
+                    network_state_dirty = True
 
             if browser.is_connected():
                 assigned_local = browser.connected_player_id()
@@ -1610,10 +1676,12 @@ class GameSession:
 
             self._process_async_preloads(world, object_sprites, budget_ms=1.8, max_jobs=1)
             if not browser.is_connected():
-                self._process_command_queue(
+                processed_commands = self._process_command_queue(
                     world=world,
                     object_sprites=object_sprites,
                 )
+                if processed_commands > 0:
+                    network_state_dirty = True
 
             if dev_hot_enabled and now >= next_hot_check:
                 next_hot_check = now + 0.45
@@ -1642,15 +1710,7 @@ class GameSession:
                         backpack_sprite_path=runtime_backpack_sprite_path,
                     )
                     character_animation_caches.clear()
-                    reload_cache = {"walk": walk_cache, "backpack": backpack_cache}
-                    reload_skate_path = resolve_character_sheet_path(current_character_id, "skate")
-                    if reload_skate_path is None:
-                        reload_skate_path = resolve_character_sheet_path(current_character_id, "skateboard")
-                    if reload_skate_path is not None:
-                        reload_cache["skate"] = ScaledAnimationCache(
-                            loader.load_walk_frames(project_root / reload_skate_path)
-                        )
-                    character_animation_caches[current_character_id] = reload_cache
+                    character_animation_caches[current_character_id] = _character_animation_bundle(current_character_id)
                     for pid, state in self._player_states.items():
                         self._apply_character_stats_to_player(
                             player_id=pid,
@@ -1744,14 +1804,17 @@ class GameSession:
                     input_dx, input_dy, _tmp_holding, _tmp_run, ride_hold = self._movement_inputs.get(
                         player_id, (0, 0, False, 1.0, False)
                     )
-                    self._sync_active_ride_state(
-                        player_id=player_id,
-                        state=state,
-                        world=world,
-                        ride_hold=ride_hold,
-                        dx=input_dx,
-                        dy=input_dy,
-                    )
+                    # In client mode host is authoritative for ride state; avoid clobbering
+                    # network-applied active_ride_item_id with local zero-input defaults.
+                    if not net_client_mode:
+                        self._sync_active_ride_state(
+                            player_id=player_id,
+                            state=state,
+                            world=world,
+                            ride_hold=ride_hold,
+                            dx=input_dx,
+                            dy=input_dy,
+                        )
                     selected_item = inventory.selected_item()
                     selected_slot_index = inventory.active_index
 
@@ -1766,21 +1829,33 @@ class GameSession:
 
                     wearing_backpack = self._inventory_has_item(inventory, "backpack")
                     player_character_id = self._player_character_id(player_id)
-                    character_anims = _animation_caches_for_character(player_character_id)
-                    walk_anim = character_anims["walk"]
-                    backpack_anim = character_anims["backpack"]
-                    animation_cache = backpack_anim if wearing_backpack else walk_anim
+                    character_bundle = _character_animation_bundle(player_character_id)
+                    character_sheets = character_bundle.get("sheets")
+                    if not isinstance(character_sheets, dict):
+                        character_sheets = _fallback_character_bundle()["sheets"]
+                    default_sheet_id = str(character_bundle.get("default_sheet_id", "walk")).strip() or "walk"
+                    backpack_sheet_id = str(character_bundle.get("backpack_sheet_id", default_sheet_id)).strip() or default_sheet_id
+                    base_sheet_id = backpack_sheet_id if wearing_backpack else default_sheet_id
+                    animation_cache = character_sheets.get(base_sheet_id) or character_sheets.get(default_sheet_id)
+                    if not isinstance(animation_cache, ScaledAnimationCache):
+                        fallback_bundle = _fallback_character_bundle()
+                        fallback_sheets = fallback_bundle["sheets"]
+                        animation_cache = fallback_sheets["walk"]
+                        base_sheet_id = "walk"
                     visual_target_h = max(28, target_h)
-                    no_ride_scale = resolve_character_render_scale(player_character_id, "render_scale_without_ride", 1.0)
+                    no_ride_scale = resolve_character_sheet_scale(player_character_id, base_sheet_id, 1.0)
                     visual_target_h = max(28, int(round(visual_target_h * no_ride_scale)))
                     frames_by_dir = animation_cache.frames_for_height(visual_target_h)
                     ride_frames_by_dir: dict[Direction, list[pygame.Surface]] | None = None
                     if state.active_ride_item_id:
                         ride_variant = self._item_effect_animation_variant(state.active_ride_item_id, world)
-                        ride_anim = character_anims.get(ride_variant)
-                        if ride_anim is None:
-                            ride_anim = character_anims.get("skate")
-                        if ride_anim is not None:
+                        ride_sheet_id = ride_variant
+                        ride_anim = character_sheets.get(ride_variant)
+                        if not isinstance(ride_anim, ScaledAnimationCache):
+                            # Legacy fallback alias.
+                            ride_anim = character_sheets.get("skate")
+                            ride_sheet_id = "skate"
+                        if isinstance(ride_anim, ScaledAnimationCache):
                             # Match visible body height between base and ride sheets;
                             # extra ride pixels (skateboard zone) extend downward.
                             facing = player.facing
@@ -1792,7 +1867,7 @@ class GameSession:
                             )
                             ride_src_h = max(1, ride_anim.base_frame_size(facing)[1])
                             ride_body_h = max(1, ride_anim.base_body_height(facing, min_alpha=alpha_cutoff))
-                            ride_scale = resolve_character_render_scale(player_character_id, "render_scale_with_ride", 1.0)
+                            ride_scale = resolve_character_sheet_scale(player_character_id, ride_sheet_id, 1.0)
                             ride_target_h = max(
                                 28,
                                 int(
@@ -2398,10 +2473,21 @@ class GameSession:
             pygame.display.flip()
 
             if host_started and lan_host.connected_clients() > 0:
-                # Per-frame position update: tiny payload, pre-encoded in main thread, sent by bg thread.
-                lan_host.broadcast_positions(self._build_position_update())
-                # Full state sync at 5 Hz: objects, inventory, spray tags, world events.
-                if now - last_snapshot_sent_at >= 0.20:
+                connected = lan_host.connected_clients()
+                # Position sync stays frequent but throttles under higher client counts.
+                position_interval_sec = 0.033 if connected >= 6 else 0.016
+                if now - last_position_sent_at >= position_interval_sec:
+                    lan_host.broadcast_positions(self._build_position_update())
+                    last_position_sent_at = now
+                # Full state sync for mutable world/player state:
+                # immediate push on mutation + adaptive periodic cadence under load.
+                if connected >= 9:
+                    snapshot_interval_sec = 0.14
+                elif connected >= 6:
+                    snapshot_interval_sec = 0.10
+                else:
+                    snapshot_interval_sec = 0.05
+                if network_state_dirty or (now - last_snapshot_sent_at >= snapshot_interval_sec):
                     lan_host.broadcast_snapshot(self._build_network_snapshot(world))
                     last_snapshot_sent_at = now
 
@@ -3174,7 +3260,8 @@ class GameSession:
         *,
         world: WorldMap,
         object_sprites: ObjectSpriteLibrary,
-    ) -> None:
+    ) -> int:
+        processed = 0
         while self._command_queue:
             command = self._command_queue.popleft()
             if self._player_state(command.player_id) is None:
@@ -3188,8 +3275,10 @@ class GameSession:
                     world=world,
                     object_sprites=object_sprites,
                 )
+                processed += 1
             finally:
                 self._active_player_context_id = prev_context
+        return processed
 
     def _action_for_event(
         self,
@@ -3878,7 +3967,10 @@ class GameSession:
         requested = self._normalize_team_id(team_raw)
         if requested not in self._team_catalog_ids():
             return
-        self._set_player_team(player_id, requested)
+        self._apply_player_team_change(
+            player_id=player_id,
+            team_id=requested,
+        )
         if player_id == self._LOCAL_PLAYER_ID:
             self._set_message(f"Команда: {self._team_name(requested)}")
         else:
