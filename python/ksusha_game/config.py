@@ -156,6 +156,34 @@ def _load_character_registry(characters_root: Path = Path("source/textures/chara
     return out
 
 
+def _merge_character_manifests(base: dict, override: dict) -> dict:
+    merged = dict(base)
+    for key, value in override.items():
+        if (
+            key in {"sheets", "skills", "stats"}
+            and isinstance(merged.get(key), dict)
+            and isinstance(value, dict)
+        ):
+            nested = dict(merged[key])
+            nested.update(value)
+            merged[key] = nested
+            continue
+        merged[key] = value
+    return merged
+
+
+def _resolve_character_manifest(character: str, characters_root: Path) -> dict | None:
+    registry = _load_character_registry(characters_root)
+    registry_manifest = registry.get(character)
+    local_manifest = _load_character_manifest(characters_root / character)
+    if registry_manifest is None:
+        return local_manifest
+    if local_manifest is None:
+        return registry_manifest
+    # Registry provides discoverability/listing, local file provides per-character runtime overrides.
+    return _merge_character_manifests(registry_manifest, local_manifest)
+
+
 def list_available_characters(characters_root: Path = Path("source/textures/characters")) -> list[dict[str, str]]:
     root = Path(characters_root)
     out: list[dict[str, str]] = []
@@ -184,11 +212,7 @@ def list_available_characters(characters_root: Path = Path("source/textures/char
 def resolve_character_config(character_id: str | None = None) -> tuple[Path, Path, Path, str]:
     characters_root = Path("source/textures/characters")
     character = str(character_id or "").strip() or _resolve_character_id()
-    registry = _load_character_registry(characters_root)
-    manifest = registry.get(character)
-    character_dir = characters_root / character
-    if manifest is None:
-        manifest = _load_character_manifest(character_dir)
+    manifest = _resolve_character_manifest(character, characters_root)
     if manifest is None:
         fallback_character_dir = characters_root / _DEFAULT_CHARACTER_ID
         fallback_skin_pool_dir = fallback_character_dir / "walk"
@@ -234,11 +258,7 @@ def resolve_character_config(character_id: str | None = None) -> tuple[Path, Pat
 def resolve_character_physical_stats(character_id: str | None = None) -> tuple[float | None, float | None]:
     characters_root = Path("source/textures/characters")
     character = str(character_id or "").strip() or _resolve_character_id()
-    registry = _load_character_registry(characters_root)
-    manifest = registry.get(character)
-    if manifest is None:
-        character_dir = characters_root / character
-        manifest = _load_character_manifest(character_dir)
+    manifest = _resolve_character_manifest(character, characters_root)
     if manifest is None:
         return None, None
 
@@ -276,11 +296,7 @@ def resolve_character_skill(character_id: str | None, skill_id: str) -> bool:
         return False
     characters_root = Path("source/textures/characters")
     character = str(character_id or "").strip() or _resolve_character_id()
-    registry = _load_character_registry(characters_root)
-    manifest = registry.get(character)
-    if manifest is None:
-        character_dir = characters_root / character
-        manifest = _load_character_manifest(character_dir)
+    manifest = _resolve_character_manifest(character, characters_root)
     if manifest is None:
         return False
     skills_raw = manifest.get("skills")
@@ -300,11 +316,7 @@ def resolve_character_sheet_path(character_id: str | None, sheet_id: str) -> Pat
         return None
     characters_root = Path("source/textures/characters")
     character = str(character_id or "").strip() or _resolve_character_id()
-    registry = _load_character_registry(characters_root)
-    manifest = registry.get(character)
-    if manifest is None:
-        character_dir = characters_root / character
-        manifest = _load_character_manifest(character_dir)
+    manifest = _resolve_character_manifest(character, characters_root)
     if manifest is None:
         return None
     resolved_character = str(manifest.get("id", character)).strip() or character
@@ -326,11 +338,7 @@ def resolve_character_render_scale(character_id: str | None, scale_key: str, def
         return float(default)
     characters_root = Path("source/textures/characters")
     character = str(character_id or "").strip() or _resolve_character_id()
-    registry = _load_character_registry(characters_root)
-    manifest = registry.get(character)
-    if manifest is None:
-        character_dir = characters_root / character
-        manifest = _load_character_manifest(character_dir)
+    manifest = _resolve_character_manifest(character, characters_root)
     if manifest is None:
         return float(default)
     raw = manifest.get(key)

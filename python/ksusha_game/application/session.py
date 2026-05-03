@@ -602,7 +602,8 @@ class GameSession:
             stats=world.player_stats,
             character_id=self._config.character_id,
         )
-        self._seed_local_test_inventory(world)
+        if os.getenv("KSU_SEED_TEST_INVENTORY", "").strip().lower() in {"1", "true", "yes", "on"}:
+            self._seed_local_test_inventory(world)
         requested_locals_raw = os.getenv("KSU_LOCAL_PLAYERS", "").strip()
         if requested_locals_raw:
             try:
@@ -1770,12 +1771,8 @@ class GameSession:
                     backpack_anim = character_anims["backpack"]
                     animation_cache = backpack_anim if wearing_backpack else walk_anim
                     visual_target_h = max(28, target_h)
-                    if state.active_ride_item_id:
-                        ride_scale = resolve_character_render_scale(player_character_id, "render_scale_with_ride", 1.0)
-                        visual_target_h = max(28, int(round(visual_target_h * ride_scale)))
-                    else:
-                        no_ride_scale = resolve_character_render_scale(player_character_id, "render_scale_without_ride", 1.0)
-                        visual_target_h = max(28, int(round(visual_target_h * no_ride_scale)))
+                    no_ride_scale = resolve_character_render_scale(player_character_id, "render_scale_without_ride", 1.0)
+                    visual_target_h = max(28, int(round(visual_target_h * no_ride_scale)))
                     frames_by_dir = animation_cache.frames_for_height(visual_target_h)
                     ride_frames_by_dir: dict[Direction, list[pygame.Surface]] | None = None
                     if state.active_ride_item_id:
@@ -1784,7 +1781,30 @@ class GameSession:
                         if ride_anim is None:
                             ride_anim = character_anims.get("skate")
                         if ride_anim is not None:
-                            ride_frames_by_dir = ride_anim.frames_for_height(visual_target_h)
+                            # Match visible body height between base and ride sheets;
+                            # extra ride pixels (skateboard zone) extend downward.
+                            facing = player.facing
+                            base_src_h = max(1, animation_cache.base_frame_size(facing)[1])
+                            alpha_cutoff = max(1, self._config.sprite_sheet.alpha_component_cutoff)
+                            base_body_h = max(
+                                1,
+                                animation_cache.base_body_height(facing, min_alpha=alpha_cutoff),
+                            )
+                            ride_src_h = max(1, ride_anim.base_frame_size(facing)[1])
+                            ride_body_h = max(1, ride_anim.base_body_height(facing, min_alpha=alpha_cutoff))
+                            ride_scale = resolve_character_render_scale(player_character_id, "render_scale_with_ride", 1.0)
+                            ride_target_h = max(
+                                28,
+                                int(
+                                    round(
+                                        visual_target_h
+                                        * (base_body_h / float(base_src_h))
+                                        * (ride_src_h / float(ride_body_h))
+                                        * ride_scale
+                                    )
+                                ),
+                            )
+                            ride_frames_by_dir = ride_anim.frames_for_height(ride_target_h)
                     if net_client_mode:
                         # Host-authoritative mode: do not locally simulate players,
                         # otherwise zero-input frames reset walk_time and kill animation.
@@ -2639,6 +2659,10 @@ class GameSession:
         if not isinstance(players, list):
             return
         assigned_remote_id = str(assigned_local_id).strip() if assigned_local_id else None
+        if not assigned_remote_id:
+            prev_raw = self._network_local_to_raw_player_ids.get(self._LOCAL_PLAYER_ID)
+            if prev_raw:
+                assigned_remote_id = str(prev_raw).strip() or None
         for item in players:
             if not isinstance(item, dict):
                 continue
@@ -2713,8 +2737,25 @@ class GameSession:
         assigned_remote_id = str(assigned_local_id).strip() if assigned_local_id else None
         # Keep local id stable by remapping server-assigned id to local p1.
         snapshot_ids = [str(item.get("id", "")).strip() for item in payload if isinstance(item, dict)]
+        if not assigned_remote_id:
+            prev_raw = self._network_local_to_raw_player_ids.get(self._LOCAL_PLAYER_ID)
+            if prev_raw and str(prev_raw).strip() in snapshot_ids:
+                assigned_remote_id = str(prev_raw).strip()
         if assigned_remote_id and assigned_remote_id not in snapshot_ids:
             assigned_remote_id = None
+        if assigned_remote_id is None:
+            local_name = self._player_display_name(self._LOCAL_PLAYER_ID).strip().lower()
+            if local_name:
+                for item in payload:
+                    if not isinstance(item, dict):
+                        continue
+                    raw_id = str(item.get("id", "")).strip()
+                    if not raw_id or raw_id == self._LOCAL_PLAYER_ID:
+                        continue
+                    name = str(item.get("name", "")).strip().lower()
+                    if name and name == local_name:
+                        assigned_remote_id = raw_id
+                        break
         if assigned_remote_id is None and self._LOCAL_PLAYER_ID not in snapshot_ids:
             for pid in snapshot_ids:
                 if pid.startswith("r"):

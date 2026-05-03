@@ -28,6 +28,7 @@ class SpriteSheetRuntimeSettings:
     spacing_y: int
     alignment_mode: str
     frame_columns: list[int] | None
+    frame_rects_by_direction: dict[Direction, list[pygame.Rect]] | None
     normalize_canvas: bool
     component_pick: str
     output_width: int | None
@@ -87,7 +88,7 @@ class SpriteSheetLoader:
                 content_rect = sheet.get_rect()
         result: dict[Direction, list[pygame.Surface]] = {}
         for direction, row in runtime.row_by_direction.items():
-            result[direction] = self._load_row_frames(sheet, row, content_rect, runtime)
+            result[direction] = self._load_row_frames(sheet, direction, row, content_rect, runtime)
         for target, source in runtime.mirror_directions.items():
             source_frames = result.get(source)
             if not source_frames:
@@ -112,42 +113,55 @@ class SpriteSheetLoader:
     def _load_row_frames(
         self,
         sheet: pygame.Surface,
+        direction: Direction,
         row: int,
         content_rect: pygame.Rect,
         runtime: SpriteSheetRuntimeSettings,
     ) -> list[pygame.Surface]:
         frames_raw: list[pygame.Surface] = []
-        frame_columns = runtime.frame_columns if runtime.frame_columns is not None else list(range(runtime.columns))
-        for col in frame_columns:
-            src = self._grid_cell_rect(
-                content_rect,
-                row=row,
-                col=col,
-                columns=runtime.columns,
-                rows=runtime.rows,
-                runtime=runtime,
-                sheet=sheet,
-            )
+        custom_rects = None
+        if runtime.frame_rects_by_direction is not None:
+            custom_rects = runtime.frame_rects_by_direction.get(direction)
+        if custom_rects:
+            src_rects = [rect.clip(sheet.get_rect()) for rect in custom_rects]
+        else:
+            frame_columns = runtime.frame_columns if runtime.frame_columns is not None else list(range(runtime.columns))
+            src_rects = [
+                self._grid_cell_rect(
+                    content_rect,
+                    row=row,
+                    col=col,
+                    columns=runtime.columns,
+                    rows=runtime.rows,
+                    runtime=runtime,
+                    sheet=sheet,
+                )
+                for col in frame_columns
+            ]
+        for src in src_rects:
             frame = pygame.Surface((src.width, src.height), pygame.SRCALPHA)
             frame.blit(sheet, (0, 0), src)
             frames_raw.append(frame)
 
         if not self._has_transparency(frames_raw):
             frames_raw = self._preprocessor.remove_static_row_background(frames_raw)
+        use_manual_rects = custom_rects is not None and len(custom_rects) > 0
         if runtime.component_pick != "none":
             frames_raw = [self._filter_frame_component(frame, runtime.component_pick) for frame in frames_raw]
-        frames_raw = [self._trim_top_fringe_noise(frame) for frame in frames_raw]
-        # "component_pick:none" is used for authored overlays like skateboard sheets.
-        # For those sheets, relocating detached top parts may incorrectly duplicate
-        # board fragments near the body; keep only top-artifact dropping.
-        frames_raw = [
-            self._relocate_detached_top_component_below(
-                frame,
-                strip_only=runtime.component_pick == "none",
-            )
-            for frame in frames_raw
-        ]
-        frames_raw = [self._drop_detached_top_artifact(frame) for frame in frames_raw]
+        # For authored manual frame rectangles (e.g. skate sheet), avoid relocation
+        # heuristic, but still drop detached top artifacts.
+        if not use_manual_rects:
+            frames_raw = [self._trim_top_fringe_noise(frame) for frame in frames_raw]
+            frames_raw = [
+                self._relocate_detached_top_component_below(
+                    frame,
+                    strip_only=runtime.component_pick == "none",
+                )
+                for frame in frames_raw
+            ]
+            frames_raw = [self._drop_detached_top_artifact(frame) for frame in frames_raw]
+        else:
+            frames_raw = [self._drop_detached_top_artifact(frame) for frame in frames_raw]
         if runtime.alignment_mode == "raw_cell":
             return frames_raw
 
@@ -280,6 +294,7 @@ class SpriteSheetLoader:
             spacing_y=0,
             alignment_mode="body_anchor",
             frame_columns=None,
+            frame_rects_by_direction=None,
             normalize_canvas=False,
             component_pick="none",
             output_width=None,
@@ -360,6 +375,7 @@ class SpriteSheetLoader:
             parsed_cell_h = None
 
         frame_columns = self._parse_frame_columns(raw.get("frame_columns"), columns=columns)
+        frame_rects_by_direction = self._parse_frame_rects_by_direction(raw.get("frame_rects_by_direction"))
         normalize_canvas = bool(raw.get("normalize_canvas", True))
         component_pick = str(raw.get("component_pick", "none")).strip().lower()
         if component_pick not in {"none", "leftmost", "rightmost", "largest"}:
@@ -419,6 +435,7 @@ class SpriteSheetLoader:
             spacing_y=spacing_y,
             alignment_mode=alignment_mode,
             frame_columns=frame_columns,
+            frame_rects_by_direction=frame_rects_by_direction,
             normalize_canvas=normalize_canvas,
             component_pick=component_pick,
             output_width=parsed_output_w,
@@ -703,6 +720,29 @@ class SpriteSheetLoader:
                 continue
             out[target] = source
         return out
+
+    def _parse_frame_rects_by_direction(self, raw: object) -> dict[Direction, list[pygame.Rect]] | None:
+        if not isinstance(raw, dict):
+            return None
+        out: dict[Direction, list[pygame.Rect]] = {}
+        for key, value in raw.items():
+            direction = self._direction_from_token(key)
+            if direction is None or not isinstance(value, list):
+                continue
+            rects: list[pygame.Rect] = []
+            for item in value:
+                if not isinstance(item, list) or len(item) != 4:
+                    continue
+                x = self._safe_int(item[0], -1)
+                y = self._safe_int(item[1], -1)
+                w = self._safe_positive_int(item[2], -1)
+                h = self._safe_positive_int(item[3], -1)
+                if x < 0 or y < 0 or w <= 0 or h <= 0:
+                    continue
+                rects.append(pygame.Rect(x, y, w, h))
+            if rects:
+                out[direction] = rects
+        return out or None
 
     def _filter_frame_component(self, frame: pygame.Surface, mode: str) -> pygame.Surface:
         alpha_cutoff = self._config.alpha_component_cutoff
@@ -1053,6 +1093,22 @@ class ScaledAnimationCache:
         if body.height <= 0:
             return max(1, frame.get_height())
         return max(1, body.height)
+
+    def content_bottom(self, direction: Direction, *, min_alpha: int = 20) -> int:
+        """Last visible pixel row (exclusive) in the base frame for the given direction.
+
+        For sprites with foot_margin padding below the content, this returns the
+        content boundary rather than the canvas height — use it as the "effective
+        canvas height" when computing a ride scale that accounts for the padding.
+        """
+        frames = self._base_frames.get(direction)
+        if not frames:
+            return 1
+        frame = frames[0]
+        body = frame.get_bounding_rect(min_alpha=max(1, int(min_alpha)))
+        if body.height <= 0:
+            return max(1, frame.get_height())
+        return max(1, body.bottom)
 
     def nominal_body_height(self, *, min_alpha: int = 20) -> int:
         heights: list[int] = []

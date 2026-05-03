@@ -1633,7 +1633,7 @@ class WorldRenderer:
         stretch = 1.06 if player_left_facing else 0.92
         shadow_w = int(sprite_w * 0.42 * stretch)
         shadow_h = self._config.shadow.height
-        shadow_y_offset = -6  # Move shadow closer to the character feet.
+        shadow_y_offset = 0  # Keep shadow below feet to avoid dark clipping on shoe edges.
         shadow = pygame.Surface((shadow_w, shadow_h), pygame.SRCALPHA)
         pygame.draw.ellipse(shadow, self._config.shadow.color, shadow.get_rect())
 

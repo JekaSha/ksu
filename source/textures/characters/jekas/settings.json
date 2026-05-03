@@ -3,7 +3,7 @@
     "id": "jekas",
     "name": "Jekas",
     "render_scale_without_ride": 1.0,
-    "render_scale_with_ride": 1.0,
+    "render_scale_with_ride": 1.15,
     "skills": {
       "skateboard": true
     },
@@ -50,19 +50,57 @@
     "walk/jekas.png": {
       "detect_content_rect": false,
       "offset": [1, 1],
-      "cell_size": [198, 198]
+      "cell_size": [198, 198],
+      "bbox_padding": 3,
+      "foot_margin": 0,
+      "output_size": [172, 132],
+      "body_height": null,
+      "mirror_directions": {
+        "right": "left",
+        "up_right": "up_left",
+        "down_right": "down_left"
+      }
     },
     "walk/jekas_skate.png": {
+      "detect_content_rect": false,
       "component_pick": "none",
       "chroma_soften_spill": false,
+      "row_by_direction": {
+        "down": 0,
+        "up": 0,
+        "left": 0,
+        "right": 0,
+        "up_right": 0,
+        "up_left": 0,
+        "down_left": 0,
+        "down_right": 0
+      },
+      "frame_rects_by_direction": {
+        "left": [[22, 82, 160, 190], [204, 82, 160, 190], [400, 82, 160, 190], [593, 82, 160, 190], [785, 82, 160, 190]],
+        "up_left": [[22, 82, 160, 190], [204, 82, 160, 190], [400, 82, 160, 190], [593, 82, 160, 190], [785, 82, 160, 190]],
+        "down_left": [[22, 82, 160, 190], [204, 82, 160, 190], [400, 82, 160, 190], [593, 82, 160, 190], [785, 82, 160, 190]],
+        "up": [[22, 82, 160, 190], [204, 82, 160, 190], [400, 82, 160, 190], [593, 82, 160, 190], [785, 82, 160, 190]],
+        "down": [[22, 82, 160, 190], [204, 82, 160, 190], [400, 82, 160, 190], [593, 82, 160, 190], [785, 82, 160, 190]]
+      },
       "mirror_directions": {
         "right": "left",
         "up_right": "up_left",
         "down_right": "down_left"
       },
-      "output_size": [172, 188],
+      "output_size": [172, 190],
+      "foot_margin": 0,
       "body_height": null
     },
-    "backpack/jekas_with_bag.png": {}
+    "backpack/jekas_with_bag.png": {
+      "bbox_padding": 3,
+      "foot_margin": 0,
+      "output_size": [172, 132],
+      "body_height": null,
+      "mirror_directions": {
+        "right": "left",
+        "up_right": "up_left",
+        "down_right": "down_left"
+      }
+    }
   }
 }
