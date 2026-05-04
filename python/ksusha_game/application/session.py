@@ -670,6 +670,7 @@ class GameSession:
             return f"{m:02d}:{s:02d}"
 
         character_animation_caches: dict[str, dict[str, object]] = {}
+        character_sheet_scale_cache: dict[tuple[str, str], float] = {}
 
         def _fallback_character_bundle() -> dict[str, object]:
             sheets: dict[str, ScaledAnimationCache] = {
@@ -716,6 +717,20 @@ class GameSession:
                 return bundle
             except Exception:
                 return _fallback_character_bundle()
+
+        def _character_sheet_scale(char_id: str, sheet_id: str, default: float = 1.0) -> float:
+            char_token = str(char_id).strip()
+            sheet_token = str(sheet_id).strip()
+            if not sheet_token:
+                return float(default)
+            key = (char_token, sheet_token)
+            cached = character_sheet_scale_cache.get(key)
+            if cached is not None:
+                return cached
+            value = resolve_character_sheet_scale(char_token, sheet_token, default)
+            value_f = float(value)
+            character_sheet_scale_cache[key] = value_f
+            return value_f
 
         def _build_character_preview(char_id: str) -> pygame.Surface | None:
             token = str(char_id).strip()
@@ -1954,7 +1969,7 @@ class GameSession:
                         animation_cache = fallback_sheets["walk"]
                         base_sheet_id = "walk"
                     visual_target_h = max(28, target_h)
-                    no_ride_scale = resolve_character_sheet_scale(player_character_id, base_sheet_id, 1.0)
+                    no_ride_scale = _character_sheet_scale(player_character_id, base_sheet_id, 1.0)
                     visual_target_h = max(28, int(round(visual_target_h * no_ride_scale)))
                     frames_by_dir = animation_cache.frames_for_height(visual_target_h)
                     ride_frames_by_dir: dict[Direction, list[pygame.Surface]] | None = None
@@ -1978,7 +1993,7 @@ class GameSession:
                             )
                             ride_src_h = max(1, ride_anim.base_frame_size(facing)[1])
                             ride_body_h = max(1, ride_anim.base_body_height(facing, min_alpha=alpha_cutoff))
-                            ride_scale = resolve_character_sheet_scale(player_character_id, ride_sheet_id, 1.0)
+                            ride_scale = _character_sheet_scale(player_character_id, ride_sheet_id, 1.0)
                             ride_target_h = max(
                                 28,
                                 int(
@@ -2006,10 +2021,10 @@ class GameSession:
                             frame_remote_interp_sum_px += drift
                             frame_remote_interp_max_px = max(frame_remote_interp_max_px, drift)
                             frame_remote_interp_samples += 1
-                            if drift > 0.9:
+                            if drift > 0.35:
                                 moving_by_interp = True
-                                # Aggressive reconcile for remote feel: less trailing.
-                                lerp = min(1.0, dt * 24.0)
+                                # Fast but still visually stable reconcile.
+                                lerp = min(1.0, dt * 18.0)
                                 player.x = cx + drift_x * lerp
                                 player.y = cy + drift_y * lerp
                             else:
@@ -2019,12 +2034,12 @@ class GameSession:
                             if state.net_target_walk_time is not None:
                                 target_wt = float(state.net_target_walk_time)
                                 predicted_wt = player.walk_time + dt * self._config.sprite_sheet.anim_fps
-                                player.walk_time = predicted_wt + (target_wt - predicted_wt) * min(1.0, dt * 28.0)
+                                player.walk_time = predicted_wt + (target_wt - predicted_wt) * min(1.0, dt * 22.0)
                             else:
                                 player.walk_time += dt * self._config.sprite_sheet.anim_fps
                         elif state.net_target_walk_time is not None:
                             target_wt = float(state.net_target_walk_time)
-                            player.walk_time = player.walk_time + (target_wt - player.walk_time) * min(1.0, dt * 30.0)
+                            player.walk_time = player.walk_time + (target_wt - player.walk_time) * min(1.0, dt * 24.0)
                         current_frames = frames_by_dir[player.facing]
                         frame_index = int(player.walk_time) % len(current_frames)
                         current_frame = current_frames[frame_index]
@@ -2626,7 +2641,7 @@ class GameSession:
             if host_started and lan_host.connected_clients() > 0:
                 connected = lan_host.connected_clients()
                 # Position sync stays frequent but throttles under higher client counts.
-                position_interval_sec = 0.04 if connected >= 6 else 0.028
+                position_interval_sec = 0.03 if connected >= 6 else 0.02
                 if now - last_position_sent_at >= position_interval_sec:
                     lan_host.broadcast_positions(self._build_position_update())
                     last_position_sent_at = now
@@ -3158,11 +3173,11 @@ class GameSession:
                         self._LOCAL_PLAYER_ID, (0, 0, False, 1.0, False)
                     )
                     moving_local = abs(input_dx) > 0 or abs(input_dy) > 0
-                    if drift <= 0.9:
+                    if drift <= 0.7:
                         pass
-                    elif moving_local and drift <= 20.0:
-                        state.player.x = cur_x + drift_x * 0.7
-                        state.player.y = cur_y + drift_y * 0.7
+                    elif moving_local and drift <= 18.0:
+                        state.player.x = cur_x + drift_x * 0.55
+                        state.player.y = cur_y + drift_y * 0.55
                     else:
                         state.player.x = target_x
                         state.player.y = target_y
@@ -3170,7 +3185,7 @@ class GameSession:
                     # Remote players on client: keep host position as target and
                     # snap only when drift is very large (teleport/reconnect).
                     drift = math.hypot(target_x - float(state.player.x), target_y - float(state.player.y))
-                    if drift >= 40.0:
+                    if drift >= 48.0:
                         state.player.x = target_x
                         state.player.y = target_y
                         state.player.walk_time = target_walk_time
@@ -3326,7 +3341,7 @@ class GameSession:
                 state.net_target_walk_time = net_walk_time
                 if client_mode and player_id != self._LOCAL_PLAYER_ID:
                     drift = math.hypot(net_x - float(state.player.x), net_y - float(state.player.y))
-                    if drift >= 40.0:
+                    if drift >= 48.0:
                         state.player.x = net_x
                         state.player.y = net_y
                         state.player.walk_time = net_walk_time
