@@ -2606,9 +2606,9 @@ class GameSession:
                 lan_menu_lines=lan_menu_lines,
                 character_picker=character_picker,
                 fog_quality=(
-                    "fast"
-                    if (browser.is_connected() or (host_started and lan_host.connected_clients() > 0))
-                    else "full"
+                    "off"
+                    if browser.is_connected()
+                    else ("fast" if (host_started and lan_host.connected_clients() > 0) else "full")
                 ),
             )
 
