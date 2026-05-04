@@ -1952,17 +1952,15 @@ class GameSession:
                     selected_slot_index = inventory.active_index
 
                     is_local = player_id == self._LOCAL_PLAYER_ID
-                    # is_simulated_remote: remote player whose inputs are relayed from host;
-                    # simulate locally so there is zero lerp lag, correct with host pos on drift.
-                    is_simulated_remote = net_client_mode and not is_local
                     predict_local_client_player = net_client_mode and is_local
                     dx, dy, holding_pickup, run_boost, _ride_hold = self._movement_inputs.get(
                         player_id, (0, 0, False, 1.0, False)
                     )
                     if state.active_ride_item_id:
                         dy = 0
-                    # Block world interactions for both local client prediction and remote simulation.
-                    local_prediction_blocks_interaction = predict_local_client_player or is_simulated_remote
+                    # In connected client mode we predict movement for local player,
+                    # but keep world interactions authoritative on host.
+                    local_prediction_blocks_interaction = bool(predict_local_client_player)
                     spray_holding = (holding_pickup and self._is_spray_item(selected_item)) and not local_prediction_blocks_interaction
                     drag_hold = holding_pickup
 
@@ -2019,15 +2017,72 @@ class GameSession:
                                 ),
                             )
                             ride_frames_by_dir = ride_anim.frames_for_height(ride_target_h)
-                    # Simulated remote players go through the full simulation block below.
-                    # (No lerp branch: inputs are relayed from host and simulated locally.)
+                    if net_client_mode and not is_local:
+                        # Host-authoritative remote players: do not run local gameplay
+                        # simulation/collisions for them on client, only smooth transform.
+                        moving_by_interp = False
+                        if state.net_target_x is not None and state.net_target_y is not None:
+                            tx = float(state.net_target_x)
+                            ty = float(state.net_target_y)
+                            cx = float(player.x)
+                            cy = float(player.y)
+                            drift_x = tx - cx
+                            drift_y = ty - cy
+                            drift = math.hypot(drift_x, drift_y)
+                            frame_remote_interp_sum_px += drift
+                            frame_remote_interp_max_px = max(frame_remote_interp_max_px, drift)
+                            frame_remote_interp_samples += 1
+                            if drift > 0.35:
+                                moving_by_interp = True
+                                lerp = min(1.0, dt * 24.0)
+                                player.x = cx + drift_x * lerp
+                                player.y = cy + drift_y * lerp
+                            else:
+                                player.x = tx
+                                player.y = ty
+                        if moving_by_interp:
+                            if state.net_target_walk_time is not None:
+                                target_wt = float(state.net_target_walk_time)
+                                predicted_wt = player.walk_time + dt * self._config.sprite_sheet.anim_fps
+                                player.walk_time = predicted_wt + (target_wt - predicted_wt) * min(1.0, dt * 22.0)
+                            else:
+                                player.walk_time += dt * self._config.sprite_sheet.anim_fps
+                        elif state.net_target_walk_time is not None:
+                            target_wt = float(state.net_target_walk_time)
+                            player.walk_time = player.walk_time + (target_wt - player.walk_time) * min(1.0, dt * 24.0)
+                        current_frames = frames_by_dir[player.facing]
+                        frame_index = int(player.walk_time) % len(current_frames)
+                        current_frame = current_frames[frame_index]
+                        display_frame = current_frame
+                        if ride_frames_by_dir is not None:
+                            ride_frames = ride_frames_by_dir.get(player.facing)
+                            if ride_frames:
+                                display_frame = ride_frames[frame_index % len(ride_frames)]
+                        self._last_player_sprite_size = (display_frame.get_width(), display_frame.get_height())
+                        moving = player.walk_time > 0.001
+                        bob = math.sin(player.walk_time * 2.0 * math.pi / len(current_frames)) * (2 if moving else 0)
+                        jump_y = player.jump_offset()
+                        player_center = self._center_for_display_frame(
+                            base_frame=current_frame,
+                            display_frame=display_frame,
+                            player_x=player.x,
+                            player_y=player.y,
+                        )
+                        left_facing = player.facing in {Direction.LEFT, Direction.UP_LEFT, Direction.DOWN_LEFT}
+                        render_item = (player_center, display_frame, bob + jump_y, left_facing)
+                        player_portraits[player_id] = display_frame
+                        if is_local:
+                            local_render = render_item
+                            local_wearing_backpack = wearing_backpack
+                        else:
+                            extra_renders.append(render_item)
+                        continue
 
                     pre_frames = frames_by_dir[player.facing]
                     pre_sprite_w = pre_frames[0].get_width()
                     pre_sprite_h = pre_frames[0].get_height()
-                    # All client-side players (local prediction + remote simulation) use
-                    # host-sent base speed so movement is identical on all machines.
-                    if (predict_local_client_player or is_simulated_remote) and self._net_host_bspd > 0:
+                    # In client mode local player prediction should match host base speed.
+                    if predict_local_client_player and self._net_host_bspd > 0:
                         base_speed = self._net_host_bspd
                     else:
                         base_speed = min(width, height) * self._config.sprite_sheet.move_speed_ratio
@@ -2067,35 +2122,29 @@ class GameSession:
                         max_x=world.width - sprite_w,
                         max_y=world.height - sprite_h,
                     )
-                    if not is_simulated_remote:
-                        # Grab target detection only for local players; relay sets
-                        # grabbed_object_id for remote players directly.
-                        self._update_grab_target_state(
-                            holding_pickup=drag_hold,
-                            player=player,
-                            sprite_w=sprite_w,
-                            sprite_h=sprite_h,
-                            world=world,
-                            object_sprites=object_sprites,
-                            inventory=inventory,
-                        )
+                    self._update_grab_target_state(
+                        holding_pickup=drag_hold,
+                        player=player,
+                        sprite_w=sprite_w,
+                        sprite_h=sprite_h,
+                        world=world,
+                        object_sprites=object_sprites,
+                        inventory=inventory,
+                    )
                     self._update_standing_platform(player, sprite_w, sprite_h, world, object_sprites)
                     if landed:
                         self._try_land_on_platform(player, sprite_w, sprite_h, world, object_sprites)
-                    if not is_simulated_remote:
-                        # _resolve_blocking_collisions can push objects as a side effect;
-                        # skip for remote simulation to avoid double-push divergence.
-                        self._resolve_blocking_collisions(
-                            player=player,
-                            prev_x=prev_x,
-                            prev_y=prev_y,
-                            sprite_w=sprite_w,
-                            sprite_h=sprite_h,
-                            world=world,
-                            object_sprites=object_sprites,
-                            inventory=inventory,
-                            is_running=is_running,
-                        )
+                    self._resolve_blocking_collisions(
+                        player=player,
+                        prev_x=prev_x,
+                        prev_y=prev_y,
+                        sprite_w=sprite_w,
+                        sprite_h=sprite_h,
+                        world=world,
+                        object_sprites=object_sprites,
+                        inventory=inventory,
+                        is_running=is_running,
+                    )
                     self._resolve_room_wall_collisions(
                         player=player,
                         prev_x=prev_x,
@@ -2104,15 +2153,14 @@ class GameSession:
                         sprite_h=sprite_h,
                         world=world,
                     )
-                    if not is_simulated_remote:
-                        self._resolve_player_collisions(
-                            player_id=player_id,
-                            player=player,
-                            prev_x=prev_x,
-                            prev_y=prev_y,
-                            sprite_w=sprite_w,
-                            sprite_h=sprite_h,
-                        )
+                    self._resolve_player_collisions(
+                        player_id=player_id,
+                        player=player,
+                        prev_x=prev_x,
+                        prev_y=prev_y,
+                        sprite_w=sprite_w,
+                        sprite_h=sprite_h,
+                    )
                     self._update_grabbed_object_drag(
                         player=player,
                         prev_x=prev_x,
@@ -2124,20 +2172,6 @@ class GameSession:
                         inventory=inventory,
                         holding_pickup=drag_hold,
                     )
-
-                    # After local simulation, snap to host-authoritative position if drift
-                    # has accumulated (speed mismatch, rounding, different collision result).
-                    # Threshold is generous so micro-jitter never triggers a visible jump.
-                    if is_simulated_remote and state.net_target_x is not None and state.net_target_y is not None:
-                        _sim_tx = float(state.net_target_x)
-                        _sim_ty = float(state.net_target_y)
-                        _sim_drift = math.hypot(_sim_tx - player.x, _sim_ty - player.y)
-                        frame_remote_interp_sum_px += _sim_drift
-                        frame_remote_interp_max_px = max(frame_remote_interp_max_px, _sim_drift)
-                        frame_remote_interp_samples += 1
-                        if _sim_drift > 8.0:
-                            player.x = _sim_tx
-                            player.y = _sim_ty
 
                     current_frames = frames_by_dir[player.facing]
                     frame_index = int(player.walk_time) % len(current_frames)
@@ -2610,7 +2644,8 @@ class GameSession:
                 multiplayer_render_mode=(
                     "fast" if (browser.is_connected() and len(self._player_states) >= 2) else "full"
                 ),
-                dt=dt,
+                # On client we prefer immediate camera follow to avoid perceived input lag.
+                dt=(1.0 if browser.is_connected() else dt),
             )
 
             pygame.display.set_caption(
@@ -3196,7 +3231,6 @@ class GameSession:
                         int(inp_data[0]), int(inp_data[1]),
                         bool(inp_data[2]), float(inp_data[3]), bool(inp_data[4]),
                     )
-                    state_r.grabbed_object_id = str(inp_data[5]) if len(inp_data) >= 6 and inp_data[5] else None
                 except (TypeError, ValueError, IndexError):
                     continue
         now_mono = time.perf_counter()
@@ -3553,12 +3587,22 @@ class GameSession:
             else:
                 self._last_applied_objects_signature = objects_sig
         if isinstance(objects_payload, list):
+            current_by_id = {obj.object_id: obj for obj in world.objects}
+            local_state = self._player_states.get(self._LOCAL_PLAYER_ID) if client_mode else None
+            local_dragging_id = local_state.grabbed_object_id if local_state else None
             restored_objects: list[WorldObject] = []
             for raw_obj in objects_payload:
                 if not isinstance(raw_obj, dict):
                     continue
                 obj = self._world_object_from_payload(raw_obj)
                 if obj is not None:
+                    if local_dragging_id and obj.object_id == local_dragging_id:
+                        current_obj = current_by_id.get(local_dragging_id)
+                        if current_obj is not None:
+                            # Preserve local predicted drag coordinates; authoritative
+                            # correction is applied continuously via fast object channel.
+                            obj.x = float(current_obj.x)
+                            obj.y = float(current_obj.y)
                     restored_objects.append(obj)
             world.objects = restored_objects
             known_object_ids = {obj.object_id for obj in world.objects}
