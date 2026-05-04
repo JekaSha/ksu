@@ -197,6 +197,7 @@ class GameSession:
         self._network_object_targets: dict[str, tuple[float, float, float]] = {}
         self._network_last_sent_object_pos: dict[str, tuple[float, float]] = {}
         self._network_last_sent_object_full_at: float = 0.0
+        self._net_host_bspd: float = 0.0
         self._last_applied_objects_signature: tuple[tuple[object, ...], ...] | None = None
         self._last_applied_network_revision: int | None = None
         # Reserved for compatibility with older saves/tests.
@@ -902,7 +903,6 @@ class GameSession:
                 break
         was_connected = False
         last_snapshot_sent_at = 0.0
-        last_position_sent_at = 0.0
         perf_enabled_raw = str(os.getenv("KSU_NET_PERF_LOG", "1")).strip().lower()
         perf_enabled = perf_enabled_raw not in {"0", "false", "off", "no"}
         perf_log_fp = None
@@ -2026,6 +2026,12 @@ class GameSession:
                             ty = float(state.net_target_y)
                             cx = float(player.x)
                             cy = float(player.y)
+                            # Dead reckoning: extrapolate ahead using tracked velocity.
+                            # net_last_rx_mono uses perf_counter; use same clock here.
+                            if state.net_last_rx_mono > 0 and (abs(state.net_vel_x) + abs(state.net_vel_y)) > 0.5:
+                                age = min(0.12, time.perf_counter() - state.net_last_rx_mono)
+                                tx += state.net_vel_x * age
+                                ty += state.net_vel_y * age
                             drift_x = tx - cx
                             drift_y = ty - cy
                             drift = math.hypot(drift_x, drift_y)
@@ -2034,8 +2040,7 @@ class GameSession:
                             frame_remote_interp_samples += 1
                             if drift > 0.35:
                                 moving_by_interp = True
-                                # Fast but still visually stable reconcile.
-                                lerp = min(1.0, dt * 18.0)
+                                lerp = min(1.0, dt * 30.0)
                                 player.x = cx + drift_x * lerp
                                 player.y = cy + drift_y * lerp
                             else:
@@ -2082,11 +2087,12 @@ class GameSession:
                     pre_frames = frames_by_dir[player.facing]
                     pre_sprite_w = pre_frames[0].get_width()
                     pre_sprite_h = pre_frames[0].get_height()
-                    speed = (
-                        min(width, height)
-                        * self._config.sprite_sheet.move_speed_ratio
-                        * player.stats.speed_multiplier()
-                    )
+                    # In client mode use host-sent base speed so movement matches exactly.
+                    if predict_local_client_player and self._net_host_bspd > 0:
+                        base_speed = self._net_host_bspd
+                    else:
+                        base_speed = min(width, height) * self._config.sprite_sheet.move_speed_ratio
+                    speed = base_speed * player.stats.speed_multiplier()
                     speed *= run_boost
                     if state.active_ride_item_id:
                         speed *= 3.0
@@ -2654,11 +2660,9 @@ class GameSession:
 
             if host_started and lan_host.connected_clients() > 0:
                 connected = lan_host.connected_clients()
-                # Position sync stays frequent but throttles under higher client counts.
-                position_interval_sec = 0.03 if connected >= 6 else 0.02
-                if now - last_position_sent_at >= position_interval_sec:
-                    lan_host.broadcast_positions(self._build_position_update(world))
-                    last_position_sent_at = now
+                # Send positions every frame — no throttle. LAN bandwidth is abundant;
+                # the TCP TX queue in lan_presence drops oldest frames under pressure.
+                lan_host.broadcast_positions(self._build_position_update(world))
                 # Full state sync for mutable world/player state:
                 # immediate push on mutation + adaptive periodic cadence under load.
                 if connected >= 9:
@@ -3140,6 +3144,15 @@ class GameSession:
             }
             for pid, s in self._player_states.items()
         ]
+        # Monotonic send timestamp lets the client measure data age.
+        # Base speed (pixels/sec without ride/run boost) lets client match host speed.
+        send_st = time.perf_counter()
+        host_surf = pygame.display.get_surface()
+        if host_surf is not None:
+            hw, hh = host_surf.get_size()
+            host_bspd = round(min(hw, hh) * float(self._config.sprite_sheet.move_speed_ratio), 2)
+        else:
+            host_bspd = 0.0
         now_ts = time.time()
         emit_full_objects = (now_ts - float(self._network_last_sent_object_full_at)) >= 0.45
         dynamic_objects: list[dict[str, object]] = []
@@ -3168,7 +3181,7 @@ class GameSession:
         pos_payload: dict[str, object] = {"players": players}
         if dynamic_objects:
             pos_payload["objects"] = dynamic_objects
-        raw: dict[str, object] = {"type": "pos", "pos": pos_payload}
+        raw: dict[str, object] = {"type": "pos", "pos": pos_payload, "st": round(send_st, 4), "bspd": host_bspd}
         return (json.dumps(raw, ensure_ascii=True) + "\n").encode("utf-8")
 
     def _apply_position_update(
@@ -3181,11 +3194,16 @@ class GameSession:
         players = update.get("players")
         if not isinstance(players, list):
             return
+        # Extract host-side base speed so client matches host movement speed exactly.
+        host_bspd = float(update.get("bspd", 0.0))
+        if host_bspd > 0:
+            self._net_host_bspd = host_bspd
         assigned_remote_id = str(assigned_local_id).strip() if assigned_local_id else None
         if not assigned_remote_id:
             prev_raw = self._network_local_to_raw_player_ids.get(self._LOCAL_PLAYER_ID)
             if prev_raw:
                 assigned_remote_id = str(prev_raw).strip() or None
+        now_mono = time.perf_counter()
         for item in players:
             if not isinstance(item, dict):
                 continue
@@ -3204,36 +3222,33 @@ class GameSession:
                 state.net_target_y = target_y
                 state.net_target_walk_time = target_walk_time
                 if player_id == self._LOCAL_PLAYER_ID:
-                    # Local prediction reconciliation:
-                    # keep controls snappy and avoid hard snaps each network tick.
-                    cur_x = float(state.player.x)
-                    cur_y = float(state.player.y)
-                    drift_x = target_x - cur_x
-                    drift_y = target_y - cur_y
-                    drift = math.hypot(drift_x, drift_y)
-                    input_dx, input_dy, _h, _run, _ride = self._movement_inputs.get(
-                        self._LOCAL_PLAYER_ID, (0, 0, False, 1.0, False)
+                    self._reconcile_local_predicted_player(
+                        state=state,
+                        target_x=target_x,
+                        target_y=target_y,
                     )
-                    moving_local = abs(input_dx) > 0 or abs(input_dy) > 0
-                    if drift <= 0.7:
-                        pass
-                    elif moving_local and drift <= 18.0:
-                        state.player.x = cur_x + drift_x * 0.55
-                        state.player.y = cur_y + drift_y * 0.55
-                    else:
-                        state.player.x = target_x
-                        state.player.y = target_y
                 else:
-                    # Remote players on client: keep host position as target and
-                    # snap only when drift is very large (teleport/reconnect).
+                    # Dead reckoning: estimate velocity from consecutive position samples.
+                    if state.net_last_rx_mono > 0:
+                        dt_rx = now_mono - state.net_last_rx_mono
+                        if 0.005 < dt_rx < 0.5:
+                            prev_tx = float(state.net_target_x) if state.net_target_x is not None else float(state.player.x)
+                            prev_ty = float(state.net_target_y) if state.net_target_y is not None else float(state.player.y)
+                            new_vx = (target_x - prev_tx) / dt_rx
+                            new_vy = (target_y - prev_ty) / dt_rx
+                            alpha = 0.5
+                            state.net_vel_x = state.net_vel_x * (1 - alpha) + new_vx * alpha
+                            state.net_vel_y = state.net_vel_y * (1 - alpha) + new_vy * alpha
+                    state.net_last_rx_mono = now_mono
+                    # Hard snap on very large drift (teleport / reconnect).
                     drift = math.hypot(target_x - float(state.player.x), target_y - float(state.player.y))
                     if drift >= 48.0:
                         state.player.x = target_x
                         state.player.y = target_y
                         state.player.walk_time = target_walk_time
+                        state.net_vel_x = 0.0
+                        state.net_vel_y = 0.0
                 state.player.facing = Direction(str(item.get("f", state.player.facing.value)))
-                if player_id == self._LOCAL_PLAYER_ID:
-                    state.player.walk_time = target_walk_time
                 state.player.jump_time_left = max(0.0, float(item.get("jt", state.player.jump_time_left)))
                 ride_item_id = str(item.get("ri", state.active_ride_item_id or "")).strip().lower()
                 state.active_ride_item_id = ride_item_id or None
@@ -3297,6 +3312,60 @@ class GameSession:
                 continue
             obj.x = cx + dx * lerp
             obj.y = cy + dy * lerp
+
+    def _reconcile_local_predicted_player(
+        self,
+        *,
+        state: SessionPlayerState,
+        target_x: float,
+        target_y: float,
+    ) -> None:
+        """Client-side prediction reconcile for local player.
+
+        Keep local movement smooth (especially fast ride states) while still converging
+        to host-authoritative coordinates.
+        """
+        cur_x = float(state.player.x)
+        cur_y = float(state.player.y)
+        drift_x = target_x - cur_x
+        drift_y = target_y - cur_y
+        drift = math.hypot(drift_x, drift_y)
+        input_dx, input_dy, _h, _run, _ride = self._movement_inputs.get(
+            self._LOCAL_PLAYER_ID, (0, 0, False, 1.0, False)
+        )
+        moving_local = abs(input_dx) > 0 or abs(input_dy) > 0
+        riding = bool(state.active_ride_item_id)
+        if moving_local:
+            # Higher tolerance while moving/accelerating (e.g. skateboard).
+            near = 1.2
+            soft = 28.0 if riding else 20.0
+            medium = 84.0 if riding else 56.0
+            if drift <= near:
+                return
+            if drift <= soft:
+                k = 0.55
+            elif drift <= medium:
+                k = 0.80
+            else:
+                state.player.x = target_x
+                state.player.y = target_y
+                return
+        else:
+            near = 0.7
+            soft = 18.0
+            medium = 48.0
+            if drift <= near:
+                return
+            if drift <= soft:
+                k = 0.60
+            elif drift <= medium:
+                k = 0.88
+            else:
+                state.player.x = target_x
+                state.player.y = target_y
+                return
+        state.player.x = cur_x + drift_x * k
+        state.player.y = cur_y + drift_y * k
 
     def _build_network_snapshot(self, world: WorldMap, *, revision: int = 0) -> dict:
         players: list[dict[str, object]] = []
@@ -3443,7 +3512,13 @@ class GameSession:
                 state.net_target_x = net_x
                 state.net_target_y = net_y
                 state.net_target_walk_time = net_walk_time
-                if client_mode and player_id != self._LOCAL_PLAYER_ID:
+                if client_mode and player_id == self._LOCAL_PLAYER_ID:
+                    self._reconcile_local_predicted_player(
+                        state=state,
+                        target_x=net_x,
+                        target_y=net_y,
+                    )
+                elif client_mode:
                     drift = math.hypot(net_x - float(state.player.x), net_y - float(state.player.y))
                     if drift >= 48.0:
                         state.player.x = net_x
@@ -3454,7 +3529,7 @@ class GameSession:
                     state.player.y = net_y
                 facing_raw = str(item.get("facing", state.player.facing.value))
                 state.player.facing = Direction(facing_raw)
-                if (not client_mode) or player_id == self._LOCAL_PLAYER_ID:
+                if not client_mode:
                     state.player.walk_time = net_walk_time
                 state.player.jump_time_left = max(0.0, float(item.get("jump_time_left", state.player.jump_time_left)))
                 ride_item_id = str(item.get("ride_item_id", state.active_ride_item_id or "")).strip().lower()

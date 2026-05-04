@@ -23,3 +23,6 @@ class SessionPlayerState:
     door_overlap_ids: set[str] = field(default_factory=set)
     active_area_id: str | None = None
     last_player_sprite_size: tuple[int, int] = (100, 120)
+    net_vel_x: float = 0.0
+    net_vel_y: float = 0.0
+    net_last_rx_mono: float = 0.0
