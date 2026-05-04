@@ -49,6 +49,8 @@ class RenderCache:
     fog_overlay_surf: pygame.Surface | None = None
     ui_lock_text: dict[tuple[int, int, int, str], pygame.Surface] = field(default_factory=dict)
     ui_portrait_scale: dict[tuple[int, int], pygame.Surface] = field(default_factory=dict)
+    player_shadow: dict[tuple[int, int, tuple[int, int, int, int]], pygame.Surface] = field(default_factory=dict)
+    player_visible_rect: dict[tuple[int, int], pygame.Rect] = field(default_factory=dict)
 
 
 class WorldRenderer:
@@ -91,6 +93,7 @@ class WorldRenderer:
         lan_menu_lines: list[str] | None = None,
         character_picker: dict[str, object] | None = None,
         fog_quality: str = "full",
+        multiplayer_render_mode: str = "full",
     ) -> None:
         width, height = screen.get_size()
         camera = self._build_camera(world, width, height, player_pos)
@@ -134,26 +137,49 @@ class WorldRenderer:
         self._draw_spray_tags(world_layer, camera, world, spray_tags, object_sprites, target_kind="door")
         for cur_pos, cur_frame, cur_bob, cur_left_facing in all_players:
             self._draw_player(world_layer, camera, cur_pos, cur_frame, cur_bob, cur_left_facing)
-        for cur_pos, cur_frame, cur_bob, _cur_left_facing in all_players:
+        mode = str(multiplayer_render_mode or "full").strip().lower()
+        if mode == "fast":
+            # LAN optimization: keep strict occlusion only for local player to avoid
+            # O(players * occluders/openings) passes that cause spikes with many peers.
             self._draw_objects_occluder_pass(
                 world_layer,
                 occluders,
                 camera,
-                cur_pos,
-                cur_frame,
-                cur_bob,
+                player_pos,
+                player_frame,
+                player_bob,
             )
-        for cur_pos, cur_frame, cur_bob, _cur_left_facing in all_players:
             self._draw_top_openings_foreground(
                 world_layer,
                 camera,
                 world,
                 wall_sprites,
                 objects,
-                cur_pos,
-                cur_frame,
-                cur_bob,
+                player_pos,
+                player_frame,
+                player_bob,
             )
+        else:
+            for cur_pos, cur_frame, cur_bob, _cur_left_facing in all_players:
+                self._draw_objects_occluder_pass(
+                    world_layer,
+                    occluders,
+                    camera,
+                    cur_pos,
+                    cur_frame,
+                    cur_bob,
+                )
+            for cur_pos, cur_frame, cur_bob, _cur_left_facing in all_players:
+                self._draw_top_openings_foreground(
+                    world_layer,
+                    camera,
+                    world,
+                    wall_sprites,
+                    objects,
+                    cur_pos,
+                    cur_frame,
+                    cur_bob,
+                )
         # Keep wall graffiti strictly behind the character.
         # Re-drawing wall-top spray above player caused inconsistent head overlap
         # on some wall/opening combinations.
@@ -1637,15 +1663,27 @@ class WorldRenderer:
         shadow_w = int(sprite_w * 0.42 * stretch)
         shadow_h = self._config.shadow.height
         shadow_y_offset = 0  # Keep shadow below feet to avoid dark clipping on shoe edges.
-        shadow = pygame.Surface((shadow_w, shadow_h), pygame.SRCALPHA)
-        pygame.draw.ellipse(shadow, self._config.shadow.color, shadow.get_rect())
+        shadow_key = (int(shadow_w), int(shadow_h), tuple(self._config.shadow.color))
+        shadow = self._cache.player_shadow.get(shadow_key)
+        if shadow is None:
+            shadow = pygame.Surface((shadow_w, shadow_h), pygame.SRCALPHA)
+            pygame.draw.ellipse(shadow, self._config.shadow.color, shadow.get_rect())
+            if len(self._cache.player_shadow) >= 256:
+                self._cache.player_shadow.clear()
+            self._cache.player_shadow[shadow_key] = shadow
 
         # Anchor shadow to the visible sprite body, not full frame size:
         # some sheets have large transparent side padding.
         alpha_cutoff = max(1, self._config.sprite_sheet.alpha_component_cutoff)
-        visible = player_frame.get_bounding_rect(min_alpha=alpha_cutoff)
-        if visible.width <= 0 or visible.height <= 0:
-            visible = player_frame.get_rect()
+        rect_key = (id(player_frame), int(alpha_cutoff))
+        visible = self._cache.player_visible_rect.get(rect_key)
+        if visible is None:
+            visible = player_frame.get_bounding_rect(min_alpha=alpha_cutoff)
+            if visible.width <= 0 or visible.height <= 0:
+                visible = player_frame.get_rect()
+            if len(self._cache.player_visible_rect) >= 4096:
+                self._cache.player_visible_rect.clear()
+            self._cache.player_visible_rect[rect_key] = visible
         shadow_anchor_x = player_x + visible.centerx
         shadow_anchor_y = player_y + visible.bottom
 

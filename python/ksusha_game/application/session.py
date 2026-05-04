@@ -2630,6 +2630,9 @@ class GameSession:
                     if browser.is_connected()
                     else ("fast" if (host_started and lan_host.connected_clients() > 0) else "full")
                 ),
+                multiplayer_render_mode=(
+                    "fast" if (browser.is_connected() and len(self._player_states) >= 2) else "full"
+                ),
             )
 
             pygame.display.set_caption(
