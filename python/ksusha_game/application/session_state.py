@@ -10,6 +10,9 @@ from ksusha_game.domain.player import Player
 class SessionPlayerState:
     player: Player
     inventory: Inventory
+    net_target_x: float | None = None
+    net_target_y: float | None = None
+    net_target_walk_time: float | None = None
     active_ride_item_id: str | None = None
     standing_on_object_id: str | None = None
     grabbed_object_id: str | None = None
