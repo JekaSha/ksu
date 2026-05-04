@@ -5037,12 +5037,17 @@ class GameSession:
             except ValueError:
                 self._set_message("Некорректный ответ")
                 return True
-            world.remove_object(target.object_id)
             outcome = self._math_tasks.pick_answer(
                 player_id=player_id,
                 answer_value=answer_value,
                 now_ts=time.time(),
             )
+            assigned_to_other = bool(outcome.message and str(outcome.message).startswith("Этот ответ назначен игроку"))
+            if assigned_to_other:
+                self._relocate_math_answer_object(world, target)
+                outcome.message = "Это не твой результат"
+            elif outcome.clear_answers:
+                world.remove_object(target.object_id)
             self._apply_math_task_outcome(outcome, world)
             return True
 
@@ -5258,6 +5263,28 @@ class GameSession:
                 )
             )
             reserved.append(self._math_spawn_rect(x=x, y=y, width=70, height=70))
+
+    def _relocate_math_answer_object(self, world: WorldMap, obj: WorldObject) -> None:
+        if obj.kind != self._MATH_ANSWER_KIND:
+            return
+        point = self._find_free_math_spawn_point(
+            world,
+            width=max(1, int(obj.width)),
+            height=max(1, int(obj.height)),
+            min_gap=10,
+            reserved=[],
+        )
+        if point is None:
+            point = self._find_free_math_spawn_point(
+                world,
+                width=max(1, int(obj.width)),
+                height=max(1, int(obj.height)),
+                min_gap=0,
+                reserved=[],
+            )
+        if point is None:
+            point = self._random_math_spawn_point(world)
+        obj.x, obj.y = point
 
     def _next_math_object_id(self, *, prefix: str) -> str:
         self._math_spawn_seq += 1
