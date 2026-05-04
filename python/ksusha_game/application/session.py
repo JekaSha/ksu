@@ -194,6 +194,9 @@ class GameSession:
         self._math_rng = random.Random()
         self._network_raw_to_local_player_ids: dict[str, str] = {}
         self._network_local_to_raw_player_ids: dict[str, str] = {}
+        self._network_object_targets: dict[str, tuple[float, float, float]] = {}
+        self._network_last_sent_object_pos: dict[str, tuple[float, float]] = {}
+        self._network_last_sent_object_full_at: float = 0.0
         self._last_applied_objects_signature: tuple[tuple[object, ...], ...] | None = None
         self._last_applied_network_revision: int | None = None
         # Reserved for compatibility with older saves/tests.
@@ -1843,11 +1846,19 @@ class GameSession:
                     self._spray_tags.clear()
                     self._last_applied_objects_signature = None
                     self._last_applied_network_revision = None
+                    self._network_object_targets.clear()
+                    self._network_last_sent_object_pos.clear()
+                    self._network_last_sent_object_full_at = 0.0
                     self._surface_body_rect_cache.clear()
                     renderer.clear_render_cache()
                     self._set_message("Hot reload: assets/map reloaded")
                 except Exception as exc:
                     self._set_message(f"Hot reload failed: {exc}")
+
+            if browser.is_connected():
+                self._interpolate_network_objects(world, dt=dt)
+            else:
+                self._network_object_targets.clear()
 
             self._rebuild_frame_caches(world)
 
@@ -2646,7 +2657,7 @@ class GameSession:
                 # Position sync stays frequent but throttles under higher client counts.
                 position_interval_sec = 0.03 if connected >= 6 else 0.02
                 if now - last_position_sent_at >= position_interval_sec:
-                    lan_host.broadcast_positions(self._build_position_update())
+                    lan_host.broadcast_positions(self._build_position_update(world))
                     last_position_sent_at = now
                 # Full state sync for mutable world/player state:
                 # immediate push on mutation + adaptive periodic cadence under load.
@@ -3115,7 +3126,7 @@ class GameSession:
             return "host:p1"
         return raw_id
 
-    def _build_position_update(self) -> bytes:
+    def _build_position_update(self, world: WorldMap) -> bytes:
         """Build a compact per-frame position-only payload, pre-serialized to bytes."""
         players = [
             {
@@ -3129,7 +3140,35 @@ class GameSession:
             }
             for pid, s in self._player_states.items()
         ]
-        raw: dict[str, object] = {"type": "pos", "pos": {"players": players}}
+        now_ts = time.time()
+        emit_full_objects = (now_ts - float(self._network_last_sent_object_full_at)) >= 0.45
+        dynamic_objects: list[dict[str, object]] = []
+        known_object_ids: set[str] = set()
+        for obj in world.objects:
+            object_id = str(obj.object_id).strip()
+            if not object_id:
+                continue
+            known_object_ids.add(object_id)
+            # Door geometry is static; keep it in snapshot channel only.
+            if obj.kind == "door":
+                continue
+            ox = round(float(obj.x), 2)
+            oy = round(float(obj.y), 2)
+            prev = self._network_last_sent_object_pos.get(object_id)
+            changed = prev is None or abs(prev[0] - ox) >= 0.01 or abs(prev[1] - oy) >= 0.01
+            if changed or emit_full_objects:
+                dynamic_objects.append({"id": object_id, "x": ox, "y": oy})
+            self._network_last_sent_object_pos[object_id] = (ox, oy)
+        # Clean up removed objects from send-cache.
+        for stale_id in list(self._network_last_sent_object_pos.keys()):
+            if stale_id not in known_object_ids:
+                self._network_last_sent_object_pos.pop(stale_id, None)
+        if emit_full_objects:
+            self._network_last_sent_object_full_at = now_ts
+        pos_payload: dict[str, object] = {"players": players}
+        if dynamic_objects:
+            pos_payload["objects"] = dynamic_objects
+        raw: dict[str, object] = {"type": "pos", "pos": pos_payload}
         return (json.dumps(raw, ensure_ascii=True) + "\n").encode("utf-8")
 
     def _apply_position_update(
@@ -3200,6 +3239,64 @@ class GameSession:
                 state.active_ride_item_id = ride_item_id or None
             except Exception:
                 continue
+
+        objects_payload = update.get("objects")
+        if isinstance(objects_payload, list):
+            by_id = {obj.object_id: obj for obj in world.objects}
+            now_mono = time.perf_counter()
+            for item in objects_payload:
+                if not isinstance(item, dict):
+                    continue
+                object_id = str(item.get("id", "")).strip()
+                if not object_id:
+                    continue
+                obj = by_id.get(object_id)
+                if obj is None:
+                    continue
+                try:
+                    tx = float(item.get("x", obj.x))
+                    ty = float(item.get("y", obj.y))
+                except (TypeError, ValueError):
+                    continue
+                self._network_object_targets[object_id] = (tx, ty, now_mono)
+                # Hard snap only on very large drift (teleport / reconnect).
+                if math.hypot(float(obj.x) - tx, float(obj.y) - ty) >= 96.0:
+                    obj.x = tx
+                    obj.y = ty
+            # Keep only currently known objects.
+            for stale_id in list(self._network_object_targets.keys()):
+                if stale_id not in by_id:
+                    self._network_object_targets.pop(stale_id, None)
+
+    def _interpolate_network_objects(self, world: WorldMap, *, dt: float) -> None:
+        if not self._network_object_targets:
+            return
+        by_id = {obj.object_id: obj for obj in world.objects}
+        lerp = min(1.0, max(0.0, float(dt) * 14.0))
+        now_mono = time.perf_counter()
+        for object_id, target in list(self._network_object_targets.items()):
+            obj = by_id.get(object_id)
+            if obj is None:
+                self._network_object_targets.pop(object_id, None)
+                continue
+            tx, ty, set_at = target
+            cx = float(obj.x)
+            cy = float(obj.y)
+            dx = tx - cx
+            dy = ty - cy
+            drift = math.hypot(dx, dy)
+            if drift <= 0.08:
+                obj.x = tx
+                obj.y = ty
+                # Target reached: drop quickly to keep map small.
+                self._network_object_targets.pop(object_id, None)
+                continue
+            # Time out stale targets so old packets do not keep pulling objects.
+            if (now_mono - float(set_at)) > 1.2:
+                self._network_object_targets.pop(object_id, None)
+                continue
+            obj.x = cx + dx * lerp
+            obj.y = cy + dy * lerp
 
     def _build_network_snapshot(self, world: WorldMap, *, revision: int = 0) -> dict:
         players: list[dict[str, object]] = []
@@ -3397,6 +3494,9 @@ class GameSession:
                     restored_objects.append(obj)
             world.objects = restored_objects
             known_object_ids = {obj.object_id for obj in world.objects}
+            for stale_id in list(self._network_object_targets.keys()):
+                if stale_id not in known_object_ids:
+                    self._network_object_targets.pop(stale_id, None)
             for state in self._player_states.values():
                 if state.grabbed_object_id and state.grabbed_object_id not in known_object_ids:
                     state.grabbed_object_id = None
