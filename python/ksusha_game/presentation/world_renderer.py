@@ -88,6 +88,7 @@ class WorldRenderer:
         player_portraits: dict[str, pygame.Surface] | None = None,
         lan_menu_lines: list[str] | None = None,
         character_picker: dict[str, object] | None = None,
+        fog_quality: str = "full",
     ) -> None:
         width, height = screen.get_size()
         camera = self._build_camera(world, width, height, player_pos)
@@ -168,7 +169,7 @@ class WorldRenderer:
             self._draw_object_labels(world_layer, camera, objects, object_sprites)
 
         fog_center = (player_pos[0] - camera.x, player_pos[1] - camera.y)
-        world_layer = self._apply_fog(world_layer, world, fog_center)
+        world_layer = self._apply_fog(world_layer, world, fog_center, quality=fog_quality)
         screen.blit(world_layer, (0, 0))
         self._draw_inventory(screen, inventory, object_sprites)
         control_hints_top = 54
@@ -1826,6 +1827,7 @@ class WorldRenderer:
     ) -> None:
         if not spray_tags:
             return
+        view = pygame.Rect(0, 0, camera.width, camera.height)
         for tag in spray_tags:
             if tag.target_kind != target_kind:
                 continue
@@ -1840,9 +1842,11 @@ class WorldRenderer:
             frame = frames[max(0, min(len(frames) - 1, int(tag.frame_index)))]
             draw_w = max(1, int(tag.width))
             draw_h = max(1, int(tag.height))
-            scaled = self._scaled_spray_frame(frame, draw_w, draw_h)
             gx = int(tag.x - camera.x)
             gy = int(tag.y - camera.y)
+            if not pygame.Rect(gx, gy, draw_w, draw_h).colliderect(view):
+                continue
+            scaled = self._scaled_spray_frame(frame, draw_w, draw_h)
             screen.blit(scaled, (gx, gy))
 
     def _scaled_spray_frame(
@@ -2027,6 +2031,8 @@ class WorldRenderer:
         world_layer: pygame.Surface,
         world: WorldMap,
         center: tuple[float, float],
+        *,
+        quality: str = "full",
     ) -> pygame.Surface:
         fog = world.fog
         if not fog.enabled:
@@ -2038,16 +2044,20 @@ class WorldRenderer:
         cy = int(center[1])
         transition = max(0, int(fog.transition))
 
+        mode = str(quality or "full").strip().lower()
+        if mode == "off":
+            return world_layer
         # Compute blurs into pre-allocated surfaces (no new allocations on steady frames).
+        # In fast mode we keep only medium band to reduce frame spikes in multiplayer.
         medium_blur = self._blur_surface_into(world_layer, fog.medium_blur_scale, "medium")
-        strong_blur = self._blur_surface_into(world_layer, fog.far_blur_scale, "strong")
-        grayscale_far = self._grayscale_surface_cached(strong_blur)
-
-        # Apply blurred bands directly onto world_layer (no full-screen copy needed).
-        # All blurs are computed from world_layer before any writes, so in-place is safe.
         self._blit_square_band(world_layer, medium_blur, (cx, cy), near, mid, transition)
-        self._blit_square_band(world_layer, strong_blur, (cx, cy), mid, dark, transition)
-        self._blit_square_band(world_layer, grayscale_far, (cx, cy), far, dark, transition)
+        if mode != "fast":
+            strong_blur = self._blur_surface_into(world_layer, fog.far_blur_scale, "strong")
+            grayscale_far = self._grayscale_surface_cached(strong_blur)
+            # Apply blurred bands directly onto world_layer (no full-screen copy needed).
+            # All blurs are computed from world_layer before any writes, so in-place is safe.
+            self._blit_square_band(world_layer, strong_blur, (cx, cy), mid, dark, transition)
+            self._blit_square_band(world_layer, grayscale_far, (cx, cy), far, dark, transition)
 
         fog_overlay = self._build_fog_overlay_cached(
             size=world_layer.get_size(),
