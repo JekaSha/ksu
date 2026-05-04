@@ -194,7 +194,7 @@ class GameSession:
         self._math_rng = random.Random()
         self._network_raw_to_local_player_ids: dict[str, str] = {}
         self._network_local_to_raw_player_ids: dict[str, str] = {}
-        self._network_object_targets: dict[str, tuple[float, float, float]] = {}
+        self._network_object_targets: dict[str, dict[str, float]] = {}
         self._network_last_sent_object_pos: dict[str, tuple[float, float]] = {}
         self._network_last_sent_object_full_at: float = 0.0
         self._net_host_bspd: float = 0.0
@@ -2024,6 +2024,16 @@ class GameSession:
                         if state.net_target_x is not None and state.net_target_y is not None:
                             tx = float(state.net_target_x)
                             ty = float(state.net_target_y)
+                            now_interp = time.perf_counter()
+                            if state.net_target_at is not None:
+                                age = max(0.0, now_interp - float(state.net_target_at))
+                            else:
+                                age = 0.0
+                            gap_ema = max(1.0 / 90.0, min(0.20, float(state.net_update_gap_ema)))
+                            # Short extrapolation window helps hide uneven packet spacing.
+                            lead_time = min(age, gap_ema * 1.35)
+                            tx += float(state.net_velocity_x) * lead_time
+                            ty += float(state.net_velocity_y) * lead_time
                             cx = float(player.x)
                             cy = float(player.y)
                             drift_x = tx - cx
@@ -2034,7 +2044,15 @@ class GameSession:
                             frame_remote_interp_samples += 1
                             if drift > 0.35:
                                 moving_by_interp = True
-                                lerp = min(1.0, dt * 24.0)
+                                # Adaptive smoothing by drift size:
+                                # low drift => tighter follow, high drift => softer correction.
+                                if drift <= 6.0:
+                                    gain = 28.0
+                                elif drift <= 20.0:
+                                    gain = 18.0
+                                else:
+                                    gain = 12.0
+                                lerp = min(1.0, dt * gain)
                                 player.x = cx + drift_x * lerp
                                 player.y = cy + drift_y * lerp
                             else:
@@ -2662,11 +2680,11 @@ class GameSession:
                 # Full state sync for mutable world/player state:
                 # immediate push on mutation + adaptive periodic cadence under load.
                 if connected >= 9:
-                    snapshot_interval_sec = 0.36
+                    snapshot_interval_sec = 0.9
                 elif connected >= 6:
-                    snapshot_interval_sec = 0.3
+                    snapshot_interval_sec = 0.75
                 else:
-                    snapshot_interval_sec = 0.24
+                    snapshot_interval_sec = 0.6
                 if network_state_dirty:
                     network_state_revision += 1
                 if network_state_dirty or (now - last_snapshot_sent_at >= snapshot_interval_sec):
@@ -3020,6 +3038,7 @@ class GameSession:
             net_target_x=float(spawn_x),
             net_target_y=float(spawn_y),
             net_target_walk_time=0.0,
+            net_target_at=time.perf_counter(),
         )
         self._set_player_display_name(player_id, player_id)
         if team_id is not None:
@@ -3248,9 +3267,32 @@ class GameSession:
                 target_x = float(item.get("x", state.player.x))
                 target_y = float(item.get("y", state.player.y))
                 target_walk_time = float(item.get("wt", state.player.walk_time))
+                now_target_at = now_mono
+                prev_tx = state.net_target_x
+                prev_ty = state.net_target_y
+                prev_at = state.net_target_at
+                if (
+                    prev_tx is not None
+                    and prev_ty is not None
+                    and prev_at is not None
+                ):
+                    update_dt = max(1e-4, now_target_at - float(prev_at))
+                    # Ignore unreasonable deltas after reconnect/pause.
+                    if 0.004 <= update_dt <= 0.45:
+                        vx = (target_x - float(prev_tx)) / update_dt
+                        vy = (target_y - float(prev_ty)) / update_dt
+                        # Cap extreme jitter spikes in velocity estimation.
+                        speed = math.hypot(vx, vy)
+                        if speed <= 2200.0:
+                            state.net_velocity_x = vx
+                            state.net_velocity_y = vy
+                        state.net_update_gap_ema = (
+                            state.net_update_gap_ema * 0.84 + update_dt * 0.16
+                        )
                 state.net_target_x = target_x
                 state.net_target_y = target_y
                 state.net_target_walk_time = target_walk_time
+                state.net_target_at = now_target_at
                 if player_id == self._LOCAL_PLAYER_ID:
                     self._reconcile_local_predicted_player(
                         state=state,
@@ -3290,7 +3332,36 @@ class GameSession:
                     ty = float(item.get("y", obj.y))
                 except (TypeError, ValueError):
                     continue
-                self._network_object_targets[object_id] = (tx, ty, now_mono)
+                existing = self._network_object_targets.get(object_id)
+                vx = 0.0
+                vy = 0.0
+                gap_ema = 1.0 / 30.0
+                if existing:
+                    prev_x = float(existing.get("x", tx))
+                    prev_y = float(existing.get("y", ty))
+                    prev_t = float(existing.get("set_at", now_mono))
+                    prev_gap = float(existing.get("gap_ema", gap_ema))
+                    update_dt = max(1e-4, now_mono - prev_t)
+                    if 0.004 <= update_dt <= 0.45:
+                        cand_vx = (tx - prev_x) / update_dt
+                        cand_vy = (ty - prev_y) / update_dt
+                        cand_speed = math.hypot(cand_vx, cand_vy)
+                        if cand_speed <= 2600.0:
+                            vx = cand_vx
+                            vy = cand_vy
+                        gap_ema = prev_gap * 0.84 + update_dt * 0.16
+                    else:
+                        gap_ema = prev_gap
+                        vx = float(existing.get("vx", 0.0))
+                        vy = float(existing.get("vy", 0.0))
+                self._network_object_targets[object_id] = {
+                    "x": tx,
+                    "y": ty,
+                    "set_at": now_mono,
+                    "vx": vx,
+                    "vy": vy,
+                    "gap_ema": gap_ema,
+                }
                 # Hard snap only on very large drift (teleport / reconnect).
                 if math.hypot(float(obj.x) - tx, float(obj.y) - ty) >= 96.0:
                     obj.x = tx
@@ -3313,11 +3384,21 @@ class GameSession:
             if obj is None:
                 self._network_object_targets.pop(object_id, None)
                 continue
-            tx, ty, set_at = target
+            tx = float(target.get("x", obj.x))
+            ty = float(target.get("y", obj.y))
+            set_at = float(target.get("set_at", now_mono))
+            vel_x = float(target.get("vx", 0.0))
+            vel_y = float(target.get("vy", 0.0))
+            gap_ema = max(1.0 / 90.0, min(0.20, float(target.get("gap_ema", 1.0 / 30.0))))
+            target_age = max(0.0, now_mono - set_at)
+            # Adaptive lead: compensate packet cadence jitter with short extrapolation.
+            lead_time = min(target_age, gap_ema * 1.35)
+            tx_pred = tx + vel_x * lead_time
+            ty_pred = ty + vel_y * lead_time
             cx = float(obj.x)
             cy = float(obj.y)
-            dx = tx - cx
-            dy = ty - cy
+            dx = tx_pred - cx
+            dy = ty_pred - cy
             drift = math.hypot(dx, dy)
             if object_id == local_dragging_id:
                 # Client-side prediction is active for this object. Trust client position
@@ -3329,12 +3410,12 @@ class GameSession:
             else:
                 lerp = min(1.0, max(0.0, float(dt) * 40.0))
             if drift <= 0.08:
-                obj.x = tx
-                obj.y = ty
+                obj.x = tx_pred
+                obj.y = ty_pred
                 self._network_object_targets.pop(object_id, None)
                 continue
             # Time out stale targets so old packets do not keep pulling objects.
-            if (now_mono - float(set_at)) > 1.2:
+            if target_age > 1.2:
                 self._network_object_targets.pop(object_id, None)
                 continue
             obj.x = cx + dx * lerp
@@ -3361,19 +3442,23 @@ class GameSession:
             self._LOCAL_PLAYER_ID, (0, 0, False, 1.0, False)
         )
         moving_local = abs(input_dx) > 0 or abs(input_dy) > 0
+        moving_diagonal = abs(input_dx) > 0 and abs(input_dy) > 0
         riding = bool(state.active_ride_item_id)
         if moving_local:
-            # Higher tolerance while moving/accelerating (e.g. skateboard).
-            near = 1.2
-            soft = 28.0 if riding else 20.0
-            medium = 84.0 if riding else 56.0
+            # While moving we prioritize visual stability over strict correction.
+            # Diagonal + ride are the most sensitive to micro-corrections.
+            near = 1.8 if moving_diagonal else 1.2
+            soft = 36.0 if riding else (30.0 if moving_diagonal else 22.0)
+            medium = 120.0 if riding else (92.0 if moving_diagonal else 68.0)
             if drift <= near:
                 return
             if drift <= soft:
-                k = 0.55
+                # Very soft nudge to avoid camera jitter.
+                k = 0.12 if moving_diagonal else 0.16
             elif drift <= medium:
-                k = 0.80
+                k = 0.22 if moving_diagonal else 0.30
             else:
+                # Large desync (packet loss/reconnect): then snap.
                 state.player.x = target_x
                 state.player.y = target_y
                 return
@@ -3384,9 +3469,9 @@ class GameSession:
             if drift <= near:
                 return
             if drift <= soft:
-                k = 0.60
+                k = 0.35
             elif drift <= medium:
-                k = 0.88
+                k = 0.62
             else:
                 state.player.x = target_x
                 state.player.y = target_y
@@ -3533,12 +3618,18 @@ class GameSession:
             if state is None:
                 continue
             try:
+                now_target_at = time.perf_counter()
                 net_x = float(item.get("x", state.player.x))
                 net_y = float(item.get("y", state.player.y))
                 net_walk_time = float(item.get("walk_time", state.player.walk_time))
                 state.net_target_x = net_x
                 state.net_target_y = net_y
                 state.net_target_walk_time = net_walk_time
+                state.net_target_at = now_target_at
+                # Snapshot is authoritative state replacement; drop stale velocity
+                # so interpolation resumes from fresh packet deltas.
+                state.net_velocity_x = 0.0
+                state.net_velocity_y = 0.0
                 if client_mode and player_id == self._LOCAL_PLAYER_ID:
                     self._reconcile_local_predicted_player(
                         state=state,
