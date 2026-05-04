@@ -1962,7 +1962,9 @@ class GameSession:
                     # but keep world interactions authoritative on host.
                     local_prediction_blocks_interaction = bool(predict_local_client_player)
                     spray_holding = (holding_pickup and self._is_spray_item(selected_item)) and not local_prediction_blocks_interaction
-                    drag_hold = holding_pickup and not local_prediction_blocks_interaction
+                    # Object drag is always predicted locally — client simulates the same
+                    # physics as the host and reconciles against host position afterward.
+                    drag_hold = holding_pickup
 
                     wearing_backpack = self._inventory_has_item(inventory, "backpack")
                     player_character_id = self._player_character_id(player_id)
@@ -3287,7 +3289,9 @@ class GameSession:
         if not self._network_object_targets:
             return
         by_id = {obj.object_id: obj for obj in world.objects}
-        lerp = min(1.0, max(0.0, float(dt) * 14.0))
+        # Which object is currently predicted locally by client drag?
+        local_state = self._player_states.get(self._LOCAL_PLAYER_ID)
+        local_dragging_id = local_state.grabbed_object_id if local_state else None
         now_mono = time.perf_counter()
         for object_id, target in list(self._network_object_targets.items()):
             obj = by_id.get(object_id)
@@ -3300,10 +3304,18 @@ class GameSession:
             dx = tx - cx
             dy = ty - cy
             drift = math.hypot(dx, dy)
+            if object_id == local_dragging_id:
+                # Client-side prediction is active for this object. Trust client position
+                # for small deviations; only correct on notable drift to avoid jitter.
+                if drift <= 6.0:
+                    self._network_object_targets.pop(object_id, None)
+                    continue
+                lerp = min(1.0, dt * 6.0)
+            else:
+                lerp = min(1.0, max(0.0, float(dt) * 40.0))
             if drift <= 0.08:
                 obj.x = tx
                 obj.y = ty
-                # Target reached: drop quickly to keep map small.
                 self._network_object_targets.pop(object_id, None)
                 continue
             # Time out stale targets so old packets do not keep pulling objects.
