@@ -976,6 +976,9 @@ class GameSession:
         auto_reconnect_active = False
         auto_reconnect_next_attempt_at: float | None = None
         auto_reconnect_attempts = 0
+        auto_reconnect_base_delay_sec = 0.8
+        auto_reconnect_max_delay_sec = 8.0
+        auto_reconnect_unstable_window_sec = 6.0
         connected_since_monotonic: float | None = None
         last_client_rx_monotonic: float | None = None
         connected_host_summary: str | None = None
@@ -1102,11 +1105,25 @@ class GameSession:
                     conn_log_fp.write(json.dumps(payload, ensure_ascii=False) + "\n")
                 except Exception:
                     pass
+            # Keep local follower-side connlogs and relay them to host once a
+            # connection is available again, so host can inspect root causes of drops.
+            pending = getattr(self, "_pending_connlog_relay", None)
+            if not isinstance(pending, deque):
+                pending = deque(maxlen=256)
+                self._pending_connlog_relay = pending
             if browser.is_connected():
+                while pending:
+                    try:
+                        browser.send_connlog_update(connlog=pending.popleft())
+                    except Exception:
+                        # Connection may flap mid-flush; keep unsent rows.
+                        break
                 try:
                     browser.send_connlog_update(connlog=payload)
                 except Exception:
-                    pass
+                    pending.append(payload)
+            else:
+                pending.append(payload)
 
         def _math_connection_context() -> dict[str, object]:
             round_state = self._math_tasks.current_round
@@ -1193,6 +1210,11 @@ class GameSession:
                     auto_reconnect_next_attempt_at = None
                     auto_reconnect_attempts = 0
                     disconnect_confirm_pending = False
+                    try:
+                        # Force host to emit fresh authoritative snapshot after reconnect.
+                        browser.send_action(action="request_world_sync")
+                    except Exception:
+                        pass
                     self._set_message(f"Connected to host | команда: {self._team_name(local_team_id)}")
                     _log_connection_event(
                         "connect_ok",
@@ -1246,14 +1268,33 @@ class GameSession:
                 self._reset_network_player_id_maps()
                 auto_reconnect_active = last_connected_target is not None
                 if auto_reconnect_active:
-                    auto_reconnect_next_attempt_at = now
-                    self._set_message("Связь потеряна. Пытаюсь переподключиться...")
+                    session_lifetime = (
+                        max(0.0, now - connected_since_monotonic)
+                        if connected_since_monotonic is not None
+                        else auto_reconnect_unstable_window_sec
+                    )
+                    if session_lifetime < auto_reconnect_unstable_window_sec:
+                        auto_reconnect_attempts += 1
+                    else:
+                        auto_reconnect_attempts = max(0, auto_reconnect_attempts - 1)
+                    delay = min(
+                        auto_reconnect_max_delay_sec,
+                        auto_reconnect_base_delay_sec * (2 ** max(0, auto_reconnect_attempts - 1)),
+                    )
+                    auto_reconnect_next_attempt_at = now + delay
+                    self._set_message(f"Связь потеряна. Переподключение через {delay:.1f}с")
                 else:
                     auto_reconnect_next_attempt_at = None
                     self._set_message("Связь потеряна")
                 _log_connection_event(
                     "connection_lost",
                     auto_reconnect=bool(auto_reconnect_active),
+                    reconnect_delay_sec=(
+                        round(max(0.0, auto_reconnect_next_attempt_at - now), 3)
+                        if auto_reconnect_next_attempt_at is not None
+                        else 0.0
+                    ),
+                    reconnect_attempt=int(auto_reconnect_attempts),
                     **_math_connection_context(),
                 )
             if is_connected and not browser.is_connecting():
@@ -1326,7 +1367,10 @@ class GameSession:
                     **_math_connection_context(),
                 )
                 connect_requested_target = reconnect_target
-                delay = min(6.0, 1.0 + (0.75 * max(0, auto_reconnect_attempts)))
+                delay = min(
+                    auto_reconnect_max_delay_sec,
+                    auto_reconnect_base_delay_sec * (2 ** max(0, auto_reconnect_attempts)),
+                )
                 auto_reconnect_next_attempt_at = now + delay
 
             events_started = time.perf_counter()
