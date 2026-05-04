@@ -137,49 +137,26 @@ class WorldRenderer:
         self._draw_spray_tags(world_layer, camera, world, spray_tags, object_sprites, target_kind="door")
         for cur_pos, cur_frame, cur_bob, cur_left_facing in all_players:
             self._draw_player(world_layer, camera, cur_pos, cur_frame, cur_bob, cur_left_facing)
-        mode = str(multiplayer_render_mode or "full").strip().lower()
-        if mode == "fast":
-            # LAN optimization: keep strict occlusion only for local player to avoid
-            # O(players * occluders/openings) passes that cause spikes with many peers.
+        for cur_pos, cur_frame, cur_bob, _cur_left_facing in all_players:
             self._draw_objects_occluder_pass(
                 world_layer,
                 occluders,
                 camera,
-                player_pos,
-                player_frame,
-                player_bob,
+                cur_pos,
+                cur_frame,
+                cur_bob,
             )
+        for cur_pos, cur_frame, cur_bob, _cur_left_facing in all_players:
             self._draw_top_openings_foreground(
                 world_layer,
                 camera,
                 world,
                 wall_sprites,
                 objects,
-                player_pos,
-                player_frame,
-                player_bob,
+                cur_pos,
+                cur_frame,
+                cur_bob,
             )
-        else:
-            for cur_pos, cur_frame, cur_bob, _cur_left_facing in all_players:
-                self._draw_objects_occluder_pass(
-                    world_layer,
-                    occluders,
-                    camera,
-                    cur_pos,
-                    cur_frame,
-                    cur_bob,
-                )
-            for cur_pos, cur_frame, cur_bob, _cur_left_facing in all_players:
-                self._draw_top_openings_foreground(
-                    world_layer,
-                    camera,
-                    world,
-                    wall_sprites,
-                    objects,
-                    cur_pos,
-                    cur_frame,
-                    cur_bob,
-                )
         # Keep wall graffiti strictly behind the character.
         # Re-drawing wall-top spray above player caused inconsistent head overlap
         # on some wall/opening combinations.
