@@ -3255,10 +3255,14 @@ class GameSession:
         if (
             snapshot_rev is not None
             and self._last_applied_network_revision is not None
-            and snapshot_rev == self._last_applied_network_revision
+            and snapshot_rev < self._last_applied_network_revision
         ):
+            # Drop only older/out-of-order snapshots.
             return
-        if snapshot_rev is not None:
+        if snapshot_rev is not None and (
+            self._last_applied_network_revision is None
+            or snapshot_rev > self._last_applied_network_revision
+        ):
             self._last_applied_network_revision = snapshot_rev
         payload = snapshot.get("players")
         if not isinstance(payload, list):
