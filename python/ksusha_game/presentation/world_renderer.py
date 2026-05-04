@@ -63,9 +63,14 @@ class WorldRenderer:
         self._menu_title_font = pygame.font.Font(None, 54)
         self._menu_body_font = pygame.font.Font(None, 36)
         self._cache = RenderCache()
+        # Stateful camera position — smoothed so position corrections never cause visible jerks.
+        self._cam_x: float | None = None
+        self._cam_y: float | None = None
 
     def clear_render_cache(self) -> None:
         self._cache = RenderCache()
+        self._cam_x = None
+        self._cam_y = None
 
     def render(
         self,
@@ -94,9 +99,10 @@ class WorldRenderer:
         character_picker: dict[str, object] | None = None,
         fog_quality: str = "full",
         multiplayer_render_mode: str = "full",
+        dt: float = 0.016,
     ) -> None:
         width, height = screen.get_size()
-        camera = self._build_camera(world, width, height, player_pos)
+        camera = self._build_camera(world, width, height, player_pos, dt)
         size = (width, height)
         world_layer = self._cache.world_layer
         if world_layer is None or world_layer.get_size() != size:
@@ -207,12 +213,25 @@ class WorldRenderer:
         view_w: int,
         view_h: int,
         player_pos: tuple[float, float],
+        dt: float = 0.016,
     ) -> Camera:
-        x = player_pos[0] - view_w / 2
-        y = player_pos[1] - view_h / 2
-        x = max(0.0, min(x, world.width - view_w))
-        y = max(0.0, min(y, world.height - view_h))
-        return Camera(x=x, y=y, width=view_w, height=view_h)
+        target_x = player_pos[0] - view_w / 2
+        target_y = player_pos[1] - view_h / 2
+        target_x = max(0.0, min(target_x, world.width - view_w))
+        target_y = max(0.0, min(target_y, world.height - view_h))
+        if self._cam_x is None or self._cam_y is None:
+            self._cam_x = target_x
+            self._cam_y = target_y
+        else:
+            # Fast follow that still absorbs sudden position corrections (reconciliation
+            # snaps, network corrections) without them appearing as screen jerks.
+            # At 60 fps: lerp ≈ 0.42 → correction of 8 px spreads over ~4 frames.
+            lerp = min(1.0, dt * 25.0)
+            self._cam_x += (target_x - self._cam_x) * lerp
+            self._cam_y += (target_y - self._cam_y) * lerp
+            self._cam_x = max(0.0, min(self._cam_x, world.width - view_w))
+            self._cam_y = max(0.0, min(self._cam_y, world.height - view_h))
+        return Camera(x=self._cam_x, y=self._cam_y, width=view_w, height=view_h)
 
     def _draw_outside_nonwalkable(
         self,
