@@ -3204,25 +3204,11 @@ class GameSession:
                 state.net_target_y = target_y
                 state.net_target_walk_time = target_walk_time
                 if player_id == self._LOCAL_PLAYER_ID:
-                    # Local prediction reconciliation:
-                    # keep controls snappy and avoid hard snaps each network tick.
-                    cur_x = float(state.player.x)
-                    cur_y = float(state.player.y)
-                    drift_x = target_x - cur_x
-                    drift_y = target_y - cur_y
-                    drift = math.hypot(drift_x, drift_y)
-                    input_dx, input_dy, _h, _run, _ride = self._movement_inputs.get(
-                        self._LOCAL_PLAYER_ID, (0, 0, False, 1.0, False)
+                    self._reconcile_local_predicted_player(
+                        state=state,
+                        target_x=target_x,
+                        target_y=target_y,
                     )
-                    moving_local = abs(input_dx) > 0 or abs(input_dy) > 0
-                    if drift <= 0.7:
-                        pass
-                    elif moving_local and drift <= 18.0:
-                        state.player.x = cur_x + drift_x * 0.55
-                        state.player.y = cur_y + drift_y * 0.55
-                    else:
-                        state.player.x = target_x
-                        state.player.y = target_y
                 else:
                     # Remote players on client: keep host position as target and
                     # snap only when drift is very large (teleport/reconnect).
@@ -3232,8 +3218,6 @@ class GameSession:
                         state.player.y = target_y
                         state.player.walk_time = target_walk_time
                 state.player.facing = Direction(str(item.get("f", state.player.facing.value)))
-                if player_id == self._LOCAL_PLAYER_ID:
-                    state.player.walk_time = target_walk_time
                 state.player.jump_time_left = max(0.0, float(item.get("jt", state.player.jump_time_left)))
                 ride_item_id = str(item.get("ri", state.active_ride_item_id or "")).strip().lower()
                 state.active_ride_item_id = ride_item_id or None
@@ -3297,6 +3281,60 @@ class GameSession:
                 continue
             obj.x = cx + dx * lerp
             obj.y = cy + dy * lerp
+
+    def _reconcile_local_predicted_player(
+        self,
+        *,
+        state: SessionPlayerState,
+        target_x: float,
+        target_y: float,
+    ) -> None:
+        """Client-side prediction reconcile for local player.
+
+        Keep local movement smooth (especially fast ride states) while still converging
+        to host-authoritative coordinates.
+        """
+        cur_x = float(state.player.x)
+        cur_y = float(state.player.y)
+        drift_x = target_x - cur_x
+        drift_y = target_y - cur_y
+        drift = math.hypot(drift_x, drift_y)
+        input_dx, input_dy, _h, _run, _ride = self._movement_inputs.get(
+            self._LOCAL_PLAYER_ID, (0, 0, False, 1.0, False)
+        )
+        moving_local = abs(input_dx) > 0 or abs(input_dy) > 0
+        riding = bool(state.active_ride_item_id)
+        if moving_local:
+            # Higher tolerance while moving/accelerating (e.g. skateboard).
+            near = 1.2
+            soft = 28.0 if riding else 20.0
+            medium = 84.0 if riding else 56.0
+            if drift <= near:
+                return
+            if drift <= soft:
+                k = 0.28
+            elif drift <= medium:
+                k = 0.45
+            else:
+                state.player.x = target_x
+                state.player.y = target_y
+                return
+        else:
+            near = 0.7
+            soft = 18.0
+            medium = 48.0
+            if drift <= near:
+                return
+            if drift <= soft:
+                k = 0.32
+            elif drift <= medium:
+                k = 0.58
+            else:
+                state.player.x = target_x
+                state.player.y = target_y
+                return
+        state.player.x = cur_x + drift_x * k
+        state.player.y = cur_y + drift_y * k
 
     def _build_network_snapshot(self, world: WorldMap, *, revision: int = 0) -> dict:
         players: list[dict[str, object]] = []
@@ -3443,7 +3481,13 @@ class GameSession:
                 state.net_target_x = net_x
                 state.net_target_y = net_y
                 state.net_target_walk_time = net_walk_time
-                if client_mode and player_id != self._LOCAL_PLAYER_ID:
+                if client_mode and player_id == self._LOCAL_PLAYER_ID:
+                    self._reconcile_local_predicted_player(
+                        state=state,
+                        target_x=net_x,
+                        target_y=net_y,
+                    )
+                elif client_mode:
                     drift = math.hypot(net_x - float(state.player.x), net_y - float(state.player.y))
                     if drift >= 48.0:
                         state.player.x = net_x
@@ -3454,7 +3498,7 @@ class GameSession:
                     state.player.y = net_y
                 facing_raw = str(item.get("facing", state.player.facing.value))
                 state.player.facing = Direction(facing_raw)
-                if (not client_mode) or player_id == self._LOCAL_PLAYER_ID:
+                if not client_mode:
                     state.player.walk_time = net_walk_time
                 state.player.jump_time_left = max(0.0, float(item.get("jump_time_left", state.player.jump_time_left)))
                 ride_item_id = str(item.get("ride_item_id", state.active_ride_item_id or "")).strip().lower()
