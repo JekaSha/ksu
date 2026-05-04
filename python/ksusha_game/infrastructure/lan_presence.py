@@ -91,6 +91,8 @@ class LanPresenceHost:
         self._remote_inputs: dict[str, tuple[int, int, bool, float, bool]] = {}
         self._remote_actions: list[tuple[str, str]] = []
         self._remote_perf: list[tuple[str, str, str, dict]] = []
+        self._remote_connlogs: list[tuple[str, str, str, dict]] = []
+        self._connection_events: list[dict[str, object]] = []
         self._enabled = False
         self._joinable = True
         # Pending outbound data for the background broadcast thread.
@@ -178,6 +180,8 @@ class LanPresenceHost:
             self._active_clients.clear()
             self._remote_inputs.clear()
             self._remote_perf.clear()
+            self._remote_connlogs.clear()
+            self._connection_events.clear()
         self._enabled = False
 
     def poll_events(self) -> list[HostEvent]:
@@ -199,6 +203,16 @@ class LanPresenceHost:
     def poll_remote_perf(self) -> list[tuple[str, str, str, dict]]:
         with self._lock:
             out, self._remote_perf = self._remote_perf, []
+        return out
+
+    def poll_remote_connlogs(self) -> list[tuple[str, str, str, dict]]:
+        with self._lock:
+            out, self._remote_connlogs = self._remote_connlogs, []
+        return out
+
+    def poll_connection_events(self) -> list[dict[str, object]]:
+        with self._lock:
+            out, self._connection_events = self._connection_events, []
         return out
 
     def broadcast_positions(self, payload_bytes: bytes) -> None:
@@ -313,6 +327,8 @@ class LanPresenceHost:
         client_player_id = ""
         client_player_name = ""
         client_player_team = "A"
+        disconnect_reason = ""
+        disconnect_detail = ""
         recv_buffer = bytearray()
         try:
             # Disable Nagle: inputs are tiny and latency matters more than throughput.
@@ -375,7 +391,24 @@ class LanPresenceHost:
             conn.sendall(self._encode_line(resp))
 
             if not accepted:
+                self._record_connection_event(
+                    "join_reject",
+                    client_key=client_key,
+                    client_ip=addr[0],
+                    client_port=int(addr[1]),
+                    reason=str(resp.get("reason", "join_reject")),
+                )
                 return
+
+            self._record_connection_event(
+                "join_accept",
+                client_key=client_key,
+                client_ip=addr[0],
+                client_port=int(addr[1]),
+                player_id=client_player_id,
+                player_name=client_player_name,
+                player_team=client_player_team,
+            )
 
             # Keep both recv/send operations responsive; large socket timeouts can
             # stall broadcast sendall() and produce visible remote movement jitter.
@@ -422,16 +455,43 @@ class LanPresenceHost:
                                 payload,
                             )
                         )
+                elif msg_type == "connlog":
+                    payload = data.get("connlog")
+                    if not isinstance(payload, dict):
+                        continue
+                    with self._lock:
+                        if len(self._remote_connlogs) >= 512:
+                            self._remote_connlogs.pop(0)
+                        self._remote_connlogs.append(
+                            (
+                                client_player_id,
+                                client_player_name,
+                                client_player_team,
+                                payload,
+                            )
+                        )
                 elif msg_type == "disconnect":
+                    disconnect_reason = "client_disconnect_message"
                     break
-        except (OSError, ValueError, json.JSONDecodeError):
-            pass
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            disconnect_reason = "connection_error"
+            disconnect_detail = f"{exc.__class__.__name__}: {exc}"
         finally:
+            if not disconnect_reason and self._stop.is_set():
+                disconnect_reason = "host_stop"
+            if not disconnect_reason:
+                disconnect_reason = "connection_closed"
             if accepted:
+                left_player_id = ""
+                left_player_name = ""
+                left_player_team = "A"
                 with self._lock:
                     prev = self._active_clients.pop(client_key, None)
                     if prev is not None:
                         self._remote_inputs.pop(prev.player_id, None)
+                        left_player_id = prev.player_id
+                        left_player_name = prev.player_name
+                        left_player_team = prev.player_team
                         self._events.append(
                             HostEvent(
                                 type="leave",
@@ -440,10 +500,33 @@ class LanPresenceHost:
                                 player_team=prev.player_team,
                             )
                         )
+                self._record_connection_event(
+                    "client_session_end",
+                    client_key=client_key,
+                    client_ip=addr[0],
+                    client_port=int(addr[1]),
+                    player_id=left_player_id or client_player_id,
+                    player_name=left_player_name or client_player_name,
+                    player_team=left_player_team or client_player_team,
+                    reason=disconnect_reason,
+                    detail=disconnect_detail,
+                )
             try:
                 conn.close()
             except Exception:
                 pass
+
+    def _record_connection_event(self, event: str, **payload: object) -> None:
+        row: dict[str, object] = {
+            "ts": time.time(),
+            "event": str(event).strip() or "event",
+        }
+        for key, value in payload.items():
+            row[str(key)] = value
+        with self._lock:
+            if len(self._connection_events) >= 512:
+                self._connection_events.pop(0)
+            self._connection_events.append(row)
 
     @staticmethod
     def _encode_line(payload: dict) -> bytes:
@@ -492,6 +575,7 @@ class LanServerBrowser:
         self._connect_thread: threading.Thread | None = None
         self._connect_result: tuple[bool, str] | None = None
         self._join_info: dict[str, object] | None = None
+        self._connection_events: list[dict[str, object]] = []
         # Track last sent input to avoid sending identical packets every frame.
         self._last_sent_input: tuple[int, int, bool, float, bool] | None = None
         self._outbound_queue: deque[bytes] = deque()
@@ -533,7 +617,24 @@ class LanServerBrowser:
     def is_connecting(self) -> bool:
         return self._connect_thread is not None and self._connect_thread.is_alive()
 
-    def disconnect(self) -> None:
+    def disconnect(
+        self,
+        *,
+        reason: str = "manual",
+        source: str = "api",
+        detail: str | None = None,
+    ) -> None:
+        had_connection = self._active_connection is not None or self._connected_server_id is not None
+        reason_token = str(reason).strip() or "manual"
+        if had_connection or reason_token not in {"manual", "reset_before_connect"}:
+            self._record_connection_event(
+                "disconnect",
+                reason=reason_token,
+                source=str(source).strip() or "api",
+                detail=(str(detail).strip() if detail else ""),
+                connected_server_id=self._connected_server_id,
+                assigned_player_id=self._assigned_player_id,
+            )
         self._connected_server_id = None
         self._assigned_player_id = None
         self._last_sent_input = None  # force re-send current input after reconnect
@@ -576,6 +677,11 @@ class LanServerBrowser:
         info = self._join_info
         self._join_info = None
         return info
+
+    def poll_connection_events(self) -> list[dict[str, object]]:
+        with self._lock:
+            out, self._connection_events = self._connection_events, []
+        return out
 
     def debug_stats(self) -> dict[str, int]:
         with self._send_lock:
@@ -630,6 +736,13 @@ class LanServerBrowser:
             return
         self._send_json({"type": "perf", "perf": perf, "ts": time.time()})
 
+    def send_connlog_update(self, *, connlog: dict) -> None:
+        if not self.is_connected():
+            return
+        if not isinstance(connlog, dict):
+            return
+        self._send_json({"type": "connlog", "connlog": connlog, "ts": time.time()})
+
     def poll_snapshot(self) -> dict | None:
         """Return the latest full-state snapshot received from host, or None."""
         with self._lock:
@@ -643,7 +756,16 @@ class LanServerBrowser:
         return pos
 
     def _connect_worker(self, entry: ServerEntry, player_name: str, team_id: str, timeout_sec: float) -> None:
-        self.disconnect()
+        self.disconnect(reason="reset_before_connect", source="connect_worker")
+        self._record_connection_event(
+            "connect_attempt",
+            server_id=entry.server_id,
+            host=entry.host,
+            port=int(entry.port),
+            host_name=entry.host_name,
+            player_name=player_name,
+            team_id=str(team_id).strip().upper() or "A",
+        )
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         recv_buffer = bytearray()
         try:
@@ -665,6 +787,7 @@ class LanServerBrowser:
                     sock.close()
                 except Exception:
                     pass
+                self._record_connection_event("connect_reject", reason=reason)
                 self._connect_result = (False, reason)
                 return
             assigned_player_id = str(data.get("player_id", "")).strip()
@@ -678,6 +801,12 @@ class LanServerBrowser:
                 "assigned_team_id": str(data.get("assigned_team_id", "")).strip().upper() or None,
                 "teams": data.get("teams"),
             }
+            self._record_connection_event(
+                "connect_ok",
+                server_id=entry.server_id,
+                assigned_player_id=self._assigned_player_id,
+                assigned_team_id=self._join_info.get("assigned_team_id"),
+            )
             self._connect_result = (True, "ok")
             self._rx_thread = threading.Thread(
                 target=self._run_connection_reader,
@@ -695,6 +824,11 @@ class LanServerBrowser:
                 sock.close()
             except Exception:
                 pass
+            self._record_connection_event(
+                "connect_error",
+                error_type=exc.__class__.__name__,
+                detail=str(exc),
+            )
             self._connect_result = (False, str(exc))
 
     def _run_connection_reader(self, recv_buffer: bytearray) -> None:
@@ -705,8 +839,17 @@ class LanServerBrowser:
             try:
                 conn.settimeout(0.08)
                 data = _recv_json_line(conn, recv_buffer)
-            except (OSError, ValueError, json.JSONDecodeError):
-                self.disconnect()
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                self._record_connection_event(
+                    "reader_error",
+                    error_type=exc.__class__.__name__,
+                    detail=str(exc),
+                )
+                self.disconnect(
+                    reason="reader_error",
+                    source="reader_thread",
+                    detail=f"{exc.__class__.__name__}: {exc}",
+                )
                 break
             if data is None or not isinstance(data, dict):
                 continue
@@ -740,8 +883,17 @@ class LanServerBrowser:
                 conn.sendall(payload)
                 with self._send_lock:
                     self._outbound_sent_count += 1
-            except OSError:
-                self.disconnect()
+            except OSError as exc:
+                self._record_connection_event(
+                    "writer_error",
+                    error_type=exc.__class__.__name__,
+                    detail=str(exc),
+                )
+                self.disconnect(
+                    reason="writer_error",
+                    source="writer_thread",
+                    detail=f"{exc.__class__.__name__}: {exc}",
+                )
                 break
 
     def _send_json(self, payload: dict) -> None:
@@ -757,6 +909,18 @@ class LanServerBrowser:
             self._outbound_queue.append(encoded)
             self._outbound_enqueued_count += 1
         self._outbound_event.set()
+
+    def _record_connection_event(self, event: str, **payload: object) -> None:
+        row: dict[str, object] = {
+            "ts": time.time(),
+            "event": str(event).strip() or "event",
+        }
+        for key, value in payload.items():
+            row[str(key)] = value
+        with self._lock:
+            if len(self._connection_events) >= 512:
+                self._connection_events.pop(0)
+            self._connection_events.append(row)
 
     def _run_listener(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

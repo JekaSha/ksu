@@ -179,6 +179,8 @@ class GameSession:
         self._player_teams: dict[str, str] = {}
         self._team_catalog: list[dict[str, str]] = [{"id": "A", "name": "Team A"}]
         self._player_character_ids: dict[str, str] = {}
+        self._disconnected_player_cache: dict[str, dict[str, object]] = {}
+        self._disconnected_player_ttl_sec: float = 180.0
         self._spray_tags: list[SprayTag] = []
         self._spray_frame_interval = 0.055
         self._room_item_use_counts: dict[tuple[str, str], int] = {}
@@ -914,6 +916,10 @@ class GameSession:
         perf_log_path: Path | None = None
         perf_client_log_fp = None
         perf_client_log_path: Path | None = None
+        conn_log_fp = None
+        conn_log_path: Path | None = None
+        conn_client_log_fp = None
+        conn_client_log_path: Path | None = None
         perf_window_started_at = time.monotonic()
         perf_frames = 0
         perf_frame_sum_ms = 0.0
@@ -949,21 +955,81 @@ class GameSession:
                 perf_dir.mkdir(parents=True, exist_ok=True)
                 perf_log_path = perf_dir / f"lan_perf_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
                 perf_log_fp = perf_log_path.open("a", encoding="utf-8", buffering=1)
+                conn_log_path = perf_dir / f"lan_connections_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+                conn_log_fp = conn_log_path.open("a", encoding="utf-8", buffering=1)
                 if host_started:
                     perf_client_log_path = perf_dir / f"lan_perf_clients_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
                     perf_client_log_fp = perf_client_log_path.open("a", encoding="utf-8", buffering=1)
+                    conn_client_log_path = perf_dir / f"lan_connections_clients_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+                    conn_client_log_fp = conn_client_log_path.open("a", encoding="utf-8", buffering=1)
                 self._set_message(f"NET PERF log: {perf_log_path}")
             except Exception:
                 perf_log_fp = None
                 perf_log_path = None
                 perf_client_log_fp = None
                 perf_client_log_path = None
+                conn_log_fp = None
+                conn_log_path = None
+                conn_client_log_fp = None
+                conn_client_log_path = None
         if host_started:
             self._set_message(f"LAN server visible: {local_host_name}:{server_port}")
         else:
             self._set_message("LAN server disabled: port busy")
         self._set_message("Выбери персонажа: Q/Enter (или Esc оставить текущего)")
         self._math_rng.seed(int(time.time() * 1000) & 0xFFFFFFFF)
+
+        def _log_connection_event(event: str, **fields: object) -> None:
+            payload = {
+                "ts": time.time(),
+                "event": str(event).strip() or "event",
+                "role": (
+                    "client"
+                    if browser.is_connected()
+                    else ("host" if host_started else "offline")
+                ),
+                "is_connected": bool(browser.is_connected()),
+                "is_connecting": bool(browser.is_connecting()),
+                "connected_server_id": browser.connected_server_id(),
+                "host_name": local_host_name,
+                "player_name": local_player_name,
+            }
+            for key, value in fields.items():
+                payload[str(key)] = value
+            if conn_log_fp is not None:
+                try:
+                    conn_log_fp.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+            if browser.is_connected():
+                try:
+                    browser.send_connlog_update(connlog=payload)
+                except Exception:
+                    pass
+
+        def _math_connection_context() -> dict[str, object]:
+            round_state = self._math_tasks.current_round
+            pending = self._math_tasks.active_pending_answer()
+            pending_expr = None
+            if pending is not None:
+                pending_expr = f"{pending.first_digit}{pending.operation}{pending.second_digit}=?"
+            return {
+                "math_active": bool(self._math_tasks.active),
+                "math_team_id": self._math_tasks.dispatcher_team_id,
+                "math_task_no": int(self._math_tasks.selected_task or 0),
+                "math_stage": (str(round_state.stage).strip() if round_state is not None else ""),
+                "math_solved_count": int(self._math_tasks.solved_count),
+                "math_queue_count": int(self._math_tasks.pending_count()),
+                "math_pending_answer_id": (int(pending.answer_id) if pending is not None else None),
+                "math_pending_assignee": (str(pending.assigned_player_id).strip() if pending is not None and pending.assigned_player_id is not None else ""),
+                "math_pending_expr": pending_expr or "",
+            }
+
+        _log_connection_event(
+            "session_start",
+            host_started=bool(host_started),
+            server_port=int(server_port),
+        )
 
         snapshot = self._resource_snapshot(project_root) if dev_hot_enabled else None
         next_hot_check = 0.0
@@ -1027,6 +1093,12 @@ class GameSession:
                     auto_reconnect_attempts = 0
                     disconnect_confirm_pending = False
                     self._set_message(f"Connected to host | команда: {self._team_name(local_team_id)}")
+                    _log_connection_event(
+                        "connect_ok",
+                        team_id=local_team_id,
+                        requested_target=(connect_requested_target.server_id if connect_requested_target is not None else None),
+                        **_math_connection_context(),
+                    )
                 else:
                     if auto_reconnect_active and connect_requested_target is not None:
                         auto_reconnect_attempts += 1
@@ -1038,7 +1110,17 @@ class GameSession:
                         )
                     else:
                         self._set_message(f"Connect failed: {reason}")
+                    _log_connection_event(
+                        "connect_fail",
+                        reason=str(reason),
+                        auto_reconnect=bool(auto_reconnect_active),
+                        **_math_connection_context(),
+                    )
                 connect_requested_target = None
+            for browser_event in browser.poll_connection_events():
+                if not isinstance(browser_event, dict):
+                    continue
+                _log_connection_event("client_net_event", **browser_event, **_math_connection_context())
             is_connected = browser.is_connected()
             if is_connected and not was_connected:
                 # Joining remote host: keep only local player state until snapshots arrive.
@@ -1066,11 +1148,21 @@ class GameSession:
                 else:
                     auto_reconnect_next_attempt_at = None
                     self._set_message("Связь потеряна")
+                _log_connection_event(
+                    "connection_lost",
+                    auto_reconnect=bool(auto_reconnect_active),
+                    **_math_connection_context(),
+                )
             if is_connected and not browser.is_connecting():
                 last_rx_ts = last_client_rx_monotonic or connected_since_monotonic or now
                 if now - last_rx_ts >= 3.5:
-                    browser.disconnect()
+                    browser.disconnect(
+                        reason="rx_stall_timeout",
+                        source="session_watchdog",
+                        detail=f"no_rx_for={now - last_rx_ts:.3f}s",
+                    )
                     self._set_message("Связь зависла. Переподключаюсь...")
+                    _log_connection_event("connection_stalled_disconnect", **_math_connection_context())
             was_connected = is_connected
             if not current_servers:
                 selected_server_idx = 0
@@ -1121,6 +1213,14 @@ class GameSession:
                     reconnect_target,
                     player_name=local_player_name,
                     team_id=local_team_id,
+                )
+                _log_connection_event(
+                    "auto_reconnect_attempt",
+                    target_server_id=reconnect_target.server_id,
+                    host_name=reconnect_target.host_name,
+                    level_name=reconnect_target.level_name,
+                    attempt=int(auto_reconnect_attempts) + 1,
+                    **_math_connection_context(),
                 )
                 connect_requested_target = reconnect_target
                 delay = min(6.0, 1.0 + (0.75 * max(0, auto_reconnect_attempts)))
@@ -1346,13 +1446,20 @@ class GameSession:
                                 reconnect_candidate = None
                                 auto_reconnect_active = False
                                 auto_reconnect_next_attempt_at = None
-                                browser.disconnect()
+                                browser.disconnect(reason="manual_reconnect_switch", source="lan_menu")
                                 connected_since_monotonic = None
                                 connected_host_summary = None
                                 browser.connect_async(
                                     target,
                                     player_name=local_player_name,
                                     team_id=local_team_id,
+                                )
+                                _log_connection_event(
+                                    "manual_reconnect_attempt",
+                                    target_server_id=target.server_id,
+                                    host_name=target.host_name,
+                                    level_name=target.level_name,
+                                    **_math_connection_context(),
                                 )
                                 connect_requested_target = target
                                 last_connected_target = target
@@ -1371,11 +1478,12 @@ class GameSession:
                                 auto_reconnect_attempts = 0
                                 last_connected_target = None
                                 reconnect_candidate = None
-                                browser.disconnect()
+                                browser.disconnect(reason="manual_disconnect", source="lan_menu")
                                 connected_since_monotonic = None
                                 connected_host_summary = None
                                 connected_host_name = None
                                 connected_host_player_name = None
+                                _log_connection_event("manual_disconnect", **_math_connection_context())
                                 self._set_message("Disconnected from host")
                             elif event_key in {pygame.K_n, pygame.K_ESCAPE, pygame.K_q}:
                                 disconnect_confirm_pending = False
@@ -1413,6 +1521,15 @@ class GameSession:
                                 target,
                                 player_name=local_player_name,
                                 team_id=local_team_id,
+                            )
+                            _log_connection_event(
+                                "manual_connect_attempt",
+                                target_server_id=target.server_id,
+                                host_name=target.host_name,
+                                level_name=target.level_name,
+                                target_players=int(target.players),
+                                target_max_players=int(target.max_players),
+                                **_math_connection_context(),
                             )
                             connect_requested_target = target
                             last_connected_target = target
@@ -1774,8 +1891,18 @@ class GameSession:
             host_poll_started = time.perf_counter()
             if host_started:
                 for host_event in lan_host.poll_events():
+                    _log_connection_event(
+                        f"host_{host_event.type}",
+                        remote_player_id=host_event.player_id,
+                        remote_player_name=host_event.player_name,
+                        remote_player_team=host_event.player_team,
+                    )
                     self._apply_host_event(host_event, world)
                     network_state_dirty = True
+                for host_conn_event in lan_host.poll_connection_events():
+                    if not isinstance(host_conn_event, dict):
+                        continue
+                    _log_connection_event("host_net_event", **host_conn_event, **_math_connection_context())
                 remote_inputs = lan_host.poll_remote_inputs()
                 for pid, dx, dy, holding, run, ride_hold in remote_inputs:
                     self.set_player_movement_input(
@@ -1824,6 +1951,22 @@ class GameSession:
                         self._host_remote_rx_gap_ema = (
                             self._host_remote_rx_gap_ema * 0.9 + worst_gap * 0.1
                         )
+                remote_conn_rows = lan_host.poll_remote_connlogs()
+                if remote_conn_rows and conn_client_log_fp is not None:
+                    for pid, pname, pteam, payload in remote_conn_rows:
+                        if not isinstance(payload, dict):
+                            continue
+                        row = {
+                            "ts": time.time(),
+                            "player_id": str(pid).strip(),
+                            "player_name": str(pname).strip(),
+                            "player_team": str(pteam).strip(),
+                            "connlog": payload,
+                        }
+                        try:
+                            conn_client_log_fp.write(json.dumps(row, ensure_ascii=False) + "\n")
+                        except Exception:
+                            pass
             frame_host_poll_ms = (time.perf_counter() - host_poll_started) * 1000.0
 
             client_poll_started = time.perf_counter()
@@ -3010,6 +3153,16 @@ class GameSession:
                 perf_client_log_fp.close()
             except Exception:
                 pass
+        if conn_log_fp is not None:
+            try:
+                conn_log_fp.close()
+            except Exception:
+                pass
+        if conn_client_log_fp is not None:
+            try:
+                conn_client_log_fp.close()
+            except Exception:
+                pass
         browser.stop()
         lan_host.stop()
         pygame.quit()
@@ -3244,29 +3397,164 @@ class GameSession:
             online_team_player_ids=team_online,
         )
 
+    def _player_name_key(self, name: str | None) -> str:
+        token = str(name or "").strip().lower()
+        if not token:
+            return ""
+        return "".join(ch for ch in token if ch.isalnum() or ch in {"_", "-", "."})
+
+    def _prune_disconnected_player_cache(self, *, now_ts: float | None = None) -> None:
+        now_value = float(now_ts) if now_ts is not None else time.time()
+        ttl = max(5.0, float(self._disconnected_player_ttl_sec))
+        for key, payload in list(self._disconnected_player_cache.items()):
+            try:
+                left_at = float(payload.get("left_at_ts", 0.0))
+            except (TypeError, ValueError):
+                left_at = 0.0
+            if left_at <= 0.0 or (now_value - left_at) > ttl:
+                self._disconnected_player_cache.pop(key, None)
+
+    def _stash_disconnected_remote_player(self, *, player_id: str, player_name: str) -> None:
+        pid = str(player_id).strip()
+        if not pid or pid == self._LOCAL_PLAYER_ID:
+            return
+        state = self._player_states.get(pid)
+        if state is None:
+            return
+        key = self._player_name_key(player_name)
+        if not key:
+            return
+        try:
+            payload = {
+                "old_player_id": pid,
+                "name": str(player_name).strip() or pid,
+                "team_id": self._player_team(pid),
+                "character_id": self._player_character_id(pid),
+                "x": float(state.player.x),
+                "y": float(state.player.y),
+                "facing": state.player.facing.value,
+                "walk_time": float(state.player.walk_time),
+                "jump_time_left": float(state.player.jump_time_left),
+                "ride_item_id": (str(state.active_ride_item_id).strip().lower() if state.active_ride_item_id else ""),
+                "inventory": self._inventory_payload(state.inventory),
+                "last_player_sprite_size": tuple(state.last_player_sprite_size),
+                "left_at_ts": time.time(),
+            }
+        except Exception:
+            return
+        self._disconnected_player_cache[key] = payload
+        self._prune_disconnected_player_cache()
+
+    def _restore_disconnected_remote_player(
+        self,
+        *,
+        new_player_id: str,
+        player_name: str,
+        world: WorldMap,
+    ) -> bool:
+        self._prune_disconnected_player_cache()
+        key = self._player_name_key(player_name)
+        if not key:
+            return False
+        cached = self._disconnected_player_cache.get(key)
+        if not isinstance(cached, dict):
+            return False
+        old_player_id = str(cached.get("old_player_id", "")).strip()
+        if not old_player_id:
+            return False
+        if new_player_id in self._player_states:
+            return True
+        try:
+            spawn_x = float(cached.get("x", world.spawn_x))
+            spawn_y = float(cached.get("y", world.spawn_y))
+        except (TypeError, ValueError):
+            spawn_x = float(world.spawn_x)
+            spawn_y = float(world.spawn_y)
+        team_id = cached.get("team_id")
+        character_id = cached.get("character_id")
+        self.add_player(
+            player_id=new_player_id,
+            spawn_x=spawn_x,
+            spawn_y=spawn_y,
+            stats=world.player_stats,
+            team_id=(str(team_id).strip() if team_id is not None else None),
+            character_id=(str(character_id).strip() if character_id is not None else None),
+        )
+        restored = self._player_state(new_player_id)
+        if restored is None:
+            return False
+        try:
+            restored.player.facing = Direction(str(cached.get("facing", restored.player.facing.value)))
+        except Exception:
+            pass
+        try:
+            restored.player.walk_time = float(cached.get("walk_time", restored.player.walk_time))
+        except (TypeError, ValueError):
+            pass
+        try:
+            restored.player.jump_time_left = max(0.0, float(cached.get("jump_time_left", restored.player.jump_time_left)))
+        except (TypeError, ValueError):
+            pass
+        ride_item_id = str(cached.get("ride_item_id", "")).strip().lower()
+        restored.active_ride_item_id = ride_item_id or None
+        inv_payload = cached.get("inventory")
+        if isinstance(inv_payload, dict):
+            self._apply_inventory_payload(restored.inventory, inv_payload)
+            self._queue_inventory_preloads(restored.inventory, world)
+        sprite_size = cached.get("last_player_sprite_size")
+        if isinstance(sprite_size, (list, tuple)) and len(sprite_size) >= 2:
+            try:
+                restored.last_player_sprite_size = (int(sprite_size[0]), int(sprite_size[1]))
+            except (TypeError, ValueError):
+                pass
+        self._set_player_display_name(new_player_id, cached.get("name") or player_name or new_player_id)
+        self._set_player_team(new_player_id, cached.get("team_id"))
+        self._set_player_character_id(new_player_id, cached.get("character_id"))
+        self._apply_character_stats_to_player(
+            player_id=new_player_id,
+            base_stats=world.player_stats,
+        )
+        self._math_tasks.remap_player_ids({old_player_id: new_player_id})
+        self._disconnected_player_cache.pop(key, None)
+        return True
+
     def _apply_host_event(self, host_event: HostEvent, world: WorldMap) -> None:
         if host_event.type == "join":
-            base = self._player_state(self._LOCAL_PLAYER_ID)
-            if base is None:
-                return
-            spawn_x, spawn_y = self._resolve_join_spawn_position(
+            restored = self._restore_disconnected_remote_player(
+                new_player_id=host_event.player_id,
+                player_name=host_event.player_name,
                 world=world,
-                anchor_x=float(base.player.x),
-                anchor_y=float(base.player.y),
-                anchor_player_id=self._LOCAL_PLAYER_ID,
             )
-            self.add_player(
-                player_id=host_event.player_id,
-                spawn_x=spawn_x,
-                spawn_y=spawn_y,
-                stats=world.player_stats,
-                team_id=host_event.player_team,
+            if not restored:
+                base = self._player_state(self._LOCAL_PLAYER_ID)
+                if base is None:
+                    return
+                spawn_x, spawn_y = self._resolve_join_spawn_position(
+                    world=world,
+                    anchor_x=float(base.player.x),
+                    anchor_y=float(base.player.y),
+                    anchor_player_id=self._LOCAL_PLAYER_ID,
+                )
+                self.add_player(
+                    player_id=host_event.player_id,
+                    spawn_x=spawn_x,
+                    spawn_y=spawn_y,
+                    stats=world.player_stats,
+                    team_id=host_event.player_team,
+                )
+                self._set_player_display_name(host_event.player_id, host_event.player_name)
+                self._set_player_team(host_event.player_id, host_event.player_team)
+            self._set_message(
+                f"Reconnected: {host_event.player_name}"
+                if restored
+                else f"Joined: {host_event.player_name}"
             )
-            self._set_player_display_name(host_event.player_id, host_event.player_name)
-            self._set_player_team(host_event.player_id, host_event.player_team)
-            self._set_message(f"Joined: {host_event.player_name}")
             return
         if host_event.type == "leave":
+            self._stash_disconnected_remote_player(
+                player_id=host_event.player_id,
+                player_name=host_event.player_name,
+            )
             self.remove_player(player_id=host_event.player_id)
             self._set_message(f"Игрок выбыл: {host_event.player_name}")
 
