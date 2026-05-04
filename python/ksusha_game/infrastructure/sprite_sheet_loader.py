@@ -1076,23 +1076,39 @@ class ScaledAnimationCache:
     def __init__(self, base_frames: dict[Direction, list[pygame.Surface]]) -> None:
         self._base_frames = base_frames
         self._cache: dict[int, dict[Direction, list[pygame.Surface]]] = {}
+        self._base_size_cache: dict[Direction, tuple[int, int]] = {}
+        self._body_height_cache: dict[tuple[Direction, int], int] = {}
+        self._content_bottom_cache: dict[tuple[Direction, int], int] = {}
 
     def base_frame_size(self, direction: Direction) -> tuple[int, int]:
+        cached = self._base_size_cache.get(direction)
+        if cached is not None:
+            return cached
         frames = self._base_frames.get(direction)
         if not frames:
             return 1, 1
         frame = frames[0]
-        return max(1, frame.get_width()), max(1, frame.get_height())
+        size = (max(1, frame.get_width()), max(1, frame.get_height()))
+        self._base_size_cache[direction] = size
+        return size
 
     def base_body_height(self, direction: Direction, *, min_alpha: int = 20) -> int:
+        cutoff = max(1, int(min_alpha))
+        key = (direction, cutoff)
+        cached = self._body_height_cache.get(key)
+        if cached is not None:
+            return cached
         frames = self._base_frames.get(direction)
         if not frames:
             return 1
         frame = frames[0]
-        body = frame.get_bounding_rect(min_alpha=max(1, int(min_alpha)))
+        body = frame.get_bounding_rect(min_alpha=cutoff)
         if body.height <= 0:
-            return max(1, frame.get_height())
-        return max(1, body.height)
+            out = max(1, frame.get_height())
+        else:
+            out = max(1, body.height)
+        self._body_height_cache[key] = out
+        return out
 
     def content_bottom(self, direction: Direction, *, min_alpha: int = 20) -> int:
         """Last visible pixel row (exclusive) in the base frame for the given direction.
@@ -1101,14 +1117,22 @@ class ScaledAnimationCache:
         content boundary rather than the canvas height — use it as the "effective
         canvas height" when computing a ride scale that accounts for the padding.
         """
+        cutoff = max(1, int(min_alpha))
+        key = (direction, cutoff)
+        cached = self._content_bottom_cache.get(key)
+        if cached is not None:
+            return cached
         frames = self._base_frames.get(direction)
         if not frames:
             return 1
         frame = frames[0]
-        body = frame.get_bounding_rect(min_alpha=max(1, int(min_alpha)))
+        body = frame.get_bounding_rect(min_alpha=cutoff)
         if body.height <= 0:
-            return max(1, frame.get_height())
-        return max(1, body.bottom)
+            out = max(1, frame.get_height())
+        else:
+            out = max(1, body.bottom)
+        self._content_bottom_cache[key] = out
+        return out
 
     def nominal_body_height(self, *, min_alpha: int = 20) -> int:
         heights: list[int] = []

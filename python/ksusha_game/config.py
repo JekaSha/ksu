@@ -10,6 +10,9 @@ from ksusha_game.domain.direction import Direction
 _DEFAULT_CHARACTER_ID = "ksu"
 _USER_SETTINGS_PATH = Path(".ksusha_game_settings.json")
 _CHARACTER_REGISTRY_PATH = Path("source/textures/characters/characters.json")
+_CHARACTER_REGISTRY_CACHE: dict[str, dict[str, dict]] = {}
+_CHARACTER_MANIFEST_CACHE: dict[str, dict | None] = {}
+_CHARACTER_RESOLVED_MANIFEST_CACHE: dict[tuple[str, str], dict | None] = {}
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,9 @@ def _resolve_default_skin(skin_pool_dir: Path) -> Path:
 
 
 def _load_character_manifest(character_dir: Path) -> dict | None:
+    cache_key = str(Path(character_dir).resolve())
+    if cache_key in _CHARACTER_MANIFEST_CACHE:
+        return _CHARACTER_MANIFEST_CACHE[cache_key]
     candidates = [character_dir / "settings.json", character_dir / "character.json"]
     for manifest_path in candidates:
         if not manifest_path.exists():
@@ -118,18 +124,26 @@ def _load_character_manifest(character_dir: Path) -> dict | None:
         else:
             payload = raw
         if isinstance(payload, dict):
+            _CHARACTER_MANIFEST_CACHE[cache_key] = payload
             return payload
+    _CHARACTER_MANIFEST_CACHE[cache_key] = None
     return None
 
 
 def _load_character_registry(characters_root: Path = Path("source/textures/characters")) -> dict[str, dict]:
     root = Path(characters_root)
+    cache_key = str(root.resolve())
+    cached = _CHARACTER_REGISTRY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     registry_path = root / _CHARACTER_REGISTRY_PATH.name
     if not registry_path.exists():
+        _CHARACTER_REGISTRY_CACHE[cache_key] = {}
         return {}
     try:
         raw = json.loads(registry_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        _CHARACTER_REGISTRY_CACHE[cache_key] = {}
         return {}
 
     manifests: list[dict] = []
@@ -153,6 +167,7 @@ def _load_character_registry(characters_root: Path = Path("source/textures/chara
         if not char_id:
             continue
         out[char_id] = payload
+    _CHARACTER_REGISTRY_CACHE[cache_key] = out
     return out
 
 
@@ -173,15 +188,22 @@ def _merge_character_manifests(base: dict, override: dict) -> dict:
 
 
 def _resolve_character_manifest(character: str, characters_root: Path) -> dict | None:
+    cache_key = (str(Path(characters_root).resolve()), str(character).strip())
+    if cache_key in _CHARACTER_RESOLVED_MANIFEST_CACHE:
+        return _CHARACTER_RESOLVED_MANIFEST_CACHE[cache_key]
     registry = _load_character_registry(characters_root)
     registry_manifest = registry.get(character)
     local_manifest = _load_character_manifest(characters_root / character)
     if registry_manifest is None:
+        _CHARACTER_RESOLVED_MANIFEST_CACHE[cache_key] = local_manifest
         return local_manifest
     if local_manifest is None:
+        _CHARACTER_RESOLVED_MANIFEST_CACHE[cache_key] = registry_manifest
         return registry_manifest
     # Registry provides discoverability/listing, local file provides per-character runtime overrides.
-    return _merge_character_manifests(registry_manifest, local_manifest)
+    merged = _merge_character_manifests(registry_manifest, local_manifest)
+    _CHARACTER_RESOLVED_MANIFEST_CACHE[cache_key] = merged
+    return merged
 
 
 def list_available_characters(characters_root: Path = Path("source/textures/characters")) -> list[dict[str, str]]:
