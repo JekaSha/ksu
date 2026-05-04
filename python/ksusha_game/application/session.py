@@ -195,6 +195,7 @@ class GameSession:
         self._network_raw_to_local_player_ids: dict[str, str] = {}
         self._network_local_to_raw_player_ids: dict[str, str] = {}
         self._last_applied_objects_signature: tuple[tuple[object, ...], ...] | None = None
+        self._last_applied_network_revision: int | None = None
         # Reserved for compatibility with older saves/tests.
         self._map_static_object_ids: set[str] = set()
         # Per-frame caches: rebuilt once per frame after world mutations, before physics.
@@ -888,6 +889,8 @@ class GameSession:
         perf_enabled = perf_enabled_raw not in {"0", "false", "off", "no"}
         perf_log_fp = None
         perf_log_path: Path | None = None
+        perf_client_log_fp = None
+        perf_client_log_path: Path | None = None
         perf_window_started_at = time.monotonic()
         perf_frames = 0
         perf_frame_sum_ms = 0.0
@@ -899,16 +902,22 @@ class GameSession:
         perf_pos_apply_max_ms = 0.0
         perf_snapshot_apply_sum_ms = 0.0
         perf_snapshot_apply_max_ms = 0.0
+        network_state_revision = 1
         if perf_enabled:
             try:
                 perf_dir = project_root / "runtime_logs"
                 perf_dir.mkdir(parents=True, exist_ok=True)
                 perf_log_path = perf_dir / f"lan_perf_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
                 perf_log_fp = perf_log_path.open("a", encoding="utf-8", buffering=1)
+                if host_started:
+                    perf_client_log_path = perf_dir / f"lan_perf_clients_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+                    perf_client_log_fp = perf_client_log_path.open("a", encoding="utf-8", buffering=1)
                 self._set_message(f"NET PERF log: {perf_log_path}")
             except Exception:
                 perf_log_fp = None
                 perf_log_path = None
+                perf_client_log_fp = None
+                perf_client_log_path = None
         if host_started:
             self._set_message(f"LAN server visible: {local_host_name}:{server_port}")
         else:
@@ -985,12 +994,14 @@ class GameSession:
                 for pid in [pid for pid in self._player_states.keys() if pid != self._LOCAL_PLAYER_ID]:
                     self.remove_player(player_id=pid)
                 self._last_applied_objects_signature = None
+                self._last_applied_network_revision = None
                 browser.send_action(action=f"set_character::{current_character_id}")
                 last_client_rx_monotonic = now
             if (not is_connected) and was_connected and not browser.is_connecting():
                 connected_since_monotonic = None
                 last_client_rx_monotonic = None
                 self._last_applied_objects_signature = None
+                self._last_applied_network_revision = None
                 connected_host_summary = None
                 connected_host_name = None
                 connected_host_player_name = None
@@ -1694,6 +1705,22 @@ class GameSession:
                     self.queue_player_action(player_id=pid, action=action)
                 if remote_actions:
                     network_state_dirty = True
+                remote_perf_rows = lan_host.poll_remote_perf()
+                if remote_perf_rows and perf_client_log_fp is not None:
+                    for pid, pname, pteam, payload in remote_perf_rows:
+                        if not isinstance(payload, dict):
+                            continue
+                        row = {
+                            "ts": time.time(),
+                            "player_id": str(pid).strip(),
+                            "player_name": str(pname).strip(),
+                            "player_team": str(pteam).strip(),
+                            "perf": payload,
+                        }
+                        try:
+                            perf_client_log_fp.write(json.dumps(row, ensure_ascii=False) + "\n")
+                        except Exception:
+                            pass
 
             if browser.is_connected():
                 assigned_local = browser.connected_player_id()
@@ -1763,6 +1790,7 @@ class GameSession:
                         state.spray_hold_accum = 0.0
                     self._spray_tags.clear()
                     self._last_applied_objects_signature = None
+                    self._last_applied_network_revision = None
                     self._surface_body_rect_cache.clear()
                     renderer.clear_render_cache()
                     self._set_message("Hot reload: assets/map reloaded")
@@ -1809,13 +1837,14 @@ class GameSession:
                         run_multiplier=run_boost,
                         ride_hold=ride_hold,
                     )
+                    # Client-side prediction: keep local input active while host sync is in flight.
                     self.set_player_movement_input(
                         player_id=player_id,
-                        dx=0,
-                        dy=0,
-                        holding_pickup=False,
-                        run_multiplier=1.0,
-                        ride_hold=False,
+                        dx=dx,
+                        dy=dy,
+                        holding_pickup=holding_pickup,
+                        run_multiplier=run_boost,
+                        ride_hold=ride_hold,
                     )
                 else:
                     self.set_player_movement_input(
@@ -1859,13 +1888,17 @@ class GameSession:
                     selected_slot_index = inventory.active_index
 
                     is_local = player_id == self._LOCAL_PLAYER_ID
+                    predict_local_client_player = net_client_mode and is_local
                     dx, dy, holding_pickup, run_boost, _ride_hold = self._movement_inputs.get(
                         player_id, (0, 0, False, 1.0, False)
                     )
                     if state.active_ride_item_id:
                         dy = 0
-                    spray_holding = holding_pickup and self._is_spray_item(selected_item)
-                    drag_hold = holding_pickup
+                    # In connected client mode we predict movement for local player,
+                    # but keep world interactions authoritative on host.
+                    local_prediction_blocks_interaction = bool(predict_local_client_player)
+                    spray_holding = (holding_pickup and self._is_spray_item(selected_item)) and not local_prediction_blocks_interaction
+                    drag_hold = holding_pickup and not local_prediction_blocks_interaction
 
                     wearing_backpack = self._inventory_has_item(inventory, "backpack")
                     player_character_id = self._player_character_id(player_id)
@@ -1920,7 +1953,7 @@ class GameSession:
                                 ),
                             )
                             ride_frames_by_dir = ride_anim.frames_for_height(ride_target_h)
-                    if net_client_mode:
+                    if net_client_mode and not is_local:
                         # Host-authoritative mode: do not locally simulate players,
                         # otherwise zero-input frames reset walk_time and kill animation.
                         current_frames = frames_by_dir[player.facing]
@@ -2068,19 +2101,20 @@ class GameSession:
                         sprite_w=display_frame.get_width(),
                         sprite_h=display_frame.get_height(),
                     )
-                    self._sync_interaction_state_on_area_change(spray_area_id)
-                    self._update_spray_painting(
-                        holding_spray=spray_holding,
-                        dt=dt,
-                        selected_spray_item=selected_item,
-                        selected_spray_slot_index=selected_slot_index,
-                        spray_area_id=spray_area_id,
-                        player=player,
-                        player_sprite_w=display_frame.get_width(),
-                        player_sprite_h=display_frame.get_height(),
-                        world=world,
-                        object_sprites=object_sprites,
-                    )
+                    if not local_prediction_blocks_interaction:
+                        self._sync_interaction_state_on_area_change(spray_area_id)
+                        self._update_spray_painting(
+                            holding_spray=spray_holding,
+                            dt=dt,
+                            selected_spray_item=selected_item,
+                            selected_spray_slot_index=selected_slot_index,
+                            spray_area_id=spray_area_id,
+                            player=player,
+                            player_sprite_w=display_frame.get_width(),
+                            player_sprite_h=display_frame.get_height(),
+                            world=world,
+                            object_sprites=object_sprites,
+                        )
 
                     player_center = self._center_for_display_frame(
                         base_frame=current_frame,
@@ -2515,20 +2549,27 @@ class GameSession:
             if host_started and lan_host.connected_clients() > 0:
                 connected = lan_host.connected_clients()
                 # Position sync stays frequent but throttles under higher client counts.
-                position_interval_sec = 0.033 if connected >= 6 else 0.024
+                position_interval_sec = 0.04 if connected >= 6 else 0.028
                 if now - last_position_sent_at >= position_interval_sec:
                     lan_host.broadcast_positions(self._build_position_update())
                     last_position_sent_at = now
                 # Full state sync for mutable world/player state:
                 # immediate push on mutation + adaptive periodic cadence under load.
                 if connected >= 9:
-                    snapshot_interval_sec = 0.16
+                    snapshot_interval_sec = 0.36
                 elif connected >= 6:
-                    snapshot_interval_sec = 0.12
+                    snapshot_interval_sec = 0.3
                 else:
-                    snapshot_interval_sec = 0.10
+                    snapshot_interval_sec = 0.24
+                if network_state_dirty:
+                    network_state_revision += 1
                 if network_state_dirty or (now - last_snapshot_sent_at >= snapshot_interval_sec):
-                    lan_host.broadcast_snapshot(self._build_network_snapshot(world))
+                    lan_host.broadcast_snapshot(
+                        self._build_network_snapshot(
+                            world,
+                            revision=network_state_revision,
+                        )
+                    )
                     last_snapshot_sent_at = now
 
             frame_total_ms = (time.perf_counter() - frame_started_at) * 1000.0
@@ -2557,6 +2598,12 @@ class GameSession:
                     "ts": time.time(),
                     "connected": bool(browser.is_connected()),
                     "host_mode": bool(host_started),
+                    "role": (
+                        "client"
+                        if browser.is_connected()
+                        else ("host" if host_started else "offline")
+                    ),
+                    "connected_server_id": browser.connected_server_id(),
                     "window_sec": elapsed,
                     "frames": int(perf_frames),
                     "fps_avg": round(fps_avg, 2),
@@ -2581,11 +2628,37 @@ class GameSession:
                     "net_tx_sent": int(browser_stats.get("tx_sent", 0)),
                     "net_tx_enqueued": int(browser_stats.get("tx_enqueued", 0)),
                     "net_tx_dropped": int(browser_stats.get("tx_dropped", 0)),
+                    "last_applied_rev": (
+                        int(self._last_applied_network_revision)
+                        if self._last_applied_network_revision is not None
+                        else None
+                    ),
                 }
                 try:
                     perf_log_fp.write(json.dumps(row, ensure_ascii=False) + "\n")
                 except Exception:
                     pass
+                if browser.is_connected():
+                    client_perf_payload = {
+                        "window_sec": row.get("window_sec"),
+                        "fps_avg": row.get("fps_avg"),
+                        "frame_avg_ms": row.get("frame_avg_ms"),
+                        "frame_max_ms": row.get("frame_max_ms"),
+                        "slow_frames_40ms": row.get("slow_frames_40ms"),
+                        "pos_updates_applied": row.get("pos_updates_applied"),
+                        "snapshots_applied": row.get("snapshots_applied"),
+                        "pos_apply_avg_ms": row.get("pos_apply_avg_ms"),
+                        "snapshot_apply_avg_ms": row.get("snapshot_apply_avg_ms"),
+                        "snapshot_apply_max_ms": row.get("snapshot_apply_max_ms"),
+                        "rx_gap_ms": row.get("rx_gap_ms"),
+                        "net_tx_queue_len": row.get("net_tx_queue_len"),
+                        "net_tx_dropped": row.get("net_tx_dropped"),
+                        "last_applied_rev": row.get("last_applied_rev"),
+                    }
+                    try:
+                        browser.send_perf_update(perf=client_perf_payload)
+                    except Exception:
+                        pass
                 perf_window_started_at = now
                 perf_frames = 0
                 perf_frame_sum_ms = 0.0
@@ -2601,6 +2674,11 @@ class GameSession:
         if perf_log_fp is not None:
             try:
                 perf_log_fp.close()
+            except Exception:
+                pass
+        if perf_client_log_fp is not None:
+            try:
+                perf_client_log_fp.close()
             except Exception:
                 pass
         browser.stop()
@@ -2914,8 +2992,31 @@ class GameSession:
             if state is None:
                 continue
             try:
-                state.player.x = float(item.get("x", state.player.x))
-                state.player.y = float(item.get("y", state.player.y))
+                target_x = float(item.get("x", state.player.x))
+                target_y = float(item.get("y", state.player.y))
+                if player_id == self._LOCAL_PLAYER_ID:
+                    # Local prediction reconciliation:
+                    # keep controls snappy and avoid hard snaps each network tick.
+                    cur_x = float(state.player.x)
+                    cur_y = float(state.player.y)
+                    drift_x = target_x - cur_x
+                    drift_y = target_y - cur_y
+                    drift = math.hypot(drift_x, drift_y)
+                    input_dx, input_dy, _h, _run, _ride = self._movement_inputs.get(
+                        self._LOCAL_PLAYER_ID, (0, 0, False, 1.0, False)
+                    )
+                    moving_local = abs(input_dx) > 0 or abs(input_dy) > 0
+                    if drift <= 1.25:
+                        pass
+                    elif moving_local and drift <= 28.0:
+                        state.player.x = cur_x + drift_x * 0.35
+                        state.player.y = cur_y + drift_y * 0.35
+                    else:
+                        state.player.x = target_x
+                        state.player.y = target_y
+                else:
+                    state.player.x = target_x
+                    state.player.y = target_y
                 state.player.facing = Direction(str(item.get("f", state.player.facing.value)))
                 state.player.walk_time = float(item.get("wt", state.player.walk_time))
                 state.player.jump_time_left = max(0.0, float(item.get("jt", state.player.jump_time_left)))
@@ -2924,7 +3025,7 @@ class GameSession:
             except Exception:
                 continue
 
-    def _build_network_snapshot(self, world: WorldMap) -> dict:
+    def _build_network_snapshot(self, world: WorldMap, *, revision: int = 0) -> dict:
         players: list[dict[str, object]] = []
         for player_id, state in self._player_states.items():
             players.append(
@@ -2955,6 +3056,7 @@ class GameSession:
             "spray_tags": [self._spray_tag_payload(tag) for tag in self._spray_tags],
             "room_item_use_counts": room_item_use_counts,
             "math_tasks": self._math_tasks.to_payload(),
+            "rev": int(max(0, revision)),
             "ts": time.time(),
             "world": {"width": int(world.width), "height": int(world.height)},
         }
@@ -2968,6 +3070,20 @@ class GameSession:
     ) -> None:
         if str(snapshot.get("level", "")).strip() != self._config.map_path.stem:
             return
+        rev_raw = snapshot.get("rev")
+        snapshot_rev: int | None
+        try:
+            snapshot_rev = int(rev_raw) if rev_raw is not None else None
+        except (TypeError, ValueError):
+            snapshot_rev = None
+        if (
+            snapshot_rev is not None
+            and self._last_applied_network_revision is not None
+            and snapshot_rev == self._last_applied_network_revision
+        ):
+            return
+        if snapshot_rev is not None:
+            self._last_applied_network_revision = snapshot_rev
         payload = snapshot.get("players")
         if not isinstance(payload, list):
             return
