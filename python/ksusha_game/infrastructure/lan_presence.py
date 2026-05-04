@@ -90,6 +90,7 @@ class LanPresenceHost:
         self._events: list[HostEvent] = []
         self._remote_inputs: dict[str, tuple[int, int, bool, float, bool]] = {}
         self._remote_actions: list[tuple[str, str]] = []
+        self._remote_perf: list[tuple[str, str, str, dict]] = []
         self._enabled = False
         self._joinable = True
         # Pending outbound data for the background broadcast thread.
@@ -176,6 +177,7 @@ class LanPresenceHost:
                     pass
             self._active_clients.clear()
             self._remote_inputs.clear()
+            self._remote_perf.clear()
         self._enabled = False
 
     def poll_events(self) -> list[HostEvent]:
@@ -192,6 +194,11 @@ class LanPresenceHost:
     def poll_remote_actions(self) -> list[tuple[str, str]]:
         with self._lock:
             out, self._remote_actions = self._remote_actions, []
+        return out
+
+    def poll_remote_perf(self) -> list[tuple[str, str, str, dict]]:
+        with self._lock:
+            out, self._remote_perf = self._remote_perf, []
         return out
 
     def broadcast_positions(self, payload_bytes: bytes) -> None:
@@ -398,6 +405,21 @@ class LanPresenceHost:
                         continue
                     with self._lock:
                         self._remote_actions.append((client_player_id, action))
+                elif msg_type == "perf":
+                    payload = data.get("perf")
+                    if not isinstance(payload, dict):
+                        continue
+                    with self._lock:
+                        if len(self._remote_perf) >= 128:
+                            self._remote_perf.pop(0)
+                        self._remote_perf.append(
+                            (
+                                client_player_id,
+                                client_player_name,
+                                client_player_team,
+                                payload,
+                            )
+                        )
                 elif msg_type == "disconnect":
                     break
         except (OSError, ValueError, json.JSONDecodeError):
@@ -598,6 +620,13 @@ class LanServerBrowser:
         if not token:
             return
         self._send_json({"type": "action", "action": token, "ts": time.time()})
+
+    def send_perf_update(self, *, perf: dict) -> None:
+        if not self.is_connected():
+            return
+        if not isinstance(perf, dict):
+            return
+        self._send_json({"type": "perf", "perf": perf, "ts": time.time()})
 
     def poll_snapshot(self) -> dict | None:
         """Return the latest full-state snapshot received from host, or None."""
