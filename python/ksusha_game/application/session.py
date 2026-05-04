@@ -1120,7 +1120,9 @@ class GameSession:
             for browser_event in browser.poll_connection_events():
                 if not isinstance(browser_event, dict):
                     continue
-                _log_connection_event("client_net_event", **browser_event, **_math_connection_context())
+                browser_payload = dict(browser_event)
+                browser_payload["net_event"] = str(browser_payload.pop("event", "")).strip() or "event"
+                _log_connection_event("client_net_event", **browser_payload, **_math_connection_context())
             is_connected = browser.is_connected()
             if is_connected and not was_connected:
                 # Joining remote host: keep only local player state until snapshots arrive.
@@ -1902,7 +1904,9 @@ class GameSession:
                 for host_conn_event in lan_host.poll_connection_events():
                     if not isinstance(host_conn_event, dict):
                         continue
-                    _log_connection_event("host_net_event", **host_conn_event, **_math_connection_context())
+                    host_payload = dict(host_conn_event)
+                    host_payload["net_event"] = str(host_payload.pop("event", "")).strip() or "event"
+                    _log_connection_event("host_net_event", **host_payload, **_math_connection_context())
                 remote_inputs = lan_host.poll_remote_inputs()
                 for pid, dx, dy, holding, run, ride_hold in remote_inputs:
                     self.set_player_movement_input(
