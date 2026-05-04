@@ -47,6 +47,8 @@ class RenderCache:
     fog_band_masks: dict[tuple[object, ...], pygame.Surface] = field(default_factory=dict)
     fog_overlay_key: tuple[object, ...] | None = None
     fog_overlay_surf: pygame.Surface | None = None
+    ui_lock_text: dict[tuple[int, int, int, str], pygame.Surface] = field(default_factory=dict)
+    ui_portrait_scale: dict[tuple[int, int], pygame.Surface] = field(default_factory=dict)
 
 
 class WorldRenderer:
@@ -1874,8 +1876,19 @@ class WorldRenderer:
         screen.blit(bg, (16, 14))
         screen.blit(label, (24, 20))
 
+    def _lock_text_surface(self, text: str, color: tuple[int, int, int]) -> pygame.Surface:
+        key = (int(color[0]), int(color[1]), int(color[2]), str(text))
+        cached = self._cache.ui_lock_text.get(key)
+        if cached is not None:
+            return cached
+        rendered = self._lock_marker_font.render(str(text), True, color)
+        if len(self._cache.ui_lock_text) >= 1024:
+            self._cache.ui_lock_text.clear()
+        self._cache.ui_lock_text[key] = rendered
+        return rendered
+
     def _draw_task_panel(self, screen: pygame.Surface, lines: list[str]) -> int:
-        rendered = [self._lock_marker_font.render(line, True, (242, 243, 245)) for line in lines if line]
+        rendered = [self._lock_text_surface(line, (242, 243, 245)) for line in lines if line]
         if not rendered:
             return 10
         max_w = max(surf.get_width() for surf in rendered)
@@ -1896,7 +1909,7 @@ class WorldRenderer:
         return y + panel_h
 
     def _draw_control_hints(self, screen: pygame.Surface, lines: list[str], *, top: int = 54) -> None:
-        rendered = [self._lock_marker_font.render(line, True, (226, 232, 240)) for line in lines if line]
+        rendered = [self._lock_text_surface(line, (226, 232, 240)) for line in lines if line]
         if not rendered:
             return
         max_w = max(surf.get_width() for surf in rendered)
@@ -1916,7 +1929,7 @@ class WorldRenderer:
             cy += line_h + 3
 
     def _draw_right_panel(self, screen: pygame.Surface, lines: list[str], *, top: int = 54) -> int:
-        rendered = [self._lock_marker_font.render(line, True, (235, 240, 244)) for line in lines if line]
+        rendered = [self._lock_text_surface(line, (235, 240, 244)) for line in lines if line]
         if not rendered:
             return int(top)
         max_w = max(surf.get_width() for surf in rendered)
@@ -1951,19 +1964,21 @@ class WorldRenderer:
         icon_size = max(14, line_h + 4)
         icon_gap = 6
         rendered_rows: list[tuple[pygame.Surface, pygame.Surface | None, int]] = []
-        scaled_portraits: dict[str, pygame.Surface] = {}
         max_w = 0
         for text, player_id in normalized:
-            text_surf = self._lock_marker_font.render(text, True, (235, 240, 244))
+            text_surf = self._lock_text_surface(text, (235, 240, 244))
             portrait: pygame.Surface | None = None
             if player_id is not None and player_portraits is not None:
                 pid = str(player_id).strip()
                 source = player_portraits.get(pid)
                 if source is not None:
-                    portrait = scaled_portraits.get(pid)
+                    cache_key = (id(source), int(icon_size))
+                    portrait = self._cache.ui_portrait_scale.get(cache_key)
                     if portrait is None:
                         portrait = pygame.transform.scale(source, (icon_size, icon_size))
-                        scaled_portraits[pid] = portrait
+                        if len(self._cache.ui_portrait_scale) >= 512:
+                            self._cache.ui_portrait_scale.clear()
+                        self._cache.ui_portrait_scale[cache_key] = portrait
             row_h = max(text_surf.get_height(), icon_size if portrait is not None else 0)
             row_w = text_surf.get_width() + (icon_size + icon_gap if portrait is not None else 0)
             rendered_rows.append((text_surf, portrait, row_h))
