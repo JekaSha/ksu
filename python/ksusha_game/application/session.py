@@ -1952,18 +1952,18 @@ class GameSession:
                     selected_slot_index = inventory.active_index
 
                     is_local = player_id == self._LOCAL_PLAYER_ID
+                    # is_simulated_remote: remote player whose inputs are relayed from host;
+                    # simulate locally so there is zero lerp lag, correct with host pos on drift.
+                    is_simulated_remote = net_client_mode and not is_local
                     predict_local_client_player = net_client_mode and is_local
                     dx, dy, holding_pickup, run_boost, _ride_hold = self._movement_inputs.get(
                         player_id, (0, 0, False, 1.0, False)
                     )
                     if state.active_ride_item_id:
                         dy = 0
-                    # In connected client mode we predict movement for local player,
-                    # but keep world interactions authoritative on host.
-                    local_prediction_blocks_interaction = bool(predict_local_client_player)
+                    # Block world interactions for both local client prediction and remote simulation.
+                    local_prediction_blocks_interaction = predict_local_client_player or is_simulated_remote
                     spray_holding = (holding_pickup and self._is_spray_item(selected_item)) and not local_prediction_blocks_interaction
-                    # Object drag is always predicted locally — client simulates the same
-                    # physics as the host and reconciles against host position afterward.
                     drag_hold = holding_pickup
 
                     wearing_backpack = self._inventory_has_item(inventory, "backpack")
@@ -2019,78 +2019,15 @@ class GameSession:
                                 ),
                             )
                             ride_frames_by_dir = ride_anim.frames_for_height(ride_target_h)
-                    if net_client_mode and not is_local:
-                        # Host-authoritative mode: do not locally simulate players,
-                        # otherwise zero-input frames reset walk_time and kill animation.
-                        moving_by_interp = False
-                        if state.net_target_x is not None and state.net_target_y is not None:
-                            tx = float(state.net_target_x)
-                            ty = float(state.net_target_y)
-                            cx = float(player.x)
-                            cy = float(player.y)
-                            # Dead reckoning: extrapolate ahead using tracked velocity.
-                            # net_last_rx_mono uses perf_counter; use same clock here.
-                            if state.net_last_rx_mono > 0 and (abs(state.net_vel_x) + abs(state.net_vel_y)) > 0.5:
-                                age = min(0.12, time.perf_counter() - state.net_last_rx_mono)
-                                tx += state.net_vel_x * age
-                                ty += state.net_vel_y * age
-                            drift_x = tx - cx
-                            drift_y = ty - cy
-                            drift = math.hypot(drift_x, drift_y)
-                            frame_remote_interp_sum_px += drift
-                            frame_remote_interp_max_px = max(frame_remote_interp_max_px, drift)
-                            frame_remote_interp_samples += 1
-                            if drift > 0.35:
-                                moving_by_interp = True
-                                lerp = min(1.0, dt * 30.0)
-                                player.x = cx + drift_x * lerp
-                                player.y = cy + drift_y * lerp
-                            else:
-                                player.x = tx
-                                player.y = ty
-                        if moving_by_interp:
-                            if state.net_target_walk_time is not None:
-                                target_wt = float(state.net_target_walk_time)
-                                predicted_wt = player.walk_time + dt * self._config.sprite_sheet.anim_fps
-                                player.walk_time = predicted_wt + (target_wt - predicted_wt) * min(1.0, dt * 22.0)
-                            else:
-                                player.walk_time += dt * self._config.sprite_sheet.anim_fps
-                        elif state.net_target_walk_time is not None:
-                            target_wt = float(state.net_target_walk_time)
-                            player.walk_time = player.walk_time + (target_wt - player.walk_time) * min(1.0, dt * 24.0)
-                        current_frames = frames_by_dir[player.facing]
-                        frame_index = int(player.walk_time) % len(current_frames)
-                        current_frame = current_frames[frame_index]
-                        display_frame = current_frame
-                        if ride_frames_by_dir is not None:
-                            ride_frames = ride_frames_by_dir.get(player.facing)
-                            if ride_frames:
-                                display_frame = ride_frames[frame_index % len(ride_frames)]
-                        self._last_player_sprite_size = (display_frame.get_width(), display_frame.get_height())
-                        moving = player.walk_time > 0.001
-                        bob = math.sin(player.walk_time * 2.0 * math.pi / len(current_frames)) * (2 if moving else 0)
-                        jump_y = player.jump_offset()
-                        player_center = self._center_for_display_frame(
-                            base_frame=current_frame,
-                            display_frame=display_frame,
-                            player_x=player.x,
-                            player_y=player.y,
-                        )
-                        left_facing = player.facing in {Direction.LEFT, Direction.UP_LEFT, Direction.DOWN_LEFT}
-                        render_item = (player_center, display_frame, bob + jump_y, left_facing)
-                        player_portraits[player_id] = display_frame
-                        if is_local:
-                            local_render = render_item
-                            local_wearing_backpack = wearing_backpack
-                        else:
-                            extra_renders.append(render_item)
-                        continue
+                    # Simulated remote players go through the full simulation block below.
+                    # (No lerp branch: inputs are relayed from host and simulated locally.)
 
                     pre_frames = frames_by_dir[player.facing]
                     pre_sprite_w = pre_frames[0].get_width()
                     pre_sprite_h = pre_frames[0].get_height()
-                    # In client mode use host-sent base speed so movement matches exactly.
-                    if predict_local_client_player and self._net_host_bspd > 0:
+                    # All client-side players (local prediction + remote simulation) use
+                    # host-sent base speed so movement is identical on all machines.
+                    if (predict_local_client_player or is_simulated_remote) and self._net_host_bspd > 0:
                         base_speed = self._net_host_bspd
                     else:
                         base_speed = min(width, height) * self._config.sprite_sheet.move_speed_ratio
@@ -2130,29 +2067,35 @@ class GameSession:
                         max_x=world.width - sprite_w,
                         max_y=world.height - sprite_h,
                     )
-                    self._update_grab_target_state(
-                        holding_pickup=drag_hold,
-                        player=player,
-                        sprite_w=sprite_w,
-                        sprite_h=sprite_h,
-                        world=world,
-                        object_sprites=object_sprites,
-                        inventory=inventory,
-                    )
+                    if not is_simulated_remote:
+                        # Grab target detection only for local players; relay sets
+                        # grabbed_object_id for remote players directly.
+                        self._update_grab_target_state(
+                            holding_pickup=drag_hold,
+                            player=player,
+                            sprite_w=sprite_w,
+                            sprite_h=sprite_h,
+                            world=world,
+                            object_sprites=object_sprites,
+                            inventory=inventory,
+                        )
                     self._update_standing_platform(player, sprite_w, sprite_h, world, object_sprites)
                     if landed:
                         self._try_land_on_platform(player, sprite_w, sprite_h, world, object_sprites)
-                    self._resolve_blocking_collisions(
-                        player=player,
-                        prev_x=prev_x,
-                        prev_y=prev_y,
-                        sprite_w=sprite_w,
-                        sprite_h=sprite_h,
-                        world=world,
-                        object_sprites=object_sprites,
-                        inventory=inventory,
-                        is_running=is_running,
-                    )
+                    if not is_simulated_remote:
+                        # _resolve_blocking_collisions can push objects as a side effect;
+                        # skip for remote simulation to avoid double-push divergence.
+                        self._resolve_blocking_collisions(
+                            player=player,
+                            prev_x=prev_x,
+                            prev_y=prev_y,
+                            sprite_w=sprite_w,
+                            sprite_h=sprite_h,
+                            world=world,
+                            object_sprites=object_sprites,
+                            inventory=inventory,
+                            is_running=is_running,
+                        )
                     self._resolve_room_wall_collisions(
                         player=player,
                         prev_x=prev_x,
@@ -2161,14 +2104,15 @@ class GameSession:
                         sprite_h=sprite_h,
                         world=world,
                     )
-                    self._resolve_player_collisions(
-                        player_id=player_id,
-                        player=player,
-                        prev_x=prev_x,
-                        prev_y=prev_y,
-                        sprite_w=sprite_w,
-                        sprite_h=sprite_h,
-                    )
+                    if not is_simulated_remote:
+                        self._resolve_player_collisions(
+                            player_id=player_id,
+                            player=player,
+                            prev_x=prev_x,
+                            prev_y=prev_y,
+                            sprite_w=sprite_w,
+                            sprite_h=sprite_h,
+                        )
                     self._update_grabbed_object_drag(
                         player=player,
                         prev_x=prev_x,
@@ -2180,6 +2124,20 @@ class GameSession:
                         inventory=inventory,
                         holding_pickup=drag_hold,
                     )
+
+                    # After local simulation, snap to host-authoritative position if drift
+                    # has accumulated (speed mismatch, rounding, different collision result).
+                    # Threshold is generous so micro-jitter never triggers a visible jump.
+                    if is_simulated_remote and state.net_target_x is not None and state.net_target_y is not None:
+                        _sim_tx = float(state.net_target_x)
+                        _sim_ty = float(state.net_target_y)
+                        _sim_drift = math.hypot(_sim_tx - player.x, _sim_ty - player.y)
+                        frame_remote_interp_sum_px += _sim_drift
+                        frame_remote_interp_max_px = max(frame_remote_interp_max_px, _sim_drift)
+                        frame_remote_interp_samples += 1
+                        if _sim_drift > 8.0:
+                            player.x = _sim_tx
+                            player.y = _sim_ty
 
                     current_frames = frames_by_dir[player.facing]
                     frame_index = int(player.walk_time) % len(current_frames)
@@ -3180,10 +3138,25 @@ class GameSession:
                 self._network_last_sent_object_pos.pop(stale_id, None)
         if emit_full_objects:
             self._network_last_sent_object_full_at = now_ts
-        pos_payload: dict[str, object] = {"players": players}
+        # Relay every player's current input so clients can simulate locally.
+        # [dx, dy, holding_pickup, run_multiplier, ride_hold, grabbed_object_id]
+        inputs_relay: dict[str, list] = {}
+        for pid, s in self._player_states.items():
+            inp = self._movement_inputs.get(pid, (0, 0, False, 1.0, False))
+            entry: list = [int(inp[0]), int(inp[1]), bool(inp[2]), round(float(inp[3]), 2), bool(inp[4])]
+            if s.grabbed_object_id:
+                entry.append(str(s.grabbed_object_id))
+            inputs_relay[pid] = entry
+        pos_payload: dict[str, object] = {
+            "players": players,
+            "inputs": inputs_relay,
+            # bspd and st inside the inner dict so clients can read them after lan_presence unwraps.
+            "bspd": host_bspd,
+            "st": round(send_st, 4),
+        }
         if dynamic_objects:
             pos_payload["objects"] = dynamic_objects
-        raw: dict[str, object] = {"type": "pos", "pos": pos_payload, "st": round(send_st, 4), "bspd": host_bspd}
+        raw: dict[str, object] = {"type": "pos", "pos": pos_payload}
         return (json.dumps(raw, ensure_ascii=True) + "\n").encode("utf-8")
 
     def _apply_position_update(
@@ -3196,7 +3169,7 @@ class GameSession:
         players = update.get("players")
         if not isinstance(players, list):
             return
-        # Extract host-side base speed so client matches host movement speed exactly.
+        # bspd is now inside the pos payload (not the outer dict) — read correctly.
         host_bspd = float(update.get("bspd", 0.0))
         if host_bspd > 0:
             self._net_host_bspd = host_bspd
@@ -3205,6 +3178,26 @@ class GameSession:
             prev_raw = self._network_local_to_raw_player_ids.get(self._LOCAL_PLAYER_ID)
             if prev_raw:
                 assigned_remote_id = str(prev_raw).strip() or None
+        # Apply relayed inputs so the client can simulate all players locally.
+        inputs_relay = update.get("inputs")
+        if isinstance(inputs_relay, dict):
+            for raw_pid, inp_data in inputs_relay.items():
+                if not isinstance(inp_data, list) or len(inp_data) < 5:
+                    continue
+                pid_r = self._remap_player_id(str(raw_pid), assigned_remote_id)
+                if pid_r == self._LOCAL_PLAYER_ID:
+                    continue  # never override local player's own input
+                state_r = self._player_state(pid_r)
+                if state_r is None:
+                    continue
+                try:
+                    self._movement_inputs[pid_r] = (
+                        int(inp_data[0]), int(inp_data[1]),
+                        bool(inp_data[2]), float(inp_data[3]), bool(inp_data[4]),
+                    )
+                    state_r.grabbed_object_id = str(inp_data[5]) if len(inp_data) >= 6 and inp_data[5] else None
+                except (TypeError, ValueError, IndexError):
+                    continue
         now_mono = time.perf_counter()
         for item in players:
             if not isinstance(item, dict):
@@ -3230,26 +3223,13 @@ class GameSession:
                         target_y=target_y,
                     )
                 else:
-                    # Dead reckoning: estimate velocity from consecutive position samples.
-                    if state.net_last_rx_mono > 0:
-                        dt_rx = now_mono - state.net_last_rx_mono
-                        if 0.005 < dt_rx < 0.5:
-                            prev_tx = float(state.net_target_x) if state.net_target_x is not None else float(state.player.x)
-                            prev_ty = float(state.net_target_y) if state.net_target_y is not None else float(state.player.y)
-                            new_vx = (target_x - prev_tx) / dt_rx
-                            new_vy = (target_y - prev_ty) / dt_rx
-                            alpha = 0.5
-                            state.net_vel_x = state.net_vel_x * (1 - alpha) + new_vx * alpha
-                            state.net_vel_y = state.net_vel_y * (1 - alpha) + new_vy * alpha
-                    state.net_last_rx_mono = now_mono
-                    # Hard snap on very large drift (teleport / reconnect).
+                    # Hard snap on teleport / reconnect. Normal drift is handled by
+                    # the correction step in the simulation block (render loop).
                     drift = math.hypot(target_x - float(state.player.x), target_y - float(state.player.y))
                     if drift >= 48.0:
                         state.player.x = target_x
                         state.player.y = target_y
                         state.player.walk_time = target_walk_time
-                        state.net_vel_x = 0.0
-                        state.net_vel_y = 0.0
                 state.player.facing = Direction(str(item.get("f", state.player.facing.value)))
                 state.player.jump_time_left = max(0.0, float(item.get("jt", state.player.jump_time_left)))
                 ride_item_id = str(item.get("ri", state.active_ride_item_id or "")).strip().lower()
