@@ -902,6 +902,20 @@ class GameSession:
         perf_pos_apply_max_ms = 0.0
         perf_snapshot_apply_sum_ms = 0.0
         perf_snapshot_apply_max_ms = 0.0
+        perf_events_sum_ms = 0.0
+        perf_events_max_ms = 0.0
+        perf_host_poll_sum_ms = 0.0
+        perf_host_poll_max_ms = 0.0
+        perf_client_poll_sum_ms = 0.0
+        perf_client_poll_max_ms = 0.0
+        perf_preload_sum_ms = 0.0
+        perf_preload_max_ms = 0.0
+        perf_commands_sum_ms = 0.0
+        perf_commands_max_ms = 0.0
+        perf_sim_sum_ms = 0.0
+        perf_sim_max_ms = 0.0
+        perf_render_sum_ms = 0.0
+        perf_render_max_ms = 0.0
         network_state_revision = 1
         if perf_enabled:
             try:
@@ -939,6 +953,13 @@ class GameSession:
             frame_snapshots = 0
             frame_pos_apply_ms = 0.0
             frame_snapshot_apply_ms = 0.0
+            frame_events_ms = 0.0
+            frame_host_poll_ms = 0.0
+            frame_client_poll_ms = 0.0
+            frame_preload_ms = 0.0
+            frame_commands_ms = 0.0
+            frame_sim_ms = 0.0
+            frame_render_ms = 0.0
             lan_host.set_joinable(not (browser.is_connected() or browser.is_connecting()))
             current_servers = [s for s in browser.servers() if s.server_id != lan_host.server_id]
             connect_result = browser.poll_connect_result()
@@ -1074,6 +1095,7 @@ class GameSession:
                 delay = min(6.0, 1.0 + (0.75 * max(0, auto_reconnect_attempts)))
                 auto_reconnect_next_attempt_at = now + delay
 
+            events_started = time.perf_counter()
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
@@ -1685,7 +1707,9 @@ class GameSession:
                                 action=action,
                                 issued_at=now,
                             )
+            frame_events_ms = (time.perf_counter() - events_started) * 1000.0
 
+            host_poll_started = time.perf_counter()
             if host_started:
                 for host_event in lan_host.poll_events():
                     self._apply_host_event(host_event, world)
@@ -1721,7 +1745,9 @@ class GameSession:
                             perf_client_log_fp.write(json.dumps(row, ensure_ascii=False) + "\n")
                         except Exception:
                             pass
+            frame_host_poll_ms = (time.perf_counter() - host_poll_started) * 1000.0
 
+            client_poll_started = time.perf_counter()
             if browser.is_connected():
                 assigned_local = browser.connected_player_id()
                 pos_update = browser.poll_pos_update()
@@ -1738,8 +1764,12 @@ class GameSession:
                     self._apply_network_snapshot(snapshot, world, assigned_local_id=assigned_local)
                     frame_snapshot_apply_ms += (time.perf_counter() - apply_started) * 1000.0
                     frame_snapshots += 1
+            frame_client_poll_ms = (time.perf_counter() - client_poll_started) * 1000.0
 
+            preload_started = time.perf_counter()
             self._process_async_preloads(world, object_sprites, budget_ms=1.8, max_jobs=1)
+            frame_preload_ms = (time.perf_counter() - preload_started) * 1000.0
+            commands_started = time.perf_counter()
             if not browser.is_connected():
                 processed_commands = self._process_command_queue(
                     world=world,
@@ -1747,6 +1777,7 @@ class GameSession:
                 )
                 if processed_commands > 0:
                     network_state_dirty = True
+            frame_commands_ms = (time.perf_counter() - commands_started) * 1000.0
 
             if dev_hot_enabled and now >= next_hot_check:
                 next_hot_check = now + 0.45
@@ -1799,6 +1830,7 @@ class GameSession:
 
             self._rebuild_frame_caches(world)
 
+            sim_started = time.perf_counter()
             width, height = screen.get_size()
             target_h = max(28, int(height * self._config.sprite_sheet.target_height_ratio))
             keys = pygame.key.get_pressed()
@@ -2133,6 +2165,7 @@ class GameSession:
                 finally:
                     self._active_player_context_id = prev_context
 
+            frame_sim_ms = (time.perf_counter() - sim_started) * 1000.0
             if local_render is None:
                 continue
 
@@ -2515,6 +2548,7 @@ class GameSession:
                     dynamic_hint_lines.append("NET: host mode (accepting players)")
                 else:
                     dynamic_hint_lines.append("NET: host paused (client/connect mode)")
+            render_started = time.perf_counter()
             renderer.render(
                 screen=screen,
                 world=world,
@@ -2545,6 +2579,7 @@ class GameSession:
                 f"Ksusha Rooms | host={'on' if host_started else 'off'} | backpack={'on' if local_wearing_backpack else 'off'} | F5 reload"
             )
             pygame.display.flip()
+            frame_render_ms = (time.perf_counter() - render_started) * 1000.0
 
             if host_started and lan_host.connected_clients() > 0:
                 connected = lan_host.connected_clients()
@@ -2584,6 +2619,20 @@ class GameSession:
             perf_snapshot_apply_sum_ms += frame_snapshot_apply_ms
             perf_pos_apply_max_ms = max(perf_pos_apply_max_ms, frame_pos_apply_ms)
             perf_snapshot_apply_max_ms = max(perf_snapshot_apply_max_ms, frame_snapshot_apply_ms)
+            perf_events_sum_ms += frame_events_ms
+            perf_events_max_ms = max(perf_events_max_ms, frame_events_ms)
+            perf_host_poll_sum_ms += frame_host_poll_ms
+            perf_host_poll_max_ms = max(perf_host_poll_max_ms, frame_host_poll_ms)
+            perf_client_poll_sum_ms += frame_client_poll_ms
+            perf_client_poll_max_ms = max(perf_client_poll_max_ms, frame_client_poll_ms)
+            perf_preload_sum_ms += frame_preload_ms
+            perf_preload_max_ms = max(perf_preload_max_ms, frame_preload_ms)
+            perf_commands_sum_ms += frame_commands_ms
+            perf_commands_max_ms = max(perf_commands_max_ms, frame_commands_ms)
+            perf_sim_sum_ms += frame_sim_ms
+            perf_sim_max_ms = max(perf_sim_max_ms, frame_sim_ms)
+            perf_render_sum_ms += frame_render_ms
+            perf_render_max_ms = max(perf_render_max_ms, frame_render_ms)
             if perf_log_fp is not None and (now - perf_window_started_at) >= 0.5:
                 elapsed = max(1e-6, now - perf_window_started_at)
                 frame_avg_ms = perf_frame_sum_ms / max(1, perf_frames)
@@ -2628,6 +2677,20 @@ class GameSession:
                     "net_tx_sent": int(browser_stats.get("tx_sent", 0)),
                     "net_tx_enqueued": int(browser_stats.get("tx_enqueued", 0)),
                     "net_tx_dropped": int(browser_stats.get("tx_dropped", 0)),
+                    "events_avg_ms": round(perf_events_sum_ms / max(1, perf_frames), 3),
+                    "events_max_ms": round(perf_events_max_ms, 3),
+                    "host_poll_avg_ms": round(perf_host_poll_sum_ms / max(1, perf_frames), 3),
+                    "host_poll_max_ms": round(perf_host_poll_max_ms, 3),
+                    "client_poll_avg_ms": round(perf_client_poll_sum_ms / max(1, perf_frames), 3),
+                    "client_poll_max_ms": round(perf_client_poll_max_ms, 3),
+                    "preload_avg_ms": round(perf_preload_sum_ms / max(1, perf_frames), 3),
+                    "preload_max_ms": round(perf_preload_max_ms, 3),
+                    "commands_avg_ms": round(perf_commands_sum_ms / max(1, perf_frames), 3),
+                    "commands_max_ms": round(perf_commands_max_ms, 3),
+                    "sim_avg_ms": round(perf_sim_sum_ms / max(1, perf_frames), 3),
+                    "sim_max_ms": round(perf_sim_max_ms, 3),
+                    "render_avg_ms": round(perf_render_sum_ms / max(1, perf_frames), 3),
+                    "render_max_ms": round(perf_render_max_ms, 3),
                     "last_applied_rev": (
                         int(self._last_applied_network_revision)
                         if self._last_applied_network_revision is not None
@@ -2653,6 +2716,18 @@ class GameSession:
                         "rx_gap_ms": row.get("rx_gap_ms"),
                         "net_tx_queue_len": row.get("net_tx_queue_len"),
                         "net_tx_dropped": row.get("net_tx_dropped"),
+                        "events_avg_ms": row.get("events_avg_ms"),
+                        "events_max_ms": row.get("events_max_ms"),
+                        "client_poll_avg_ms": row.get("client_poll_avg_ms"),
+                        "client_poll_max_ms": row.get("client_poll_max_ms"),
+                        "preload_avg_ms": row.get("preload_avg_ms"),
+                        "preload_max_ms": row.get("preload_max_ms"),
+                        "commands_avg_ms": row.get("commands_avg_ms"),
+                        "commands_max_ms": row.get("commands_max_ms"),
+                        "sim_avg_ms": row.get("sim_avg_ms"),
+                        "sim_max_ms": row.get("sim_max_ms"),
+                        "render_avg_ms": row.get("render_avg_ms"),
+                        "render_max_ms": row.get("render_max_ms"),
                         "last_applied_rev": row.get("last_applied_rev"),
                     }
                     try:
@@ -2670,6 +2745,20 @@ class GameSession:
                 perf_pos_apply_max_ms = 0.0
                 perf_snapshot_apply_sum_ms = 0.0
                 perf_snapshot_apply_max_ms = 0.0
+                perf_events_sum_ms = 0.0
+                perf_events_max_ms = 0.0
+                perf_host_poll_sum_ms = 0.0
+                perf_host_poll_max_ms = 0.0
+                perf_client_poll_sum_ms = 0.0
+                perf_client_poll_max_ms = 0.0
+                perf_preload_sum_ms = 0.0
+                perf_preload_max_ms = 0.0
+                perf_commands_sum_ms = 0.0
+                perf_commands_max_ms = 0.0
+                perf_sim_sum_ms = 0.0
+                perf_sim_max_ms = 0.0
+                perf_render_sum_ms = 0.0
+                perf_render_max_ms = 0.0
 
         if perf_log_fp is not None:
             try:
