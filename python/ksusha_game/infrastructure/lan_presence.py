@@ -377,7 +377,9 @@ class LanPresenceHost:
             if not accepted:
                 return
 
-            conn.settimeout(0.25)
+            # Keep both recv/send operations responsive; large socket timeouts can
+            # stall broadcast sendall() and produce visible remote movement jitter.
+            conn.settimeout(0.05)
             while not self._stop.is_set():
                 data = _recv_json_line(conn, recv_buffer)
                 if data is None:
@@ -668,6 +670,8 @@ class LanServerBrowser:
             assigned_player_id = str(data.get("player_id", "")).strip()
             with self._send_lock:
                 self._active_connection = sock
+            # Tight timeout keeps send/recv loops reactive on jittery Wi-Fi.
+            sock.settimeout(0.08)
             self._connected_server_id = entry.server_id
             self._assigned_player_id = assigned_player_id if assigned_player_id else None
             self._join_info = {
@@ -699,7 +703,7 @@ class LanServerBrowser:
             if conn is None:
                 break
             try:
-                conn.settimeout(0.4)
+                conn.settimeout(0.08)
                 data = _recv_json_line(conn, recv_buffer)
             except (OSError, ValueError, json.JSONDecodeError):
                 self.disconnect()

@@ -2107,7 +2107,7 @@ class GameSession:
                             # Short extrapolation window helps hide uneven packet spacing.
                             lead_multiplier = 1.35
                             if riding_remote:
-                                lead_multiplier = 1.95 if fast_horizontal_remote else 1.70
+                                lead_multiplier = 2.20 if fast_horizontal_remote else 1.85
                             lead_time = min(age, gap_ema * lead_multiplier)
                             tx += float(state.net_velocity_x) * lead_time
                             ty += float(state.net_velocity_y) * lead_time
@@ -2125,11 +2125,11 @@ class GameSession:
                                 # low drift => tighter follow, high drift => softer correction.
                                 if riding_remote:
                                     if drift <= 10.0:
-                                        gain = 46.0
+                                        gain = 52.0
                                     elif drift <= 28.0:
-                                        gain = 30.0
+                                        gain = 36.0
                                     else:
-                                        gain = 19.0
+                                        gain = 24.0
                                 else:
                                     if drift <= 6.0:
                                         gain = 28.0
@@ -2267,6 +2267,9 @@ class GameSession:
                         prev_y=prev_y,
                         sprite_w=sprite_w,
                         sprite_h=sprite_h,
+                        world=world,
+                        object_sprites=object_sprites,
+                        inventory=inventory,
                     )
                     self._update_grabbed_object_drag(
                         player=player,
@@ -2776,13 +2779,14 @@ class GameSession:
                     pos_interval_sec = 1.0 / 32.0
                 if any_riding_active:
                     # Skateboard movement needs denser updates for remote smoothness.
-                    pos_interval_sec = min(pos_interval_sec, 1.0 / 52.0)
+                    pos_interval_sec = min(pos_interval_sec, 1.0 / 62.0)
                 gap_sec = max(0.0, float(self._host_remote_rx_gap_ema))
-                if gap_sec >= 0.11:
-                    pos_interval_sec += 0.010
-                elif gap_sec >= 0.07:
-                    pos_interval_sec += 0.006
-                pos_interval_sec = min(0.050, max(0.018, pos_interval_sec))
+                if not any_riding_active:
+                    if gap_sec >= 0.11:
+                        pos_interval_sec += 0.010
+                    elif gap_sec >= 0.07:
+                        pos_interval_sec += 0.006
+                pos_interval_sec = min(0.050, max((0.014 if any_riding_active else 0.018), pos_interval_sec))
 
                 obj_interval_sec = 0.045
                 if gap_sec >= 0.11:
@@ -3576,19 +3580,72 @@ class GameSession:
     ) -> None:
         """Client-side local player reconcile.
 
-        Local player is rendered from immediate local input (no smoothing corrections),
-        and we only snap on large authoritative desyncs.
+        Keep local controls responsive, but absorb authoritative drift smoothly to
+        avoid visible camera/sprite jumps on follower clients.
         """
         cur_x = float(state.player.x)
         cur_y = float(state.player.y)
         drift_x = target_x - cur_x
         drift_y = target_y - cur_y
         drift = math.hypot(drift_x, drift_y)
+        if drift <= 0.9:
+            return
+        input_dx, input_dy, _h, _run, _ride = self._movement_inputs.get(
+            self._LOCAL_PLAYER_ID, (0, 0, False, 1.0, False)
+        )
+        moving_local = abs(input_dx) > 0 or abs(input_dy) > 0
         riding = bool(state.active_ride_item_id)
-        snap_distance = 132.0 if riding else 96.0
+        if moving_local:
+            if riding:
+                if drift <= 14.0:
+                    k = 0.10
+                    max_step = 1.6
+                elif drift <= 34.0:
+                    k = 0.18
+                    max_step = 2.8
+                elif drift <= 90.0:
+                    k = 0.28
+                    max_step = 4.5
+                else:
+                    k = 0.40
+                    max_step = 7.0
+            else:
+                if drift <= 10.0:
+                    k = 0.10
+                    max_step = 1.2
+                elif drift <= 26.0:
+                    k = 0.18
+                    max_step = 2.2
+                elif drift <= 70.0:
+                    k = 0.28
+                    max_step = 3.8
+                else:
+                    k = 0.42
+                    max_step = 6.2
+        else:
+            if drift <= 12.0:
+                k = 0.45
+                max_step = 5.5
+            elif drift <= 36.0:
+                k = 0.66
+                max_step = 9.0
+            else:
+                k = 0.86
+                max_step = 14.0
+        snap_distance = 205.0 if riding else 152.0
         if drift >= snap_distance:
             state.player.x = target_x
             state.player.y = target_y
+            return
+        corr_x = drift_x * k
+        corr_y = drift_y * k
+        corr_len = math.hypot(corr_x, corr_y)
+        if corr_len > max_step and corr_len > 1e-6:
+            scale = max_step / corr_len
+            corr_x *= scale
+            corr_y *= scale
+        state.player.x = cur_x + corr_x
+        state.player.y = cur_y + corr_y
 
     def _build_network_snapshot(self, world: WorldMap, *, revision: int = 0) -> dict:
         players: list[dict[str, object]] = []
@@ -3742,9 +3799,21 @@ class GameSession:
                 state.net_velocity_x = 0.0
                 state.net_velocity_y = 0.0
                 if client_mode and player_id == self._LOCAL_PLAYER_ID:
-                    # Full snapshot is authoritative state: apply immediately.
-                    state.player.x = net_x
-                    state.player.y = net_y
+                    input_dx, input_dy, _h, _run, _ride = self._movement_inputs.get(
+                        self._LOCAL_PLAYER_ID, (0, 0, False, 1.0, False)
+                    )
+                    moving_local = abs(input_dx) > 0 or abs(input_dy) > 0
+                    riding_local = bool(state.active_ride_item_id)
+                    if moving_local or riding_local:
+                        self._reconcile_local_predicted_player(
+                            state=state,
+                            target_x=net_x,
+                            target_y=net_y,
+                        )
+                    else:
+                        # In idle state, align exactly to host.
+                        state.player.x = net_x
+                        state.player.y = net_y
                     state.player.walk_time = net_walk_time
                 elif client_mode:
                     drift = math.hypot(net_x - float(state.player.x), net_y - float(state.player.y))
@@ -7127,9 +7196,9 @@ class GameSession:
             return
         move_dx = player.x - prev_x
         move_dy = player.y - prev_y
+        push_factor = self._mass_based_drag_factor(player, inventory, world, collided)
         if (
             not is_jumping
-            and is_running
             and self._can_push_object(player, inventory, world, collided)
             and self._is_moving_towards_object(
                 obj=collided,
@@ -7141,7 +7210,13 @@ class GameSession:
                 sprite_h=sprite_h,
                 object_sprites=object_sprites,
             )
-            and self._try_push_object(collided, move_dx, move_dy, world, object_sprites)
+            and self._try_push_object(
+                collided,
+                move_dx * push_factor,
+                move_dy * push_factor,
+                world,
+                object_sprites,
+            )
         ):
             current_after_push = self._player_collider_rect(player.x, player.y, sprite_w, sprite_h)
             if self._first_blocking_collision(current_after_push, world, object_sprites) is None:
@@ -7195,10 +7270,33 @@ class GameSession:
         prev_y: float,
         sprite_w: int,
         sprite_h: int,
+        world: WorldMap,
+        object_sprites: ObjectSpriteLibrary,
+        inventory: Inventory,
     ) -> None:
         current_rect = self._player_collider_rect(player.x, player.y, sprite_w, sprite_h)
-        if not self._collides_with_other_players(player_id=player_id, player_rect=current_rect):
+        collided = self._first_player_collision(player_id=player_id, player_rect=current_rect)
+        if collided is None:
             return
+        other_id = collided[0]
+        move_dx = player.x - prev_x
+        move_dy = player.y - prev_y
+        if (
+            (abs(move_dx) >= 0.001 or abs(move_dy) >= 0.001)
+            and self._try_push_player(
+                player_id=player_id,
+                other_id=other_id,
+                player=player,
+                inventory=inventory,
+                move_dx=move_dx,
+                move_dy=move_dy,
+                world=world,
+                object_sprites=object_sprites,
+            )
+        ):
+            current_after_push = self._player_collider_rect(player.x, player.y, sprite_w, sprite_h)
+            if self._first_player_collision(player_id=player_id, player_rect=current_after_push) is None:
+                return
 
         x_only_rect = self._player_collider_rect(prev_x, player.y, sprite_w, sprite_h)
         if not self._collides_with_other_players(player_id=player_id, player_rect=x_only_rect):
@@ -7213,12 +7311,12 @@ class GameSession:
         player.x = prev_x
         player.y = prev_y
 
-    def _collides_with_other_players(
+    def _first_player_collision(
         self,
         *,
         player_id: str,
         player_rect: pygame.Rect,
-    ) -> bool:
+    ) -> tuple[str, pygame.Rect] | None:
         for other_id, other_state in self._player_states.items():
             if other_id == player_id:
                 continue
@@ -7230,8 +7328,118 @@ class GameSession:
                 other_h,
             )
             if player_rect.colliderect(other_rect):
+                return (other_id, other_rect)
+        return None
+
+    def _collides_with_other_players(
+        self,
+        *,
+        player_id: str,
+        player_rect: pygame.Rect,
+        ignore_player_ids: set[str] | None = None,
+    ) -> bool:
+        ignored = ignore_player_ids or set()
+        for other_id, other_state in self._player_states.items():
+            if other_id == player_id or other_id in ignored:
+                continue
+            other_w, other_h = other_state.last_player_sprite_size
+            other_rect = self._player_collider_rect(
+                other_state.player.x,
+                other_state.player.y,
+                other_w,
+                other_h,
+            )
+            if player_rect.colliderect(other_rect):
                 return True
         return False
+
+    def _try_push_player(
+        self,
+        *,
+        player_id: str,
+        other_id: str,
+        player: Player,
+        inventory: Inventory,
+        move_dx: float,
+        move_dy: float,
+        world: WorldMap,
+        object_sprites: ObjectSpriteLibrary,
+    ) -> bool:
+        other_state = self._player_states.get(other_id)
+        if other_state is None:
+            return False
+        other_player = other_state.player
+        if not self._can_push_player(player, inventory, other_player, other_state.inventory, world):
+            return False
+
+        push_factor = self._player_push_factor(player, inventory, other_player, other_state.inventory, world)
+        dx = move_dx * push_factor
+        dy = move_dy * push_factor
+        if abs(dx) < 0.001 and abs(dy) < 0.001:
+            return False
+
+        other_w, other_h = other_state.last_player_sprite_size
+        mover_w, mover_h = self._player_states.get(player_id, other_state).last_player_sprite_size
+        mover_rect = self._player_collider_rect(player.x, player.y, mover_w, mover_h)
+        old_x, old_y = float(other_player.x), float(other_player.y)
+        candidates: list[tuple[float, float]] = [(dx, dy)]
+        if abs(dx) >= abs(dy):
+            candidates.extend([(dx, 0.0), (0.0, dy)])
+        else:
+            candidates.extend([(0.0, dy), (dx, 0.0)])
+
+        for cand_dx, cand_dy in candidates:
+            if abs(cand_dx) < 0.001 and abs(cand_dy) < 0.001:
+                continue
+            nx = old_x + cand_dx
+            ny = old_y + cand_dy
+            other_rect = self._player_collider_rect(nx, ny, other_w, other_h)
+            if self._out_of_bounds_area(other_rect, world.width, world.height) > 0:
+                continue
+            if self._collides_with_room_walls(other_rect, world):
+                continue
+            if self._first_blocking_collision(other_rect, world, object_sprites) is not None:
+                continue
+            if self._collides_with_other_players(
+                player_id=other_id,
+                player_rect=other_rect,
+                ignore_player_ids={player_id},
+            ):
+                continue
+            if other_rect.colliderect(mover_rect):
+                continue
+            other_player.x = nx
+            other_player.y = ny
+            return True
+        other_player.x = old_x
+        other_player.y = old_y
+        return False
+
+    def _can_push_player(
+        self,
+        player: Player,
+        inventory: Inventory,
+        other_player: Player,
+        other_inventory: Inventory,
+        world: WorldMap,
+    ) -> bool:
+        player_mass = player.stats.mass_kg() + self._inventory_weight_kg(inventory, world.item_weights)
+        other_mass = other_player.stats.mass_kg() + self._inventory_weight_kg(other_inventory, world.item_weights)
+        return player_mass >= other_mass * 0.65
+
+    def _player_push_factor(
+        self,
+        player: Player,
+        inventory: Inventory,
+        other_player: Player,
+        other_inventory: Inventory,
+        world: WorldMap,
+    ) -> float:
+        player_mass = max(1.0, player.stats.mass_kg() + self._inventory_weight_kg(inventory, world.item_weights))
+        other_mass = max(1.0, other_player.stats.mass_kg() + self._inventory_weight_kg(other_inventory, world.item_weights))
+        mass_ratio = min(1.8, other_mass / player_mass)
+        # Similar idea as object dragging: heavier target -> smaller displacement.
+        return max(0.22, min(0.92, 0.95 - mass_ratio * 0.55))
 
     def _collides_with_room_walls(self, player_rect: pygame.Rect, world: WorldMap) -> bool:
         for room in world.rooms:
