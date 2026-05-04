@@ -2006,20 +2006,25 @@ class GameSession:
                             frame_remote_interp_sum_px += drift
                             frame_remote_interp_max_px = max(frame_remote_interp_max_px, drift)
                             frame_remote_interp_samples += 1
-                            if drift > 0.25:
+                            if drift > 0.9:
                                 moving_by_interp = True
-                                # 0.25..0.35s to settle, smoother than hard snaps.
-                                lerp = min(1.0, dt * 7.0)
+                                # Aggressive reconcile for remote feel: less trailing.
+                                lerp = min(1.0, dt * 24.0)
                                 player.x = cx + drift_x * lerp
                                 player.y = cy + drift_y * lerp
                             else:
                                 player.x = tx
                                 player.y = ty
                         if moving_by_interp:
-                            player.walk_time += dt * self._config.sprite_sheet.anim_fps
+                            if state.net_target_walk_time is not None:
+                                target_wt = float(state.net_target_walk_time)
+                                predicted_wt = player.walk_time + dt * self._config.sprite_sheet.anim_fps
+                                player.walk_time = predicted_wt + (target_wt - predicted_wt) * min(1.0, dt * 28.0)
+                            else:
+                                player.walk_time += dt * self._config.sprite_sheet.anim_fps
                         elif state.net_target_walk_time is not None:
                             target_wt = float(state.net_target_walk_time)
-                            player.walk_time = player.walk_time + (target_wt - player.walk_time) * min(1.0, dt * 10.0)
+                            player.walk_time = player.walk_time + (target_wt - player.walk_time) * min(1.0, dt * 30.0)
                         current_frames = frames_by_dir[player.facing]
                         frame_index = int(player.walk_time) % len(current_frames)
                         current_frame = current_frames[frame_index]
@@ -3153,11 +3158,11 @@ class GameSession:
                         self._LOCAL_PLAYER_ID, (0, 0, False, 1.0, False)
                     )
                     moving_local = abs(input_dx) > 0 or abs(input_dy) > 0
-                    if drift <= 1.25:
+                    if drift <= 0.9:
                         pass
-                    elif moving_local and drift <= 28.0:
-                        state.player.x = cur_x + drift_x * 0.35
-                        state.player.y = cur_y + drift_y * 0.35
+                    elif moving_local and drift <= 20.0:
+                        state.player.x = cur_x + drift_x * 0.7
+                        state.player.y = cur_y + drift_y * 0.7
                     else:
                         state.player.x = target_x
                         state.player.y = target_y
@@ -3165,7 +3170,7 @@ class GameSession:
                     # Remote players on client: keep host position as target and
                     # snap only when drift is very large (teleport/reconnect).
                     drift = math.hypot(target_x - float(state.player.x), target_y - float(state.player.y))
-                    if drift >= 96.0:
+                    if drift >= 40.0:
                         state.player.x = target_x
                         state.player.y = target_y
                         state.player.walk_time = target_walk_time
@@ -3321,7 +3326,7 @@ class GameSession:
                 state.net_target_walk_time = net_walk_time
                 if client_mode and player_id != self._LOCAL_PLAYER_ID:
                     drift = math.hypot(net_x - float(state.player.x), net_y - float(state.player.y))
-                    if drift >= 96.0:
+                    if drift >= 40.0:
                         state.player.x = net_x
                         state.player.y = net_y
                         state.player.walk_time = net_walk_time
