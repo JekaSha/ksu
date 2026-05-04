@@ -319,6 +319,23 @@ class MathTaskEngineState:
             return None
         return self._pending_by_id(self.active_answer_id)
 
+    def _assigned_pending_answer_for_player(self, *, player_id: str) -> MathPendingAnswer | None:
+        owner = str(player_id).strip()
+        if not owner:
+            return None
+        active = self.active_pending_answer()
+        if active is not None:
+            assigned_active = str(active.assigned_player_id).strip() if active.assigned_player_id is not None else ""
+            if assigned_active == owner:
+                return active
+        for item in self.pending_answers:
+            if item.solved:
+                continue
+            assigned = str(item.assigned_player_id).strip() if item.assigned_player_id is not None else ""
+            if assigned == owner:
+                return item
+        return None
+
     def active_answer_options(self) -> list[int]:
         pending = self.active_pending_answer()
         if pending is None:
@@ -539,9 +556,9 @@ class MathTaskEngineState:
             if owner not in {None, player_id}:
                 return MathTaskOutcome(message="Это число назначено другому игроку")
             if self._player_has_assigned_pending_answer(player_id=player_id) and owner != player_id:
-                active = self.active_pending_answer()
-                if active is not None:
-                    expr = f"{active.first_digit}{active.operation}{active.second_digit}"
+                assigned_pending = self._assigned_pending_answer_for_player(player_id=player_id)
+                if assigned_pending is not None:
+                    expr = f"{assigned_pending.first_digit}{assigned_pending.operation}{assigned_pending.second_digit}"
                     return MathTaskOutcome(message=f"Сначала реши свой результат: {expr}=?")
                 return MathTaskOutcome(message="Сначала реши назначенный тебе результат")
             if owner == player_id and not round_state.assignment_accepted.get("pick_first", True):
@@ -556,9 +573,9 @@ class MathTaskEngineState:
             if owner not in {None, player_id}:
                 return MathTaskOutcome(message="Это число назначено другому игроку")
             if self._player_has_assigned_pending_answer(player_id=player_id) and owner != player_id:
-                active = self.active_pending_answer()
-                if active is not None:
-                    expr = f"{active.first_digit}{active.operation}{active.second_digit}"
+                assigned_pending = self._assigned_pending_answer_for_player(player_id=player_id)
+                if assigned_pending is not None:
+                    expr = f"{assigned_pending.first_digit}{assigned_pending.operation}{assigned_pending.second_digit}"
                     return MathTaskOutcome(message=f"Сначала реши свой результат: {expr}=?")
                 return MathTaskOutcome(message="Сначала реши назначенный тебе результат")
             if owner == player_id and not round_state.assignment_accepted.get("pick_second", True):

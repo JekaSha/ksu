@@ -472,6 +472,9 @@ class LanServerBrowser:
         self._last_sent_input: tuple[int, int, bool, float, bool] | None = None
         self._outbound_queue: deque[bytes] = deque()
         self._outbound_event = threading.Event()
+        self._outbound_sent_count = 0
+        self._outbound_enqueued_count = 0
+        self._outbound_drop_count = 0
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -549,6 +552,19 @@ class LanServerBrowser:
         info = self._join_info
         self._join_info = None
         return info
+
+    def debug_stats(self) -> dict[str, int]:
+        with self._send_lock:
+            queue_len = len(self._outbound_queue)
+            sent = int(self._outbound_sent_count)
+            enqueued = int(self._outbound_enqueued_count)
+            dropped = int(self._outbound_drop_count)
+        return {
+            "tx_queue_len": queue_len,
+            "tx_sent": sent,
+            "tx_enqueued": enqueued,
+            "tx_dropped": dropped,
+        }
 
     def send_input_update(
         self,
@@ -689,6 +705,8 @@ class LanServerBrowser:
                 continue
             try:
                 conn.sendall(payload)
+                with self._send_lock:
+                    self._outbound_sent_count += 1
             except OSError:
                 self.disconnect()
                 break
@@ -702,7 +720,9 @@ class LanServerBrowser:
             # Keep latency stable under transient stalls: drop oldest frames if queue grows.
             if len(self._outbound_queue) >= 256:
                 self._outbound_queue.popleft()
+                self._outbound_drop_count += 1
             self._outbound_queue.append(encoded)
+            self._outbound_enqueued_count += 1
         self._outbound_event.set()
 
     def _run_listener(self) -> None:

@@ -414,3 +414,19 @@ def test_accept_pending_answer_reports_no_need_when_unassigned() -> None:
     assert pending.assigned_player_id is None
     msg = state.accept_pending_answer(answer_id=pending.answer_id, player_id="p1")
     assert "не требуется" in msg.lower()
+
+
+def test_block_message_uses_players_own_pending_expression_not_foreign_active() -> None:
+    state = MathTaskEngineState()
+    _start_task(state, task_no=1)
+    rng = random.Random(1234)
+    # #1 -> assigned to p2, becomes active
+    state.pick_digit(player_id="p1", digit=2, rng=rng, online_player_ids=["p1", "p2"])
+    state.pick_digit(player_id="p1", digit=6, rng=rng, online_player_ids=["p1", "p2"])
+    # #2 -> assigned to p1, queued
+    state.pick_digit(player_id="p1", digit=3, rng=rng, online_player_ids=["p1", "p2"])
+    state.pick_digit(player_id="p1", digit=6, rng=rng, online_player_ids=["p1", "p2"])
+    blocked = state.pick_digit(player_id="p1", digit=1, rng=rng, online_player_ids=["p1", "p2"])
+    message = (blocked.message or "")
+    assert "3+6" in message
+    assert "2+6" not in message

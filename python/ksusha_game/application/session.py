@@ -881,6 +881,31 @@ class GameSession:
         was_connected = False
         last_snapshot_sent_at = 0.0
         last_position_sent_at = 0.0
+        perf_enabled_raw = str(os.getenv("KSU_NET_PERF_LOG", "1")).strip().lower()
+        perf_enabled = perf_enabled_raw not in {"0", "false", "off", "no"}
+        perf_log_fp = None
+        perf_log_path: Path | None = None
+        perf_window_started_at = time.monotonic()
+        perf_frames = 0
+        perf_frame_sum_ms = 0.0
+        perf_frame_max_ms = 0.0
+        perf_slow_frames = 0
+        perf_pos_updates = 0
+        perf_snapshots = 0
+        perf_pos_apply_sum_ms = 0.0
+        perf_pos_apply_max_ms = 0.0
+        perf_snapshot_apply_sum_ms = 0.0
+        perf_snapshot_apply_max_ms = 0.0
+        if perf_enabled:
+            try:
+                perf_dir = project_root / "runtime_logs"
+                perf_dir.mkdir(parents=True, exist_ok=True)
+                perf_log_path = perf_dir / f"lan_perf_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+                perf_log_fp = perf_log_path.open("a", encoding="utf-8", buffering=1)
+                self._set_message(f"NET PERF log: {perf_log_path}")
+            except Exception:
+                perf_log_fp = None
+                perf_log_path = None
         if host_started:
             self._set_message(f"LAN server visible: {local_host_name}:{server_port}")
         else:
@@ -893,10 +918,15 @@ class GameSession:
 
         running = True
         while running:
+            frame_started_at = time.perf_counter()
             dt = clock.tick(self._config.window.fps) / 1000.0
             now = time.monotonic()
             network_state_dirty = False
             reload_requested = False
+            frame_pos_updates = 0
+            frame_snapshots = 0
+            frame_pos_apply_ms = 0.0
+            frame_snapshot_apply_ms = 0.0
             lan_host.set_joinable(not (browser.is_connected() or browser.is_connecting()))
             current_servers = [s for s in browser.servers() if s.server_id != lan_host.server_id]
             connect_result = browser.poll_connect_result()
@@ -1665,11 +1695,17 @@ class GameSession:
                 pos_update = browser.poll_pos_update()
                 if pos_update is not None:
                     last_client_rx_monotonic = now
+                    apply_started = time.perf_counter()
                     self._apply_position_update(pos_update, world, assigned_local_id=assigned_local)
+                    frame_pos_apply_ms += (time.perf_counter() - apply_started) * 1000.0
+                    frame_pos_updates += 1
                 snapshot = browser.poll_snapshot()
                 if snapshot is not None:
                     last_client_rx_monotonic = now
+                    apply_started = time.perf_counter()
                     self._apply_network_snapshot(snapshot, world, assigned_local_id=assigned_local)
+                    frame_snapshot_apply_ms += (time.perf_counter() - apply_started) * 1000.0
+                    frame_snapshots += 1
 
             self._process_async_preloads(world, object_sprites, budget_ms=1.8, max_jobs=1)
             if not browser.is_connected():
@@ -2488,6 +2524,78 @@ class GameSession:
                     lan_host.broadcast_snapshot(self._build_network_snapshot(world))
                     last_snapshot_sent_at = now
 
+            frame_total_ms = (time.perf_counter() - frame_started_at) * 1000.0
+            perf_frames += 1
+            perf_frame_sum_ms += frame_total_ms
+            perf_frame_max_ms = max(perf_frame_max_ms, frame_total_ms)
+            if frame_total_ms >= 40.0:
+                perf_slow_frames += 1
+            perf_pos_updates += frame_pos_updates
+            perf_snapshots += frame_snapshots
+            perf_pos_apply_sum_ms += frame_pos_apply_ms
+            perf_snapshot_apply_sum_ms += frame_snapshot_apply_ms
+            perf_pos_apply_max_ms = max(perf_pos_apply_max_ms, frame_pos_apply_ms)
+            perf_snapshot_apply_max_ms = max(perf_snapshot_apply_max_ms, frame_snapshot_apply_ms)
+            if perf_log_fp is not None and (now - perf_window_started_at) >= 0.5:
+                elapsed = max(1e-6, now - perf_window_started_at)
+                frame_avg_ms = perf_frame_sum_ms / max(1, perf_frames)
+                fps_avg = float(perf_frames) / elapsed
+                rx_gap_ms = (
+                    (now - last_client_rx_monotonic) * 1000.0
+                    if last_client_rx_monotonic is not None
+                    else -1.0
+                )
+                browser_stats = browser.debug_stats()
+                row = {
+                    "ts": time.time(),
+                    "connected": bool(browser.is_connected()),
+                    "host_mode": bool(host_started),
+                    "window_sec": elapsed,
+                    "frames": int(perf_frames),
+                    "fps_avg": round(fps_avg, 2),
+                    "frame_avg_ms": round(frame_avg_ms, 3),
+                    "frame_max_ms": round(perf_frame_max_ms, 3),
+                    "slow_frames_40ms": int(perf_slow_frames),
+                    "pos_updates_applied": int(perf_pos_updates),
+                    "snapshots_applied": int(perf_snapshots),
+                    "pos_apply_avg_ms": round(perf_pos_apply_sum_ms / max(1, perf_pos_updates), 3),
+                    "pos_apply_max_ms": round(perf_pos_apply_max_ms, 3),
+                    "snapshot_apply_avg_ms": round(
+                        perf_snapshot_apply_sum_ms / max(1, perf_snapshots), 3
+                    ),
+                    "snapshot_apply_max_ms": round(perf_snapshot_apply_max_ms, 3),
+                    "rx_gap_ms": round(rx_gap_ms, 3),
+                    "players_local_state": int(len(self._player_states)),
+                    "objects_local_world": int(len(world.objects)),
+                    "spray_tags": int(len(self._spray_tags)),
+                    "command_queue_len": int(len(self._command_queue)),
+                    "preload_queue_len": int(len(self._async_preload_queue)),
+                    "net_tx_queue_len": int(browser_stats.get("tx_queue_len", 0)),
+                    "net_tx_sent": int(browser_stats.get("tx_sent", 0)),
+                    "net_tx_enqueued": int(browser_stats.get("tx_enqueued", 0)),
+                    "net_tx_dropped": int(browser_stats.get("tx_dropped", 0)),
+                }
+                try:
+                    perf_log_fp.write(json.dumps(row, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+                perf_window_started_at = now
+                perf_frames = 0
+                perf_frame_sum_ms = 0.0
+                perf_frame_max_ms = 0.0
+                perf_slow_frames = 0
+                perf_pos_updates = 0
+                perf_snapshots = 0
+                perf_pos_apply_sum_ms = 0.0
+                perf_pos_apply_max_ms = 0.0
+                perf_snapshot_apply_sum_ms = 0.0
+                perf_snapshot_apply_max_ms = 0.0
+
+        if perf_log_fp is not None:
+            try:
+                perf_log_fp.close()
+            except Exception:
+                pass
         browser.stop()
         lan_host.stop()
         pygame.quit()
