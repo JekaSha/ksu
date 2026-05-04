@@ -51,6 +51,7 @@ class RenderCache:
     ui_portrait_scale: dict[tuple[int, int], pygame.Surface] = field(default_factory=dict)
     player_shadow: dict[tuple[int, int, tuple[int, int, int, int]], pygame.Surface] = field(default_factory=dict)
     player_visible_rect: dict[tuple[int, int], pygame.Rect] = field(default_factory=dict)
+    ui_heart_sprite: dict[tuple[int, int, int, int], pygame.Surface] = field(default_factory=dict)
 
 
 class WorldRenderer:
@@ -87,6 +88,7 @@ class WorldRenderer:
         inventory: Inventory,
         spray_tags: list[SprayTag],
         message: str,
+        floating_hearts: list[tuple[float, float, int, int]] | None = None,
         dragged_object_id: str | None = None,
         extra_players: list[tuple[tuple[float, float], pygame.Surface, float, bool]] | None = None,
         control_hints: list[str] | None = None,
@@ -163,6 +165,8 @@ class WorldRenderer:
                 cur_frame,
                 cur_bob,
             )
+        if floating_hearts:
+            self._draw_floating_hearts(world_layer, camera, floating_hearts)
         # Keep wall graffiti strictly behind the character.
         # Re-drawing wall-top spray above player caused inconsistent head overlap
         # on some wall/opening combinations.
@@ -206,6 +210,51 @@ class WorldRenderer:
             self._draw_character_picker(screen, character_picker)
         if message:
             self._draw_message(screen, message)
+
+    def _draw_floating_hearts(
+        self,
+        screen: pygame.Surface,
+        camera: Camera,
+        floating_hearts: list[tuple[float, float, int, int]],
+    ) -> None:
+        if not floating_hearts:
+            return
+        view = pygame.Rect(0, 0, camera.width, camera.height)
+        for x, y, size, alpha in floating_hearts:
+            sprite = self._heart_sprite(max(8, int(size)), max(0, min(255, int(alpha))))
+            draw_x = int(round(float(x) - camera.x - (sprite.get_width() * 0.5)))
+            draw_y = int(round(float(y) - camera.y - sprite.get_height()))
+            rect = pygame.Rect(draw_x, draw_y, sprite.get_width(), sprite.get_height())
+            if not rect.colliderect(view):
+                continue
+            screen.blit(sprite, (draw_x, draw_y))
+
+    def _heart_sprite(self, size: int, alpha: int) -> pygame.Surface:
+        key = (int(size), int(alpha), 255, 98)
+        cached = self._cache.ui_heart_sprite.get(key)
+        if cached is not None:
+            return cached
+        s = max(8, int(size))
+        a = max(0, min(255, int(alpha)))
+        canvas = pygame.Surface((s, s), pygame.SRCALPHA)
+        fill = (255, 98, 138, a)
+        outline = (255, 240, 248, max(0, min(255, int(a * 0.8))))
+        r = max(2, int(round(s * 0.25)))
+        left_c = (int(round(s * 0.34)), int(round(s * 0.30)))
+        right_c = (int(round(s * 0.66)), int(round(s * 0.30)))
+        pygame.draw.circle(canvas, fill, left_c, r)
+        pygame.draw.circle(canvas, fill, right_c, r)
+        points = [
+            (int(round(s * 0.14)), int(round(s * 0.35))),
+            (int(round(s * 0.86)), int(round(s * 0.35))),
+            (int(round(s * 0.50)), int(round(s * 0.92))),
+        ]
+        pygame.draw.polygon(canvas, fill, points)
+        pygame.draw.circle(canvas, outline, left_c, r, width=1)
+        pygame.draw.circle(canvas, outline, right_c, r, width=1)
+        pygame.draw.polygon(canvas, outline, points, width=1)
+        self._cache.ui_heart_sprite[key] = canvas
+        return canvas
 
     def _build_camera(
         self,

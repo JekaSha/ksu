@@ -3,6 +3,7 @@
     {
       "id": "ksu",
       "name": "Ksusha",
+      "gender": "female",
       "sheets": {
         "walk": "walk/ksu.png",
         "walk_with_bag": "walk/ksu_with_bag.png",
@@ -15,6 +16,7 @@
     {
       "id": "jekas",
       "name": "Jekas",
+      "gender": "male",
       "weight_kg": 78,
       "height_cm": 180,
       "skills": {
@@ -32,6 +34,7 @@
     {
       "id": "lisa",
       "name": "Lisa",
+      "gender": "female",
       "weight_kg": 50,
       "height_cm": 165,
       "sheets": {

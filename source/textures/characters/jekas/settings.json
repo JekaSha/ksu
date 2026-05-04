@@ -2,6 +2,7 @@
   "character": {
     "id": "jekas",
     "name": "Jekas",
+    "gender": "male",
     "render_scale_without_ride": 1.0,
     "render_scale_with_ride": 1.15,
     "sheet_scales": {

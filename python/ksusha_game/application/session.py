@@ -20,6 +20,7 @@ from ksusha_game.config import (
     list_available_characters,
     load_user_settings,
     resolve_character_config,
+    resolve_character_gender,
     resolve_character_physical_stats,
     resolve_character_sheet_bundle,
     resolve_character_sheet_scale,
@@ -167,6 +168,10 @@ class GameSession:
     )
     _JOIN_SPAWN_MIN_DISTANCE = 30.0
     _JOIN_SPAWN_MAX_RADIUS = 180.0
+    _FACE_HEART_MAX_DISTANCE = 96.0
+    _FACE_HEART_COS_MIN = 0.60
+    _FACE_HEART_COOLDOWN_SEC = 1.1
+    _FACE_HEART_LIFETIME_SEC = 1.25
 
     def __init__(self, config: GameConfig) -> None:
         self._config = config
@@ -213,6 +218,8 @@ class GameSession:
         self._frame_objects_by_id: dict[str, WorldObject] = {}
         self._frame_rooms_by_id: dict[str, RoomArea] = {}
         self._surface_body_rect_cache: dict[int, tuple[pygame.Surface, pygame.Rect]] = {}
+        self._face_heart_effects: list[dict[str, float]] = []
+        self._face_heart_pair_last_emit: dict[tuple[str, str], float] = {}
 
     def _player_state(self, player_id: str) -> SessionPlayerState | None:
         return self._player_states.get(player_id)
@@ -466,6 +473,100 @@ class GameSession:
     def _player_has_skill(self, player_id: str, skill_id: str) -> bool:
         char_id = self._player_character_id(player_id)
         return resolve_character_skill(char_id, skill_id)
+
+    def _player_gender(self, player_id: str) -> str | None:
+        char_id = self._player_character_id(player_id)
+        return resolve_character_gender(char_id)
+
+    def _player_visual_center(self, player_id: str) -> tuple[float, float]:
+        state = self._player_state(player_id)
+        if state is None:
+            return (0.0, 0.0)
+        w, h = state.last_player_sprite_size
+        if w <= 0:
+            w = 80
+        if h <= 0:
+            h = 110
+        return (float(state.player.x) + float(w) * 0.5, float(state.player.y) + float(h) * 0.52)
+
+    @staticmethod
+    def _heart_pair_key(a: str, b: str) -> tuple[str, str]:
+        aa = str(a).strip()
+        bb = str(b).strip()
+        return (aa, bb) if aa <= bb else (bb, aa)
+
+    def _update_face_to_face_hearts(self, *, now_monotonic: float) -> None:
+        if len(self._player_states) < 2:
+            self._face_heart_effects = [fx for fx in self._face_heart_effects if fx.get("expire_at", 0.0) > now_monotonic]
+            return
+        self._face_heart_effects = [fx for fx in self._face_heart_effects if fx.get("expire_at", 0.0) > now_monotonic]
+        if len(self._face_heart_effects) > 40:
+            self._face_heart_effects = self._face_heart_effects[-40:]
+        for key, ts in list(self._face_heart_pair_last_emit.items()):
+            if (now_monotonic - float(ts)) > 12.0:
+                self._face_heart_pair_last_emit.pop(key, None)
+        player_ids = list(self._player_states.keys())
+        for i, pid_a in enumerate(player_ids):
+            state_a = self._player_state(pid_a)
+            if state_a is None:
+                continue
+            gender_a = self._player_gender(pid_a)
+            if gender_a not in {"male", "female"}:
+                continue
+            for pid_b in player_ids[i + 1 :]:
+                state_b = self._player_state(pid_b)
+                if state_b is None:
+                    continue
+                gender_b = self._player_gender(pid_b)
+                if gender_b not in {"male", "female"} or gender_b == gender_a:
+                    continue
+                ax, ay = self._player_visual_center(pid_a)
+                bx, by = self._player_visual_center(pid_b)
+                vx = bx - ax
+                vy = by - ay
+                dist = math.hypot(vx, vy)
+                if dist <= 0.001 or dist > self._FACE_HEART_MAX_DISTANCE:
+                    continue
+                inv_dist = 1.0 / dist
+                ux = vx * inv_dist
+                uy = vy * inv_dist
+                fa = FACING_VECTOR.get(state_a.player.facing, (0.0, 0.0))
+                fb = FACING_VECTOR.get(state_b.player.facing, (0.0, 0.0))
+                dot_a = fa[0] * ux + fa[1] * uy
+                dot_b = fb[0] * (-ux) + fb[1] * (-uy)
+                if dot_a < self._FACE_HEART_COS_MIN or dot_b < self._FACE_HEART_COS_MIN:
+                    continue
+                pair_key = self._heart_pair_key(pid_a, pid_b)
+                prev = float(self._face_heart_pair_last_emit.get(pair_key, 0.0))
+                if (now_monotonic - prev) < self._FACE_HEART_COOLDOWN_SEC:
+                    continue
+                self._face_heart_pair_last_emit[pair_key] = now_monotonic
+                mid_x = (ax + bx) * 0.5
+                mid_y = min(ay, by) - 30.0
+                self._face_heart_effects.append(
+                    {
+                        "x": float(mid_x),
+                        "y": float(mid_y),
+                        "spawn_at": float(now_monotonic),
+                        "expire_at": float(now_monotonic + self._FACE_HEART_LIFETIME_SEC),
+                    }
+                )
+
+    def _heart_render_items(self, *, now_monotonic: float) -> list[tuple[float, float, int, int]]:
+        out: list[tuple[float, float, int, int]] = []
+        life = max(0.25, float(self._FACE_HEART_LIFETIME_SEC))
+        for fx in self._face_heart_effects:
+            spawn_at = float(fx.get("spawn_at", now_monotonic))
+            age = max(0.0, now_monotonic - spawn_at)
+            t = min(1.0, age / life)
+            alpha = int(max(0.0, min(255.0, 255.0 * (1.0 - t))))
+            if alpha <= 3:
+                continue
+            drift_y = 26.0 * t
+            pulse = 1.0 + 0.20 * math.sin(t * math.pi * 3.0)
+            size = int(max(14, min(34, round(22 * pulse))))
+            out.append((float(fx.get("x", 0.0)), float(fx.get("y", 0.0) - drift_y), size, alpha))
+        return out
 
     def _build_math_inbox_rows(self, *, player_id: str) -> list[tuple[str, str, str | None, str | None]]:
         pid = str(player_id).strip()
@@ -2418,6 +2519,16 @@ class GameSession:
                         object_sprites=object_sprites,
                         inventory=inventory,
                     )
+                    self._resolve_player_unstuck(
+                        player_id=player_id,
+                        player=player,
+                        prev_x=prev_x,
+                        prev_y=prev_y,
+                        sprite_w=sprite_w,
+                        sprite_h=sprite_h,
+                        world=world,
+                        object_sprites=object_sprites,
+                    )
                     self._update_grabbed_object_drag(
                         player=player,
                         prev_x=prev_x,
@@ -2488,6 +2599,9 @@ class GameSession:
             frame_sim_ms = (time.perf_counter() - sim_started) * 1000.0
             if local_render is None:
                 continue
+
+            self._update_face_to_face_hearts(now_monotonic=now)
+            heart_render_items = self._heart_render_items(now_monotonic=now)
 
             self._active_player_context_id = self._LOCAL_PLAYER_ID
             message = self._message if now < self._message_until else ""
@@ -2886,6 +3000,7 @@ class GameSession:
                 inventory=local_inventory,
                 spray_tags=self._spray_tags,
                 message=message,
+                floating_hearts=heart_render_items,
                 dragged_object_id=self._grabbed_object_id,
                 extra_players=extra_renders,
                 control_hints=dynamic_hint_lines,
@@ -5296,6 +5411,7 @@ class GameSession:
                 and not self._has_math_answer_objects(world)
                 and round_state is not None
                 and round_state.stage == "pick_first"
+                and (active_pending.assigned_player_id in {None, player_id})
                 and int(active_pending.correct_answer) == int(digit)
             ):
                 solved_before = int(self._math_tasks.solved_count)
@@ -7629,6 +7745,102 @@ class GameSession:
 
         player.x = prev_x
         player.y = prev_y
+
+    def _resolve_player_unstuck(
+        self,
+        *,
+        player_id: str,
+        player: Player,
+        prev_x: float,
+        prev_y: float,
+        sprite_w: int,
+        sprite_h: int,
+        world: WorldMap,
+        object_sprites: ObjectSpriteLibrary,
+    ) -> None:
+        if self._is_player_position_walkable(
+            player_id=player_id,
+            x=player.x,
+            y=player.y,
+            sprite_w=sprite_w,
+            sprite_h=sprite_h,
+            world=world,
+            object_sprites=object_sprites,
+        ):
+            return
+        if self._is_player_position_walkable(
+            player_id=player_id,
+            x=prev_x,
+            y=prev_y,
+            sprite_w=sprite_w,
+            sprite_h=sprite_h,
+            world=world,
+            object_sprites=object_sprites,
+        ):
+            player.x = float(prev_x)
+            player.y = float(prev_y)
+            return
+
+        base_x = float(player.x)
+        base_y = float(player.y)
+        # Spiral-like local probe: picks nearest walkable position and avoids
+        # hard lock inside door apertures/wall seams.
+        distances = (8.0, 14.0, 22.0, 32.0, 44.0, 58.0, 74.0, 92.0, 112.0, 136.0)
+        directions = (
+            (1.0, 0.0),
+            (-1.0, 0.0),
+            (0.0, 1.0),
+            (0.0, -1.0),
+            (0.7071, 0.7071),
+            (0.7071, -0.7071),
+            (-0.7071, 0.7071),
+            (-0.7071, -0.7071),
+        )
+        best: tuple[float, float, float] | None = None
+        for dist in distances:
+            for dir_x, dir_y in directions:
+                nx = base_x + dir_x * dist
+                ny = base_y + dir_y * dist
+                if not self._is_player_position_walkable(
+                    player_id=player_id,
+                    x=nx,
+                    y=ny,
+                    sprite_w=sprite_w,
+                    sprite_h=sprite_h,
+                    world=world,
+                    object_sprites=object_sprites,
+                ):
+                    continue
+                metric = math.hypot(nx - base_x, ny - base_y)
+                if best is None or metric < best[0]:
+                    best = (metric, nx, ny)
+            if best is not None:
+                break
+        if best is not None:
+            player.x = best[1]
+            player.y = best[2]
+
+    def _is_player_position_walkable(
+        self,
+        *,
+        player_id: str,
+        x: float,
+        y: float,
+        sprite_w: int,
+        sprite_h: int,
+        world: WorldMap,
+        object_sprites: ObjectSpriteLibrary,
+    ) -> bool:
+        rect = self._player_collider_rect(x, y, sprite_w, sprite_h)
+        if self._out_of_bounds_area(rect, world.width, world.height) > 0:
+            return False
+        if self._collides_with_room_walls(rect, world):
+            return False
+        if self._first_blocking_collision(rect, world, object_sprites) is not None:
+            return False
+        if self._collides_with_other_players(player_id=player_id, player_rect=rect):
+            return False
+        return True
 
     def _first_player_collision(
         self,

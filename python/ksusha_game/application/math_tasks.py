@@ -656,7 +656,7 @@ class MathTaskEngineState:
             self._activate_next_pending()
             if self.active_answer_id is not None:
                 out.spawn_answers = True
-                out.message = f"Верно! Осталось: {max(0, self.iterations_target - self.solved_count)}"
+                out.message = f"Результат найден! Осталось: {max(0, self.iterations_target - self.solved_count)}"
                 return out
             if self.solved_count >= self.iterations_target and self.produced_count >= self.iterations_target:
                 self.active = False
@@ -666,9 +666,9 @@ class MathTaskEngineState:
                     now_ts=float(now_ts) if now_ts is not None else time.time(),
                 )
                 out.clear_digits = True
-                out.message = f"Серия завершена! Решено {self.solved_count}/{self.iterations_target}"
+                out.message = f"Результат найден! Серия завершена: {self.solved_count}/{self.iterations_target}"
                 return out
-            out.message = "Верно! Очередь ответов пока пуста"
+            out.message = "Результат найден! Очередь ответов пока пуста"
             return out
         return MathTaskOutcome(message="Неверный ответ. Попробуй другой")
 

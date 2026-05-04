@@ -1,6 +1,7 @@
 {
   "id": "lisa",
   "name": "Lisa",
+  "gender": "female",
   "sheets": {
     "walk": "walk/lisa.png",
     "backpack": "backpack/lisa_with_bag.png"

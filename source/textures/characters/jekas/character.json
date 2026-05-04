@@ -1,6 +1,7 @@
 {
   "id": "jekas",
   "name": "Jekas",
+  "gender": "male",
   "skills": {
     "skateboard": true
   },

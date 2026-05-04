@@ -332,6 +332,19 @@ def resolve_character_skill(character_id: str | None, skill_id: str) -> bool:
     return False
 
 
+def resolve_character_gender(character_id: str | None) -> str | None:
+    characters_root = Path("source/textures/characters")
+    character = str(character_id or "").strip() or _resolve_character_id()
+    manifest = _resolve_character_manifest(character, characters_root)
+    if manifest is None:
+        return None
+    raw = manifest.get("gender")
+    token = str(raw).strip().lower() if raw is not None else ""
+    if token in {"male", "female"}:
+        return token
+    return None
+
+
 def resolve_character_sheet_path(character_id: str | None, sheet_id: str) -> Path | None:
     sheet_token = str(sheet_id or "").strip()
     if not sheet_token:
