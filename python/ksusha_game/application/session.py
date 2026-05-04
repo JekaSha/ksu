@@ -197,6 +197,8 @@ class GameSession:
         self._network_object_targets: dict[str, dict[str, float]] = {}
         self._network_last_sent_object_pos: dict[str, tuple[float, float]] = {}
         self._network_last_sent_object_full_at: float = 0.0
+        self._client_rx_gap_ema: float = 1.0 / 30.0
+        self._host_remote_rx_gap_ema: float = 1.0 / 30.0
         self._net_host_bspd: float = 0.0
         self._last_applied_objects_signature: tuple[tuple[object, ...], ...] | None = None
         self._last_applied_network_revision: int | None = None
@@ -867,6 +869,7 @@ class GameSession:
         connect_requested_target: ServerEntry | None = None
         last_connected_target: ServerEntry | None = None
         reconnect_candidate: ServerEntry | None = None
+        disconnect_confirm_pending = False
         auto_reconnect_active = False
         auto_reconnect_next_attempt_at: float | None = None
         auto_reconnect_attempts = 0
@@ -903,6 +906,8 @@ class GameSession:
                 break
         was_connected = False
         last_snapshot_sent_at = 0.0
+        last_pos_sent_at = 0.0
+        last_object_pos_sent_at = 0.0
         perf_enabled_raw = str(os.getenv("KSU_NET_PERF_LOG", "1")).strip().lower()
         perf_enabled = perf_enabled_raw not in {"0", "false", "off", "no"}
         perf_log_fp = None
@@ -1020,6 +1025,7 @@ class GameSession:
                     auto_reconnect_active = False
                     auto_reconnect_next_attempt_at = None
                     auto_reconnect_attempts = 0
+                    disconnect_confirm_pending = False
                     self._set_message(f"Connected to host | команда: {self._team_name(local_team_id)}")
                 else:
                     if auto_reconnect_active and connect_requested_target is not None:
@@ -1051,6 +1057,7 @@ class GameSession:
                 connected_host_name = None
                 connected_host_player_name = None
                 reconnect_candidate = None
+                disconnect_confirm_pending = False
                 self._reset_network_player_id_maps()
                 auto_reconnect_active = last_connected_target is not None
                 if auto_reconnect_active:
@@ -1198,6 +1205,7 @@ class GameSession:
                         show_server_list = not show_server_list
                         if not show_server_list:
                             reconnect_candidate = None
+                            disconnect_confirm_pending = False
                         for controller in input_controllers.values():
                             controller.clear_pressed()
                         continue
@@ -1208,6 +1216,7 @@ class GameSession:
                         if show_server_list:
                             show_server_list = False
                             reconnect_candidate = None
+                            disconnect_confirm_pending = False
                         if show_task_menu:
                             show_task_menu = False
                             task_menu_section = "quests"
@@ -1233,6 +1242,7 @@ class GameSession:
                         if show_server_list:
                             show_server_list = False
                             reconnect_candidate = None
+                            disconnect_confirm_pending = False
                         if show_character_menu:
                             show_character_menu = False
                         if show_team_menu:
@@ -1282,6 +1292,10 @@ class GameSession:
                             reconnect_candidate = None
                             self._set_message("Reconnect canceled")
                             continue
+                        if disconnect_confirm_pending:
+                            disconnect_confirm_pending = False
+                            self._set_message("Disconnect canceled")
+                            continue
                         if show_character_menu:
                             if startup_character_pick_active:
                                 startup_character_pick_active = False
@@ -1290,6 +1304,7 @@ class GameSession:
                             continue
                         if show_server_list:
                             show_server_list = False
+                            disconnect_confirm_pending = False
                             continue
                         if show_team_menu:
                             show_team_menu = False
@@ -1769,6 +1784,23 @@ class GameSession:
                             perf_client_log_fp.write(json.dumps(row, ensure_ascii=False) + "\n")
                         except Exception:
                             pass
+                if remote_perf_rows:
+                    gap_samples_sec: list[float] = []
+                    for _pid, _pname, _pteam, payload in remote_perf_rows:
+                        if not isinstance(payload, dict):
+                            continue
+                        try:
+                            rx_gap_ms = float(payload.get("rx_gap_ms", -1.0))
+                        except (TypeError, ValueError):
+                            rx_gap_ms = -1.0
+                        if rx_gap_ms <= 0.0:
+                            continue
+                        gap_samples_sec.append(max(0.005, min(0.35, rx_gap_ms / 1000.0)))
+                    if gap_samples_sec:
+                        worst_gap = max(gap_samples_sec)
+                        self._host_remote_rx_gap_ema = (
+                            self._host_remote_rx_gap_ema * 0.9 + worst_gap * 0.1
+                        )
             frame_host_poll_ms = (time.perf_counter() - host_poll_started) * 1000.0
 
             client_poll_started = time.perf_counter()
@@ -1789,6 +1821,12 @@ class GameSession:
                     frame_snapshot_apply_ms += (time.perf_counter() - apply_started) * 1000.0
                     frame_snapshots += 1
             frame_client_poll_ms = (time.perf_counter() - client_poll_started) * 1000.0
+            if browser.is_connected():
+                if last_client_rx_monotonic is not None:
+                    gap_now = max(0.005, min(0.35, now - last_client_rx_monotonic))
+                    self._client_rx_gap_ema = self._client_rx_gap_ema * 0.92 + gap_now * 0.08
+            else:
+                self._client_rx_gap_ema = 1.0 / 30.0
 
             preload_started = time.perf_counter()
             self._process_async_preloads(world, object_sprites, budget_ms=1.8, max_jobs=1)
@@ -1849,6 +1887,8 @@ class GameSession:
                     self._network_object_targets.clear()
                     self._network_last_sent_object_pos.clear()
                     self._network_last_sent_object_full_at = 0.0
+                    self._client_rx_gap_ema = 1.0 / 30.0
+                    self._host_remote_rx_gap_ema = 1.0 / 30.0
                     self._surface_body_rect_cache.clear()
                     renderer.clear_render_cache()
                     self._set_message("Hot reload: assets/map reloaded")
@@ -2029,7 +2069,16 @@ class GameSession:
                                 age = max(0.0, now_interp - float(state.net_target_at))
                             else:
                                 age = 0.0
-                            gap_ema = max(1.0 / 90.0, min(0.20, float(state.net_update_gap_ema)))
+                            gap_ema = max(
+                                1.0 / 90.0,
+                                min(
+                                    0.20,
+                                    max(
+                                        float(state.net_update_gap_ema),
+                                        float(self._client_rx_gap_ema) * 0.92,
+                                    ),
+                                ),
+                            )
                             # Short extrapolation window helps hide uneven packet spacing.
                             lead_time = min(age, gap_ema * 1.35)
                             tx += float(state.net_velocity_x) * lead_time
@@ -2052,6 +2101,8 @@ class GameSession:
                                     gain = 18.0
                                 else:
                                     gain = 12.0
+                                jitter_ratio = max(0.0, min(1.0, (gap_ema - 0.03) / 0.09))
+                                gain *= (1.0 - 0.28 * jitter_ratio)
                                 lerp = min(1.0, dt * gain)
                                 player.x = cx + drift_x * lerp
                                 player.y = cy + drift_y * lerp
@@ -2674,9 +2725,41 @@ class GameSession:
 
             if host_started and lan_host.connected_clients() > 0:
                 connected = lan_host.connected_clients()
-                # Send positions every frame — no throttle. LAN bandwidth is abundant;
-                # the TCP TX queue in lan_presence drops oldest frames under pressure.
-                lan_host.broadcast_positions(self._build_position_update(world))
+                # Adaptive send cadence: avoid bursty per-frame TCP traffic on LAN/Wi-Fi.
+                if connected <= 3:
+                    pos_interval_sec = 1.0 / 42.0
+                elif connected <= 6:
+                    pos_interval_sec = 1.0 / 36.0
+                else:
+                    pos_interval_sec = 1.0 / 32.0
+                gap_sec = max(0.0, float(self._host_remote_rx_gap_ema))
+                if gap_sec >= 0.11:
+                    pos_interval_sec += 0.010
+                elif gap_sec >= 0.07:
+                    pos_interval_sec += 0.006
+                pos_interval_sec = min(0.050, max(0.018, pos_interval_sec))
+
+                obj_interval_sec = 0.045
+                if gap_sec >= 0.11:
+                    obj_interval_sec = 0.064
+                elif gap_sec >= 0.07:
+                    obj_interval_sec = 0.054
+                # Keep dragged-object motion snappy on followers.
+                if any(s.grabbed_object_id for s in self._player_states.values()):
+                    obj_interval_sec = min(obj_interval_sec, 0.034)
+                # Objects are never slower than players cadence.
+                obj_interval_sec = max(obj_interval_sec, pos_interval_sec)
+
+                send_players = (now - last_pos_sent_at) >= pos_interval_sec
+                send_objects = (now - last_object_pos_sent_at) >= obj_interval_sec
+                if send_players or send_objects:
+                    lan_host.broadcast_positions(
+                        self._build_position_update(world, include_objects=send_objects)
+                    )
+                    if send_players:
+                        last_pos_sent_at = now
+                    if send_objects:
+                        last_object_pos_sent_at = now
                 # Full state sync for mutable world/player state:
                 # immediate push on mutation + adaptive periodic cadence under load.
                 if connected >= 9:
@@ -2760,6 +2843,8 @@ class GameSession:
                     ),
                     "snapshot_apply_max_ms": round(perf_snapshot_apply_max_ms, 3),
                     "rx_gap_ms": round(rx_gap_ms, 3),
+                    "rx_gap_ema_ms": round(float(self._client_rx_gap_ema) * 1000.0, 3),
+                    "remote_rx_gap_ema_ms": round(float(self._host_remote_rx_gap_ema) * 1000.0, 3),
                     "players_local_state": int(len(self._player_states)),
                     "objects_local_world": int(len(world.objects)),
                     "spray_tags": int(len(self._spray_tags)),
@@ -2811,6 +2896,7 @@ class GameSession:
                         "snapshot_apply_avg_ms": row.get("snapshot_apply_avg_ms"),
                         "snapshot_apply_max_ms": row.get("snapshot_apply_max_ms"),
                         "rx_gap_ms": row.get("rx_gap_ms"),
+                        "rx_gap_ema_ms": row.get("rx_gap_ema_ms"),
                         "net_tx_queue_len": row.get("net_tx_queue_len"),
                         "net_tx_dropped": row.get("net_tx_dropped"),
                         "events_avg_ms": row.get("events_avg_ms"),
@@ -3145,7 +3231,7 @@ class GameSession:
             return "host:p1"
         return raw_id
 
-    def _build_position_update(self, world: WorldMap) -> bytes:
+    def _build_position_update(self, world: WorldMap, *, include_objects: bool = True) -> bytes:
         """Build a compact per-frame position-only payload, pre-serialized to bytes."""
         players = [
             {
@@ -3168,31 +3254,32 @@ class GameSession:
             host_bspd = round(min(hw, hh) * float(self._config.sprite_sheet.move_speed_ratio), 2)
         else:
             host_bspd = 0.0
-        now_ts = time.time()
-        emit_full_objects = (now_ts - float(self._network_last_sent_object_full_at)) >= 0.45
         dynamic_objects: list[dict[str, object]] = []
-        known_object_ids: set[str] = set()
-        for obj in world.objects:
-            object_id = str(obj.object_id).strip()
-            if not object_id:
-                continue
-            known_object_ids.add(object_id)
-            # Door geometry is static; keep it in snapshot channel only.
-            if obj.kind == "door":
-                continue
-            ox = round(float(obj.x), 2)
-            oy = round(float(obj.y), 2)
-            prev = self._network_last_sent_object_pos.get(object_id)
-            changed = prev is None or abs(prev[0] - ox) >= 0.01 or abs(prev[1] - oy) >= 0.01
-            if changed or emit_full_objects:
-                dynamic_objects.append({"id": object_id, "x": ox, "y": oy})
-            self._network_last_sent_object_pos[object_id] = (ox, oy)
-        # Clean up removed objects from send-cache.
-        for stale_id in list(self._network_last_sent_object_pos.keys()):
-            if stale_id not in known_object_ids:
-                self._network_last_sent_object_pos.pop(stale_id, None)
-        if emit_full_objects:
-            self._network_last_sent_object_full_at = now_ts
+        if include_objects:
+            now_ts = time.time()
+            emit_full_objects = (now_ts - float(self._network_last_sent_object_full_at)) >= 1.25
+            known_object_ids: set[str] = set()
+            for obj in world.objects:
+                object_id = str(obj.object_id).strip()
+                if not object_id:
+                    continue
+                known_object_ids.add(object_id)
+                # Door geometry is static; keep it in snapshot channel only.
+                if obj.kind == "door":
+                    continue
+                ox = round(float(obj.x), 2)
+                oy = round(float(obj.y), 2)
+                prev = self._network_last_sent_object_pos.get(object_id)
+                changed = prev is None or abs(prev[0] - ox) >= 0.01 or abs(prev[1] - oy) >= 0.01
+                if changed or emit_full_objects:
+                    dynamic_objects.append({"id": object_id, "x": ox, "y": oy})
+                self._network_last_sent_object_pos[object_id] = (ox, oy)
+            # Clean up removed objects from send-cache.
+            for stale_id in list(self._network_last_sent_object_pos.keys()):
+                if stale_id not in known_object_ids:
+                    self._network_last_sent_object_pos.pop(stale_id, None)
+            if emit_full_objects:
+                self._network_last_sent_object_full_at = now_ts
         # Relay every player's current input so clients can simulate locally.
         # [dx, dy, holding_pickup, run_multiplier, ride_hold, grabbed_object_id]
         inputs_relay: dict[str, list] = {}
@@ -3209,7 +3296,7 @@ class GameSession:
             "bspd": host_bspd,
             "st": round(send_st, 4),
         }
-        if dynamic_objects:
+        if include_objects and dynamic_objects:
             pos_payload["objects"] = dynamic_objects
         raw: dict[str, object] = {"type": "pos", "pos": pos_payload}
         return (json.dumps(raw, ensure_ascii=True) + "\n").encode("utf-8")
@@ -3389,7 +3476,16 @@ class GameSession:
             set_at = float(target.get("set_at", now_mono))
             vel_x = float(target.get("vx", 0.0))
             vel_y = float(target.get("vy", 0.0))
-            gap_ema = max(1.0 / 90.0, min(0.20, float(target.get("gap_ema", 1.0 / 30.0))))
+            gap_ema = max(
+                1.0 / 90.0,
+                min(
+                    0.20,
+                    max(
+                        float(target.get("gap_ema", 1.0 / 30.0)),
+                        float(self._client_rx_gap_ema) * 0.92,
+                    ),
+                ),
+            )
             target_age = max(0.0, now_mono - set_at)
             # Adaptive lead: compensate packet cadence jitter with short extrapolation.
             lead_time = min(target_age, gap_ema * 1.35)
@@ -3408,7 +3504,10 @@ class GameSession:
                     continue
                 lerp = min(1.0, dt * 6.0)
             else:
-                lerp = min(1.0, max(0.0, float(dt) * 40.0))
+                base_gain = 40.0
+                jitter_ratio = max(0.0, min(1.0, (gap_ema - 0.03) / 0.09))
+                base_gain *= (1.0 - 0.32 * jitter_ratio)
+                lerp = min(1.0, max(0.0, float(dt) * base_gain))
             if drift <= 0.08:
                 obj.x = tx_pred
                 obj.y = ty_pred
