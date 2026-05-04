@@ -13,6 +13,10 @@ class SessionPlayerState:
     net_target_x: float | None = None
     net_target_y: float | None = None
     net_target_walk_time: float | None = None
+    net_target_at: float | None = None
+    net_velocity_x: float = 0.0
+    net_velocity_y: float = 0.0
+    net_update_gap_ema: float = 1.0 / 30.0
     active_ride_item_id: str | None = None
     standing_on_object_id: str | None = None
     grabbed_object_id: str | None = None
