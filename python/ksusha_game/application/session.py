@@ -2610,6 +2610,7 @@ class GameSession:
                 multiplayer_render_mode=(
                     "fast" if (browser.is_connected() and len(self._player_states) >= 2) else "full"
                 ),
+                dt=dt,
             )
 
             pygame.display.set_caption(
