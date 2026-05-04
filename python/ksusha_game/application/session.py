@@ -916,6 +916,9 @@ class GameSession:
         perf_sim_max_ms = 0.0
         perf_render_sum_ms = 0.0
         perf_render_max_ms = 0.0
+        perf_remote_interp_sum_px = 0.0
+        perf_remote_interp_max_px = 0.0
+        perf_remote_interp_samples = 0
         network_state_revision = 1
         if perf_enabled:
             try:
@@ -960,6 +963,9 @@ class GameSession:
             frame_commands_ms = 0.0
             frame_sim_ms = 0.0
             frame_render_ms = 0.0
+            frame_remote_interp_sum_px = 0.0
+            frame_remote_interp_max_px = 0.0
+            frame_remote_interp_samples = 0
             lan_host.set_joinable(not (browser.is_connected() or browser.is_connecting()))
             current_servers = [s for s in browser.servers() if s.server_id != lan_host.server_id]
             connect_result = browser.poll_connect_result()
@@ -1988,6 +1994,32 @@ class GameSession:
                     if net_client_mode and not is_local:
                         # Host-authoritative mode: do not locally simulate players,
                         # otherwise zero-input frames reset walk_time and kill animation.
+                        moving_by_interp = False
+                        if state.net_target_x is not None and state.net_target_y is not None:
+                            tx = float(state.net_target_x)
+                            ty = float(state.net_target_y)
+                            cx = float(player.x)
+                            cy = float(player.y)
+                            drift_x = tx - cx
+                            drift_y = ty - cy
+                            drift = math.hypot(drift_x, drift_y)
+                            frame_remote_interp_sum_px += drift
+                            frame_remote_interp_max_px = max(frame_remote_interp_max_px, drift)
+                            frame_remote_interp_samples += 1
+                            if drift > 0.25:
+                                moving_by_interp = True
+                                # 0.25..0.35s to settle, smoother than hard snaps.
+                                lerp = min(1.0, dt * 7.0)
+                                player.x = cx + drift_x * lerp
+                                player.y = cy + drift_y * lerp
+                            else:
+                                player.x = tx
+                                player.y = ty
+                        if moving_by_interp:
+                            player.walk_time += dt * self._config.sprite_sheet.anim_fps
+                        elif state.net_target_walk_time is not None:
+                            target_wt = float(state.net_target_walk_time)
+                            player.walk_time = player.walk_time + (target_wt - player.walk_time) * min(1.0, dt * 10.0)
                         current_frames = frames_by_dir[player.facing]
                         frame_index = int(player.walk_time) % len(current_frames)
                         current_frame = current_frames[frame_index]
@@ -2638,6 +2670,9 @@ class GameSession:
             perf_sim_max_ms = max(perf_sim_max_ms, frame_sim_ms)
             perf_render_sum_ms += frame_render_ms
             perf_render_max_ms = max(perf_render_max_ms, frame_render_ms)
+            perf_remote_interp_sum_px += frame_remote_interp_sum_px
+            perf_remote_interp_max_px = max(perf_remote_interp_max_px, frame_remote_interp_max_px)
+            perf_remote_interp_samples += frame_remote_interp_samples
             if perf_log_fp is not None and (now - perf_window_started_at) >= 0.5:
                 elapsed = max(1e-6, now - perf_window_started_at)
                 frame_avg_ms = perf_frame_sum_ms / max(1, perf_frames)
@@ -2696,6 +2731,11 @@ class GameSession:
                     "sim_max_ms": round(perf_sim_max_ms, 3),
                     "render_avg_ms": round(perf_render_sum_ms / max(1, perf_frames), 3),
                     "render_max_ms": round(perf_render_max_ms, 3),
+                    "remote_interp_avg_px": round(
+                        perf_remote_interp_sum_px / max(1, perf_remote_interp_samples), 3
+                    ),
+                    "remote_interp_max_px": round(perf_remote_interp_max_px, 3),
+                    "remote_interp_samples": int(perf_remote_interp_samples),
                     "last_applied_rev": (
                         int(self._last_applied_network_revision)
                         if self._last_applied_network_revision is not None
@@ -2733,6 +2773,9 @@ class GameSession:
                         "sim_max_ms": row.get("sim_max_ms"),
                         "render_avg_ms": row.get("render_avg_ms"),
                         "render_max_ms": row.get("render_max_ms"),
+                        "remote_interp_avg_px": row.get("remote_interp_avg_px"),
+                        "remote_interp_max_px": row.get("remote_interp_max_px"),
+                        "remote_interp_samples": row.get("remote_interp_samples"),
                         "last_applied_rev": row.get("last_applied_rev"),
                     }
                     try:
@@ -2764,6 +2807,9 @@ class GameSession:
                 perf_sim_max_ms = 0.0
                 perf_render_sum_ms = 0.0
                 perf_render_max_ms = 0.0
+                perf_remote_interp_sum_px = 0.0
+                perf_remote_interp_max_px = 0.0
+                perf_remote_interp_samples = 0
 
         if perf_log_fp is not None:
             try:
@@ -2937,6 +2983,9 @@ class GameSession:
         self._player_states[player_id] = SessionPlayerState(
             player=Player(x=float(spawn_x), y=float(spawn_y), stats=resolved_stats),
             inventory=Inventory(base_capacity=base_inventory_capacity, capacity=base_inventory_capacity),
+            net_target_x=float(spawn_x),
+            net_target_y=float(spawn_y),
+            net_target_walk_time=0.0,
         )
         self._set_player_display_name(player_id, player_id)
         if team_id is not None:
@@ -3088,6 +3137,10 @@ class GameSession:
             try:
                 target_x = float(item.get("x", state.player.x))
                 target_y = float(item.get("y", state.player.y))
+                target_walk_time = float(item.get("wt", state.player.walk_time))
+                state.net_target_x = target_x
+                state.net_target_y = target_y
+                state.net_target_walk_time = target_walk_time
                 if player_id == self._LOCAL_PLAYER_ID:
                     # Local prediction reconciliation:
                     # keep controls snappy and avoid hard snaps each network tick.
@@ -3109,10 +3162,16 @@ class GameSession:
                         state.player.x = target_x
                         state.player.y = target_y
                 else:
-                    state.player.x = target_x
-                    state.player.y = target_y
+                    # Remote players on client: keep host position as target and
+                    # snap only when drift is very large (teleport/reconnect).
+                    drift = math.hypot(target_x - float(state.player.x), target_y - float(state.player.y))
+                    if drift >= 96.0:
+                        state.player.x = target_x
+                        state.player.y = target_y
+                        state.player.walk_time = target_walk_time
                 state.player.facing = Direction(str(item.get("f", state.player.facing.value)))
-                state.player.walk_time = float(item.get("wt", state.player.walk_time))
+                if player_id == self._LOCAL_PLAYER_ID:
+                    state.player.walk_time = target_walk_time
                 state.player.jump_time_left = max(0.0, float(item.get("jt", state.player.jump_time_left)))
                 ride_item_id = str(item.get("ri", state.active_ride_item_id or "")).strip().lower()
                 state.active_ride_item_id = ride_item_id or None
@@ -3213,6 +3272,7 @@ class GameSession:
                     assigned_remote_id = pid
                     break
 
+        client_mode = assigned_local_id is not None or bool(self._network_local_to_raw_player_ids)
         seen: set[str] = set()
         player_id_map: dict[str, str] = {}
         for item in payload:
@@ -3253,11 +3313,25 @@ class GameSession:
             if state is None:
                 continue
             try:
-                state.player.x = float(item.get("x", state.player.x))
-                state.player.y = float(item.get("y", state.player.y))
+                net_x = float(item.get("x", state.player.x))
+                net_y = float(item.get("y", state.player.y))
+                net_walk_time = float(item.get("walk_time", state.player.walk_time))
+                state.net_target_x = net_x
+                state.net_target_y = net_y
+                state.net_target_walk_time = net_walk_time
+                if client_mode and player_id != self._LOCAL_PLAYER_ID:
+                    drift = math.hypot(net_x - float(state.player.x), net_y - float(state.player.y))
+                    if drift >= 96.0:
+                        state.player.x = net_x
+                        state.player.y = net_y
+                        state.player.walk_time = net_walk_time
+                else:
+                    state.player.x = net_x
+                    state.player.y = net_y
                 facing_raw = str(item.get("facing", state.player.facing.value))
                 state.player.facing = Direction(facing_raw)
-                state.player.walk_time = float(item.get("walk_time", state.player.walk_time))
+                if (not client_mode) or player_id == self._LOCAL_PLAYER_ID:
+                    state.player.walk_time = net_walk_time
                 state.player.jump_time_left = max(0.0, float(item.get("jump_time_left", state.player.jump_time_left)))
                 ride_item_id = str(item.get("ride_item_id", state.active_ride_item_id or "")).strip().lower()
                 state.active_ride_item_id = ride_item_id or None
