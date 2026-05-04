@@ -1363,6 +1363,24 @@ class GameSession:
                                 reconnect_candidate = None
                                 self._set_message("Reconnect canceled")
                             continue
+                        if disconnect_confirm_pending:
+                            if event_key in {pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_y}:
+                                disconnect_confirm_pending = False
+                                auto_reconnect_active = False
+                                auto_reconnect_next_attempt_at = None
+                                auto_reconnect_attempts = 0
+                                last_connected_target = None
+                                reconnect_candidate = None
+                                browser.disconnect()
+                                connected_since_monotonic = None
+                                connected_host_summary = None
+                                connected_host_name = None
+                                connected_host_player_name = None
+                                self._set_message("Disconnected from host")
+                            elif event_key in {pygame.K_n, pygame.K_ESCAPE, pygame.K_q}:
+                                disconnect_confirm_pending = False
+                                self._set_message("Disconnect canceled")
+                            continue
 
                         if event_key in {pygame.K_UP, pygame.K_w}:
                             if current_servers:
@@ -1372,7 +1390,11 @@ class GameSession:
                             if current_servers:
                                 selected_server_idx = (selected_server_idx + 1) % len(current_servers)
                             continue
-                        if event_key in {pygame.K_RETURN, pygame.K_KP_ENTER}:
+                        if event_key == pygame.K_q and browser.is_connected():
+                            disconnect_confirm_pending = True
+                            self._set_message("Disconnect from current host? Enter/Y = yes, Esc/N = no")
+                            continue
+                        if event_key in {pygame.K_q, pygame.K_RETURN, pygame.K_KP_ENTER}:
                             if not current_servers:
                                 self._set_message("No LAN servers found")
                                 continue
@@ -1396,6 +1418,7 @@ class GameSession:
                             last_connected_target = target
                             auto_reconnect_active = False
                             auto_reconnect_next_attempt_at = None
+                            disconnect_confirm_pending = False
                             self._set_message(
                                 f"Connecting: {target.host_name} ({target.player_name}) [{target.level_name}]"
                             )
@@ -2061,6 +2084,8 @@ class GameSession:
                         # Host-authoritative remote players: do not run local gameplay
                         # simulation/collisions for them on client, only smooth transform.
                         moving_by_interp = False
+                        riding_remote = bool(state.active_ride_item_id)
+                        fast_horizontal_remote = riding_remote and abs(dx) > 0
                         if state.net_target_x is not None and state.net_target_y is not None:
                             tx = float(state.net_target_x)
                             ty = float(state.net_target_y)
@@ -2080,7 +2105,10 @@ class GameSession:
                                 ),
                             )
                             # Short extrapolation window helps hide uneven packet spacing.
-                            lead_time = min(age, gap_ema * 1.35)
+                            lead_multiplier = 1.35
+                            if riding_remote:
+                                lead_multiplier = 1.95 if fast_horizontal_remote else 1.70
+                            lead_time = min(age, gap_ema * lead_multiplier)
                             tx += float(state.net_velocity_x) * lead_time
                             ty += float(state.net_velocity_y) * lead_time
                             cx = float(player.x)
@@ -2095,14 +2123,22 @@ class GameSession:
                                 moving_by_interp = True
                                 # Adaptive smoothing by drift size:
                                 # low drift => tighter follow, high drift => softer correction.
-                                if drift <= 6.0:
-                                    gain = 28.0
-                                elif drift <= 20.0:
-                                    gain = 18.0
+                                if riding_remote:
+                                    if drift <= 10.0:
+                                        gain = 46.0
+                                    elif drift <= 28.0:
+                                        gain = 30.0
+                                    else:
+                                        gain = 19.0
                                 else:
-                                    gain = 12.0
+                                    if drift <= 6.0:
+                                        gain = 28.0
+                                    elif drift <= 20.0:
+                                        gain = 18.0
+                                    else:
+                                        gain = 12.0
                                 jitter_ratio = max(0.0, min(1.0, (gap_ema - 0.03) / 0.09))
-                                gain *= (1.0 - 0.28 * jitter_ratio)
+                                gain *= (1.0 - ((0.18 if riding_remote else 0.28) * jitter_ratio))
                                 lerp = min(1.0, dt * gain)
                                 player.x = cx + drift_x * lerp
                                 player.y = cy + drift_y * lerp
@@ -2113,12 +2149,14 @@ class GameSession:
                             if state.net_target_walk_time is not None:
                                 target_wt = float(state.net_target_walk_time)
                                 predicted_wt = player.walk_time + dt * self._config.sprite_sheet.anim_fps
-                                player.walk_time = predicted_wt + (target_wt - predicted_wt) * min(1.0, dt * 22.0)
+                                walk_gain = 28.0 if riding_remote else 22.0
+                                player.walk_time = predicted_wt + (target_wt - predicted_wt) * min(1.0, dt * walk_gain)
                             else:
                                 player.walk_time += dt * self._config.sprite_sheet.anim_fps
                         elif state.net_target_walk_time is not None:
                             target_wt = float(state.net_target_walk_time)
-                            player.walk_time = player.walk_time + (target_wt - player.walk_time) * min(1.0, dt * 24.0)
+                            walk_gain = 30.0 if riding_remote else 24.0
+                            player.walk_time = player.walk_time + (target_wt - player.walk_time) * min(1.0, dt * walk_gain)
                         current_frames = frames_by_dir[player.facing]
                         frame_index = int(player.walk_time) % len(current_frames)
                         current_frame = current_frames[frame_index]
@@ -2312,7 +2350,7 @@ class GameSession:
             task_result_lines: list[str] | None = None
             character_picker: dict[str, object] | None = None
             if show_server_list:
-                lan_menu_lines = ["LAN HOSTS", "W/S or UP/DOWN: select | ENTER: connect | ESC: close"]
+                lan_menu_lines = ["LAN HOSTS", "W/S or UP/DOWN: select | Q: connect/disconnect | ENTER: confirm | ESC: close"]
                 connected_sid = browser.connected_server_id()
                 if browser.is_connected():
                     host_text = connected_host_summary or f"server:{connected_sid}"
@@ -2328,6 +2366,9 @@ class GameSession:
                 if reconnect_candidate is not None:
                     lan_menu_lines.append("RECONNECT TO SELECTED HOST?")
                     lan_menu_lines.append("ENTER/Y: yes | ESC/N: no")
+                elif disconnect_confirm_pending:
+                    lan_menu_lines.append("DISCONNECT FROM CURRENT HOST?")
+                    lan_menu_lines.append("ENTER/Y: yes | ESC/N/Q: no")
                 if not current_servers:
                     lan_menu_lines.append("NO SERVERS FOUND")
                 else:
@@ -2725,6 +2766,7 @@ class GameSession:
 
             if host_started and lan_host.connected_clients() > 0:
                 connected = lan_host.connected_clients()
+                any_riding_active = any(bool(s.active_ride_item_id) for s in self._player_states.values())
                 # Adaptive send cadence: avoid bursty per-frame TCP traffic on LAN/Wi-Fi.
                 if connected <= 3:
                     pos_interval_sec = 1.0 / 42.0
@@ -2732,6 +2774,9 @@ class GameSession:
                     pos_interval_sec = 1.0 / 36.0
                 else:
                     pos_interval_sec = 1.0 / 32.0
+                if any_riding_active:
+                    # Skateboard movement needs denser updates for remote smoothness.
+                    pos_interval_sec = min(pos_interval_sec, 1.0 / 52.0)
                 gap_sec = max(0.0, float(self._host_remote_rx_gap_ema))
                 if gap_sec >= 0.11:
                     pos_interval_sec += 0.010
@@ -2744,6 +2789,8 @@ class GameSession:
                     obj_interval_sec = 0.064
                 elif gap_sec >= 0.07:
                     obj_interval_sec = 0.054
+                if any_riding_active:
+                    obj_interval_sec = min(obj_interval_sec, 0.038)
                 # Keep dragged-object motion snappy on followers.
                 if any(s.grabbed_object_id for s in self._player_states.values()):
                     obj_interval_sec = min(obj_interval_sec, 0.034)
@@ -3527,56 +3574,21 @@ class GameSession:
         target_x: float,
         target_y: float,
     ) -> None:
-        """Client-side prediction reconcile for local player.
+        """Client-side local player reconcile.
 
-        Keep local movement smooth (especially fast ride states) while still converging
-        to host-authoritative coordinates.
+        Local player is rendered from immediate local input (no smoothing corrections),
+        and we only snap on large authoritative desyncs.
         """
         cur_x = float(state.player.x)
         cur_y = float(state.player.y)
         drift_x = target_x - cur_x
         drift_y = target_y - cur_y
         drift = math.hypot(drift_x, drift_y)
-        input_dx, input_dy, _h, _run, _ride = self._movement_inputs.get(
-            self._LOCAL_PLAYER_ID, (0, 0, False, 1.0, False)
-        )
-        moving_local = abs(input_dx) > 0 or abs(input_dy) > 0
-        moving_diagonal = abs(input_dx) > 0 and abs(input_dy) > 0
         riding = bool(state.active_ride_item_id)
-        if moving_local:
-            # While moving we prioritize visual stability over strict correction.
-            # Diagonal + ride are the most sensitive to micro-corrections.
-            near = 1.8 if moving_diagonal else 1.2
-            soft = 36.0 if riding else (30.0 if moving_diagonal else 22.0)
-            medium = 120.0 if riding else (92.0 if moving_diagonal else 68.0)
-            if drift <= near:
-                return
-            if drift <= soft:
-                # Very soft nudge to avoid camera jitter.
-                k = 0.12 if moving_diagonal else 0.16
-            elif drift <= medium:
-                k = 0.22 if moving_diagonal else 0.30
-            else:
-                # Large desync (packet loss/reconnect): then snap.
-                state.player.x = target_x
-                state.player.y = target_y
-                return
-        else:
-            near = 0.7
-            soft = 18.0
-            medium = 48.0
-            if drift <= near:
-                return
-            if drift <= soft:
-                k = 0.35
-            elif drift <= medium:
-                k = 0.62
-            else:
-                state.player.x = target_x
-                state.player.y = target_y
-                return
-        state.player.x = cur_x + drift_x * k
-        state.player.y = cur_y + drift_y * k
+        snap_distance = 132.0 if riding else 96.0
+        if drift >= snap_distance:
+            state.player.x = target_x
+            state.player.y = target_y
 
     def _build_network_snapshot(self, world: WorldMap, *, revision: int = 0) -> dict:
         players: list[dict[str, object]] = []
@@ -3730,11 +3742,10 @@ class GameSession:
                 state.net_velocity_x = 0.0
                 state.net_velocity_y = 0.0
                 if client_mode and player_id == self._LOCAL_PLAYER_ID:
-                    self._reconcile_local_predicted_player(
-                        state=state,
-                        target_x=net_x,
-                        target_y=net_y,
-                    )
+                    # Full snapshot is authoritative state: apply immediately.
+                    state.player.x = net_x
+                    state.player.y = net_y
+                    state.player.walk_time = net_walk_time
                 elif client_mode:
                     drift = math.hypot(net_x - float(state.player.x), net_y - float(state.player.y))
                     if drift >= 48.0:
