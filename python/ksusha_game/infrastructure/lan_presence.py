@@ -8,6 +8,8 @@ import threading
 import time
 import uuid
 
+_MAX_JSON_LINE_BYTES = 4 * 1024 * 1024
+
 
 @dataclass(frozen=True)
 class ServerEntry:
@@ -54,8 +56,8 @@ def _recv_json_line(conn: socket.socket, recv_buffer: bytearray) -> dict | None:
         if chunk == b"":
             raise OSError("closed")
         recv_buffer.extend(chunk)
-        if len(recv_buffer) > 65535:
-            raise OSError("oversized")
+        if len(recv_buffer) > _MAX_JSON_LINE_BYTES:
+            raise OSError(f"oversized:{len(recv_buffer)}>{_MAX_JSON_LINE_BYTES}")
 
 
 class LanPresenceHost:
@@ -102,6 +104,7 @@ class LanPresenceHost:
         self._pending_snapshot: dict | None = None
         self._broadcast_event = threading.Event()
         self._team_catalog: list[dict[str, str]] = [{"id": "A", "name": "Team A"}]
+        self._last_large_snapshot_log_ts = 0.0
 
     @property
     def enabled(self) -> bool:
@@ -244,7 +247,16 @@ class LanPresenceHost:
             if pos is not None:
                 self._send_to_all(pos)
             if snap is not None:
-                self._send_to_all(self._encode_line({"type": "snapshot", "snapshot": snap}))
+                encoded = self._encode_line({"type": "snapshot", "snapshot": snap})
+                if len(encoded) >= 131072:
+                    now_ts = time.time()
+                    if now_ts - float(self._last_large_snapshot_log_ts) >= 1.0:
+                        self._last_large_snapshot_log_ts = now_ts
+                        self._record_connection_event(
+                            "large_snapshot",
+                            bytes=int(len(encoded)),
+                        )
+                self._send_to_all(encoded)
 
     def _send_to_all(self, payload: bytes) -> None:
         with self._lock:
