@@ -194,6 +194,7 @@ class GameSession:
         self._math_rng = random.Random()
         self._network_raw_to_local_player_ids: dict[str, str] = {}
         self._network_local_to_raw_player_ids: dict[str, str] = {}
+        self._last_applied_objects_signature: tuple[tuple[object, ...], ...] | None = None
         # Reserved for compatibility with older saves/tests.
         self._map_static_object_ids: set[str] = set()
         # Per-frame caches: rebuilt once per frame after world mutations, before physics.
@@ -202,6 +203,7 @@ class GameSession:
         self._frame_platform_objects: list[WorldObject] = []
         self._frame_objects_by_id: dict[str, WorldObject] = {}
         self._frame_rooms_by_id: dict[str, RoomArea] = {}
+        self._surface_body_rect_cache: dict[int, tuple[pygame.Surface, pygame.Rect]] = {}
 
     def _player_state(self, player_id: str) -> SessionPlayerState | None:
         return self._player_states.get(player_id)
@@ -782,6 +784,7 @@ class GameSession:
                 save_user_settings(user_settings)
                 if browser.is_connected():
                     browser.send_action(action=f"set_character::{resolved}")
+                self._surface_body_rect_cache.clear()
                 renderer.clear_render_cache()
                 self._set_message(f"Персонаж: {resolved}")
             except Exception as exc:
@@ -981,11 +984,13 @@ class GameSession:
                 # Joining remote host: keep only local player state until snapshots arrive.
                 for pid in [pid for pid in self._player_states.keys() if pid != self._LOCAL_PLAYER_ID]:
                     self.remove_player(player_id=pid)
+                self._last_applied_objects_signature = None
                 browser.send_action(action=f"set_character::{current_character_id}")
                 last_client_rx_monotonic = now
             if (not is_connected) and was_connected and not browser.is_connecting():
                 connected_since_monotonic = None
                 last_client_rx_monotonic = None
+                self._last_applied_objects_signature = None
                 connected_host_summary = None
                 connected_host_name = None
                 connected_host_player_name = None
@@ -1757,6 +1762,8 @@ class GameSession:
                         state.spray_active_tag_index = None
                         state.spray_hold_accum = 0.0
                     self._spray_tags.clear()
+                    self._last_applied_objects_signature = None
+                    self._surface_body_rect_cache.clear()
                     renderer.clear_render_cache()
                     self._set_message("Hot reload: assets/map reloaded")
                 except Exception as exc:
@@ -2508,18 +2515,18 @@ class GameSession:
             if host_started and lan_host.connected_clients() > 0:
                 connected = lan_host.connected_clients()
                 # Position sync stays frequent but throttles under higher client counts.
-                position_interval_sec = 0.033 if connected >= 6 else 0.016
+                position_interval_sec = 0.033 if connected >= 6 else 0.024
                 if now - last_position_sent_at >= position_interval_sec:
                     lan_host.broadcast_positions(self._build_position_update())
                     last_position_sent_at = now
                 # Full state sync for mutable world/player state:
                 # immediate push on mutation + adaptive periodic cadence under load.
                 if connected >= 9:
-                    snapshot_interval_sec = 0.14
+                    snapshot_interval_sec = 0.16
                 elif connected >= 6:
-                    snapshot_interval_sec = 0.10
+                    snapshot_interval_sec = 0.12
                 else:
-                    snapshot_interval_sec = 0.05
+                    snapshot_interval_sec = 0.10
                 if network_state_dirty or (now - last_snapshot_sent_at >= snapshot_interval_sec):
                     lan_host.broadcast_snapshot(self._build_network_snapshot(world))
                     last_snapshot_sent_at = now
@@ -3064,6 +3071,12 @@ class GameSession:
 
         objects_payload = snapshot.get("objects")
         if isinstance(objects_payload, list):
+            objects_sig = self._objects_payload_signature(objects_payload)
+            if self._last_applied_objects_signature == objects_sig:
+                objects_payload = None
+            else:
+                self._last_applied_objects_signature = objects_sig
+        if isinstance(objects_payload, list):
             restored_objects: list[WorldObject] = []
             for raw_obj in objects_payload:
                 if not isinstance(raw_obj, dict):
@@ -3187,6 +3200,40 @@ class GameSession:
             self._queue_async_preload("item_icon", token)
             if self._is_spray_item(token):
                 self._queue_async_preload("spray_profile", self._spray_profile_for_item(token, world))
+
+    @staticmethod
+    def _objects_payload_signature(objects_payload: list[dict]) -> tuple[tuple[object, ...], ...]:
+        rows: list[tuple[object, ...]] = []
+        for raw_obj in objects_payload:
+            if not isinstance(raw_obj, dict):
+                continue
+            lock_flags = raw_obj.get("lock_open_flags")
+            if isinstance(lock_flags, list):
+                lock_flags_sig = tuple(bool(v) for v in lock_flags[:8])
+            else:
+                lock_flags_sig = ()
+            transitions = raw_obj.get("transitions")
+            transitions_len = len(transitions) if isinstance(transitions, dict) else 0
+            rows.append(
+                (
+                    str(raw_obj.get("object_id", "")).strip(),
+                    str(raw_obj.get("kind", "")).strip(),
+                    raw_obj.get("x"),
+                    raw_obj.get("y"),
+                    raw_obj.get("state"),
+                    raw_obj.get("blocking"),
+                    raw_obj.get("label"),
+                    raw_obj.get("pickup_item_id"),
+                    raw_obj.get("required_item_id"),
+                    raw_obj.get("item_id"),
+                    raw_obj.get("balloon_id"),
+                    raw_obj.get("graffiti_profile_id"),
+                    raw_obj.get("weight_kg"),
+                    lock_flags_sig,
+                    transitions_len,
+                )
+            )
+        return tuple(rows)
 
     def _world_object_payload(self, obj: WorldObject) -> dict[str, object]:
         transitions_payload = {
@@ -5705,6 +5752,17 @@ class GameSession:
         variant = str(effect.get("animation_variant", "")).strip().lower()
         return variant or "skate"
 
+    def _surface_body_rect(self, surface: pygame.Surface, *, min_alpha: int) -> pygame.Rect:
+        key = id(surface)
+        cached = self._surface_body_rect_cache.get(key)
+        if cached is not None and cached[0] is surface:
+            return cached[1].copy()
+        body = surface.get_bounding_rect(min_alpha=max(1, int(min_alpha)))
+        if body.width <= 0 or body.height <= 0:
+            body = surface.get_rect()
+        self._surface_body_rect_cache[key] = (surface, body.copy())
+        return body
+
     def _center_for_display_frame(
         self,
         *,
@@ -5714,12 +5772,8 @@ class GameSession:
         player_y: float,
     ) -> tuple[float, float]:
         alpha_cutoff = max(1, self._config.sprite_sheet.alpha_component_cutoff)
-        base_body = base_frame.get_bounding_rect(min_alpha=alpha_cutoff)
-        if base_body.width <= 0 or base_body.height <= 0:
-            base_body = base_frame.get_rect()
-        display_body = display_frame.get_bounding_rect(min_alpha=alpha_cutoff)
-        if display_body.width <= 0 or display_body.height <= 0:
-            display_body = display_frame.get_rect()
+        base_body = self._surface_body_rect(base_frame, min_alpha=alpha_cutoff)
+        display_body = self._surface_body_rect(display_frame, min_alpha=alpha_cutoff)
 
         # Keep visible body/head stable and let extra canvas grow downward (skateboard zone).
         anchor_world_x = player_x + base_body.centerx
