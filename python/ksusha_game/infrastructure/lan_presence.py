@@ -578,6 +578,7 @@ class LanServerBrowser:
         self._send_lock = threading.Lock()
         self._connected_server_id: str | None = None
         self._assigned_player_id: str | None = None
+        self._last_rx_monotonic: float | None = None
         # Latest received snapshot and position update (only most-recent matters).
         self._latest_snapshot: dict | None = None
         self._latest_pos_update: dict | None = None
@@ -623,6 +624,11 @@ class LanServerBrowser:
     def connected_player_id(self) -> str | None:
         return self._assigned_player_id
 
+    def last_rx_monotonic(self) -> float | None:
+        with self._lock:
+            value = self._last_rx_monotonic
+        return None if value is None else float(value)
+
     def is_connected(self) -> bool:
         return self._active_connection is not None and self._connected_server_id is not None
 
@@ -649,6 +655,8 @@ class LanServerBrowser:
             )
         self._connected_server_id = None
         self._assigned_player_id = None
+        with self._lock:
+            self._last_rx_monotonic = None
         self._last_sent_input = None  # force re-send current input after reconnect
         with self._send_lock:
             conn = self._active_connection
@@ -819,6 +827,8 @@ class LanServerBrowser:
                 assigned_player_id=self._assigned_player_id,
                 assigned_team_id=self._join_info.get("assigned_team_id"),
             )
+            with self._lock:
+                self._last_rx_monotonic = time.monotonic()
             self._connect_result = (True, "ok")
             self._rx_thread = threading.Thread(
                 target=self._run_connection_reader,
@@ -852,6 +862,12 @@ class LanServerBrowser:
                 conn.settimeout(0.08)
                 data = _recv_json_line(conn, recv_buffer)
             except (OSError, ValueError, json.JSONDecodeError) as exc:
+                with self._send_lock:
+                    current_conn = self._active_connection
+                # Connection was already switched/closed by another thread (manual
+                # disconnect/reconnect). Do not treat it as a real network error.
+                if current_conn is not conn or current_conn is None:
+                    break
                 self._record_connection_event(
                     "reader_error",
                     error_type=exc.__class__.__name__,
@@ -865,6 +881,8 @@ class LanServerBrowser:
                 break
             if data is None or not isinstance(data, dict):
                 continue
+            with self._lock:
+                self._last_rx_monotonic = time.monotonic()
             msg_type = str(data.get("type", "")).strip().lower()
             if msg_type == "snapshot":
                 snap = data.get("snapshot")
@@ -896,6 +914,11 @@ class LanServerBrowser:
                 with self._send_lock:
                     self._outbound_sent_count += 1
             except OSError as exc:
+                with self._send_lock:
+                    current_conn = self._active_connection
+                # Socket was already replaced/closed by a concurrent disconnect path.
+                if current_conn is not conn or current_conn is None:
+                    break
                 self._record_connection_event(
                     "writer_error",
                     error_type=exc.__class__.__name__,

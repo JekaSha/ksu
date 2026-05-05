@@ -979,6 +979,8 @@ class GameSession:
         auto_reconnect_base_delay_sec = 0.8
         auto_reconnect_max_delay_sec = 8.0
         auto_reconnect_unstable_window_sec = 6.0
+        client_rx_stall_timeout_base_sec = 8.5
+        client_rx_stall_timeout_max_sec = 16.0
         connected_since_monotonic: float | None = None
         last_client_rx_monotonic: float | None = None
         connected_host_summary: str | None = None
@@ -1256,6 +1258,7 @@ class GameSession:
                 browser.send_action(action=f"set_character::{current_character_id}")
                 last_client_rx_monotonic = now
             if (not is_connected) and was_connected and not browser.is_connecting():
+                previous_connected_since_monotonic = connected_since_monotonic
                 connected_since_monotonic = None
                 last_client_rx_monotonic = None
                 self._last_applied_objects_signature = None
@@ -1269,8 +1272,8 @@ class GameSession:
                 auto_reconnect_active = last_connected_target is not None
                 if auto_reconnect_active:
                     session_lifetime = (
-                        max(0.0, now - connected_since_monotonic)
-                        if connected_since_monotonic is not None
+                        max(0.0, now - previous_connected_since_monotonic)
+                        if previous_connected_since_monotonic is not None
                         else auto_reconnect_unstable_window_sec
                     )
                     if session_lifetime < auto_reconnect_unstable_window_sec:
@@ -1298,12 +1301,29 @@ class GameSession:
                     **_math_connection_context(),
                 )
             if is_connected and not browser.is_connecting():
+                browser_last_rx_ts = browser.last_rx_monotonic()
+                if browser_last_rx_ts is not None:
+                    if last_client_rx_monotonic is None:
+                        last_client_rx_monotonic = browser_last_rx_ts
+                    else:
+                        last_client_rx_monotonic = max(last_client_rx_monotonic, browser_last_rx_ts)
                 last_rx_ts = last_client_rx_monotonic or connected_since_monotonic or now
-                if now - last_rx_ts >= 3.5:
+                stall_timeout_sec = min(
+                    client_rx_stall_timeout_max_sec,
+                    max(
+                        client_rx_stall_timeout_base_sec,
+                        float(self._client_rx_gap_ema) * 40.0,
+                    ),
+                )
+                if now - last_rx_ts >= stall_timeout_sec:
                     browser.disconnect(
                         reason="rx_stall_timeout",
                         source="session_watchdog",
-                        detail=f"no_rx_for={now - last_rx_ts:.3f}s",
+                        detail=(
+                            f"no_rx_for={now - last_rx_ts:.3f}s"
+                            f"|timeout={stall_timeout_sec:.3f}s"
+                            f"|rx_ema={float(self._client_rx_gap_ema):.4f}s"
+                        ),
                     )
                     self._set_message("Связь зависла. Переподключаюсь...")
                     _log_connection_event("connection_stalled_disconnect", **_math_connection_context())
