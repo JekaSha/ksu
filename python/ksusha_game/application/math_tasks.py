@@ -544,6 +544,18 @@ class MathTaskEngineState:
     ) -> MathTaskOutcome:
         if not self.active or self.selected_task not in {1, 2} or self.current_round is None:
             return MathTaskOutcome(message=None)
+        unresolved = self.unresolved_pending_answers()
+        if unresolved:
+            pending = self.active_pending_answer() or unresolved[0]
+            expr = f"{pending.first_digit}{pending.operation}{pending.second_digit}=?"
+            owner = str(pending.assigned_player_id).strip() if pending.assigned_player_id is not None else ""
+            if owner and owner == str(player_id).strip():
+                return MathTaskOutcome(message=f"Сначала реши свой результат: {expr}")
+            if owner:
+                return MathTaskOutcome(message=f"Сначала решите текущий результат: {expr} ({owner})")
+            return MathTaskOutcome(message=f"Сначала решите текущий результат: {expr}")
+        if not self._is_dispatcher(player_id):
+            return MathTaskOutcome(message="Поиск цифр только у ведущего задач")
         if self.produced_count >= self.iterations_target:
             return MathTaskOutcome(message="Все примеры собраны. Закройте очередь ответов")
         if self._player_has_assigned_pending_answer(player_id=player_id):
@@ -610,10 +622,7 @@ class MathTaskEngineState:
             self._inc_contribution(player_id=player_id, kind="pick_second")
             round_state.first_digit = None
             round_state.stage = "pick_first"
-            next_owner = self._resolve_next_stage_owner(
-                producer_player_id=player_id,
-                online_player_ids=online_player_ids or [],
-            )
+            next_owner = str(self.dispatcher_player_id or player_id).strip() or None
             assigned_by = str(self.dispatcher_player_id or player_id).strip() or "p1"
             round_state.assignments["pick_first"] = next_owner
             round_state.assignment_accepted["pick_first"] = True
@@ -631,7 +640,7 @@ class MathTaskEngineState:
             if assigned is not None and assigned != player_id:
                 out.message = f"Ответ делегирован игроку {assigned}. Ищи следующее число"
             elif assigned == player_id:
-                out.message = "Ответ у тебя. Можно брать следующий пример"
+                out.message = "Ответ назначен тебе. Сначала реши его"
             else:
                 out.message = "Ответ в очереди без исполнителя. Назначь игрока или реши позже"
             return out
@@ -709,7 +718,13 @@ class MathTaskEngineState:
             roster.add(requester)
         if assignee not in roster:
             return "Исполнитель не в текущей сессии"
-        if self._is_player_busy(player_id=assignee, exclude_answer_id=pending.answer_id):
+        dispatcher = str(self.dispatcher_player_id).strip() if self.dispatcher_player_id is not None else ""
+        exclude_stage = self._active_stage_key() if (dispatcher and assignee == dispatcher) else None
+        if self._is_player_busy(
+            player_id=assignee,
+            exclude_answer_id=pending.answer_id,
+            exclude_stage=exclude_stage,
+        ):
             return f"Игрок {assignee} уже занят другой задачей"
         pending.assigned_player_id = assignee
         pending.assigned_by_player_id = requester
@@ -734,6 +749,9 @@ class MathTaskEngineState:
         assignee = str(assignee_player_id).strip()
         if not assignee:
             return "Исполнитель не указан"
+        dispatcher = str(self.dispatcher_player_id).strip() if self.dispatcher_player_id is not None else ""
+        if dispatcher and assignee != dispatcher:
+            return "Этапы поиска цифр доступны только ведущему задач"
         roster: set[str] = set()
         for pid in online_player_ids or []:
             token = str(pid).strip()
@@ -875,19 +893,20 @@ class MathTaskEngineState:
         if not roster:
             return dispatcher or producer or None
 
-        active_stage = self._active_stage_key()
-
-        def _is_free(pid: str) -> bool:
-            exclude_stage = active_stage if (pid == producer and active_stage == "pick_second") else None
-            return not self._is_player_busy(player_id=pid, exclude_stage=exclude_stage)
-
-        free_candidates = [pid for pid in roster if pid != producer and _is_free(pid)]
+        dispatcher = str(self.dispatcher_player_id).strip() if self.dispatcher_player_id is not None else ""
+        free_candidates = [
+            pid
+            for pid in roster
+            if pid != producer and (not dispatcher or pid != dispatcher) and not self._is_player_busy(player_id=pid)
+        ]
         if free_candidates:
             free_candidates.sort()
             idx = max(0, int(self.next_answer_id) - 1) % len(free_candidates)
             return free_candidates[idx]
-        if producer and _is_free(producer):
-            return producer
+        # Fallback: if no free non-dispatcher exists, assign to dispatcher
+        # (while keeping "one player = one result task").
+        if dispatcher and not self._player_has_assigned_pending_answer(player_id=dispatcher):
+            return dispatcher
         return None
 
     def _resolve_next_stage_owner(
