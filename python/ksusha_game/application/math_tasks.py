@@ -92,6 +92,7 @@ class MathPendingAnswer:
     correct_answer: int
     answer_options: list[int] = field(default_factory=list)
     assigned_player_id: str | None = None
+    preferred_assignee_id: str | None = None
     assigned_by_player_id: str | None = None
     brief: str | None = None
     details: str | None = None
@@ -107,6 +108,7 @@ class MathPendingAnswer:
             "correct_answer": self.correct_answer,
             "answer_options": list(self.answer_options),
             "assigned_player_id": self.assigned_player_id,
+            "preferred_assignee_id": self.preferred_assignee_id,
             "assigned_by_player_id": self.assigned_by_player_id,
             "brief": self.brief,
             "details": self.details,
@@ -136,6 +138,10 @@ class MathPendingAnswer:
                     options.append(item)
         assigned_raw = payload.get("assigned_player_id")
         assigned_player_id = str(assigned_raw).strip() if assigned_raw is not None and str(assigned_raw).strip() else None
+        preferred_raw = payload.get("preferred_assignee_id")
+        preferred_assignee_id = (
+            str(preferred_raw).strip() if preferred_raw is not None and str(preferred_raw).strip() else None
+        )
         assigned_by_raw = payload.get("assigned_by_player_id")
         assigned_by_player_id = (
             str(assigned_by_raw).strip() if assigned_by_raw is not None and str(assigned_by_raw).strip() else None
@@ -154,6 +160,7 @@ class MathPendingAnswer:
             correct_answer=correct_answer,
             answer_options=options,
             assigned_player_id=assigned_player_id,
+            preferred_assignee_id=preferred_assignee_id,
             assigned_by_player_id=assigned_by_player_id,
             brief=brief,
             details=details,
@@ -633,6 +640,7 @@ class MathTaskEngineState:
                 details=f"Найди правильный результат для {first} {operation} {second}",
                 accepted=True,
             )
+            answer.preferred_assignee_id = answer.assigned_player_id
             self.next_answer_id += 1
             self.produced_count += 1
             self.round_index += 1
@@ -651,11 +659,15 @@ class MathTaskEngineState:
             round_state.assignment_accepted["pick_second"] = True
             round_state.assignment_assigned_by["pick_second"] = assigned_by if next_owner is not None else None
 
-            out = MathTaskOutcome(message="Пример поставлен в очередь", spawn_digits=True, consume_digit=True)
+            out = MathTaskOutcome(
+                message="Пример поставлен в очередь",
+                spawn_digits=True,
+                spawn_answers=True,
+                consume_digit=True,
+            )
             if self.active_answer_id is None:
                 self.active_answer_id = answer.answer_id
                 out.clear_answers = True
-                out.spawn_answers = True
             assigned = answer.assigned_player_id
             if assigned is not None and assigned != player_id:
                 out.message = f"Ответ делегирован игроку {assigned}. Ищи следующее число"
@@ -756,6 +768,7 @@ class MathTaskEngineState:
         ):
             return f"Игрок {assignee} уже занят другой задачей"
         pending.assigned_player_id = assignee
+        pending.preferred_assignee_id = assignee
         pending.assigned_by_player_id = requester
         pending.accepted = True
         self._release_stage_if_player_busy(player_id=assignee)
@@ -952,6 +965,13 @@ class MathTaskEngineState:
         for pending in self.pending_answers:
             if pending.solved or pending.assigned_player_id is not None:
                 continue
+            preferred = str(pending.preferred_assignee_id).strip() if pending.preferred_assignee_id is not None else ""
+            if preferred and preferred in roster and not self._is_player_busy(player_id=preferred, exclude_answer_id=pending.answer_id):
+                pending.assigned_player_id = preferred
+                pending.assigned_by_player_id = dispatcher or pending.assigned_by_player_id
+                pending.accepted = True
+                self._release_stage_if_player_busy(player_id=preferred)
+                continue
             assignee = self._first_free_answer_assignee(
                 roster=roster,
                 exclude_answer_id=pending.answer_id,
@@ -960,6 +980,7 @@ class MathTaskEngineState:
                 # Everyone is busy: keep in queue until somebody is free.
                 break
             pending.assigned_player_id = assignee
+            pending.preferred_assignee_id = assignee
             pending.assigned_by_player_id = dispatcher or pending.assigned_by_player_id
             pending.accepted = True
             self._release_stage_if_player_busy(player_id=assignee)
@@ -1084,6 +1105,7 @@ class MathTaskEngineState:
 
         for pending in self.pending_answers:
             if pending.assigned_player_id == left:
+                pending.preferred_assignee_id = left
                 pending.assigned_player_id = None
                 pending.accepted = True
             if pending.assigned_by_player_id == left:
@@ -1092,6 +1114,43 @@ class MathTaskEngineState:
         self._auto_assign_unassigned_pending_answers(
             online_player_ids=(team_online or online),
         )
+
+    def on_player_join(
+        self,
+        *,
+        player_id: str,
+        online_player_ids: list[str],
+        online_team_player_ids: list[str] | None = None,
+    ) -> None:
+        joined = str(player_id).strip()
+        if not joined:
+            return
+        roster: list[str] = []
+        seen: set[str] = set()
+        for pid in (online_team_player_ids or online_player_ids):
+            token = str(pid).strip()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            roster.append(token)
+        if joined not in seen:
+            roster.append(joined)
+            seen.add(joined)
+        if self._player_has_assigned_pending_answer(player_id=joined):
+            self._auto_assign_unassigned_pending_answers(online_player_ids=roster)
+            return
+        for pending in self.pending_answers:
+            if pending.solved or pending.assigned_player_id is not None:
+                continue
+            preferred = str(pending.preferred_assignee_id).strip() if pending.preferred_assignee_id is not None else ""
+            if preferred and self._same_player_id(preferred, joined):
+                if not self._is_player_busy(player_id=joined, exclude_answer_id=pending.answer_id):
+                    pending.assigned_player_id = joined
+                    pending.preferred_assignee_id = joined
+                    pending.accepted = True
+                    self._release_stage_if_player_busy(player_id=joined)
+                break
+        self._auto_assign_unassigned_pending_answers(online_player_ids=roster)
 
     def remap_player_ids(self, id_map: dict[str, str]) -> None:
         if not id_map:
@@ -1116,6 +1175,7 @@ class MathTaskEngineState:
 
         for pending in self.pending_answers:
             pending.assigned_player_id = _remap(pending.assigned_player_id)
+            pending.preferred_assignee_id = _remap(pending.preferred_assignee_id)
             pending.assigned_by_player_id = _remap(pending.assigned_by_player_id)
 
         if self.run_contributions:
