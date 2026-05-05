@@ -544,16 +544,6 @@ class MathTaskEngineState:
     ) -> MathTaskOutcome:
         if not self.active or self.selected_task not in {1, 2} or self.current_round is None:
             return MathTaskOutcome(message=None)
-        unresolved = self.unresolved_pending_answers()
-        if unresolved:
-            pending = self.active_pending_answer() or unresolved[0]
-            expr = f"{pending.first_digit}{pending.operation}{pending.second_digit}=?"
-            owner = str(pending.assigned_player_id).strip() if pending.assigned_player_id is not None else ""
-            if owner and owner == str(player_id).strip():
-                return MathTaskOutcome(message=f"Сначала реши свой результат: {expr}")
-            if owner:
-                return MathTaskOutcome(message=f"Сначала решите текущий результат: {expr} ({owner})")
-            return MathTaskOutcome(message=f"Сначала решите текущий результат: {expr}")
         if not self._is_dispatcher(player_id):
             return MathTaskOutcome(message="Поиск цифр только у ведущего задач")
         if self.produced_count >= self.iterations_target:
@@ -572,7 +562,7 @@ class MathTaskEngineState:
             value = max(0, min(9, int(digit)))
         if round_state.stage == "pick_first":
             owner = round_state.assignments.get("pick_first")
-            if owner is None and dispatcher:
+            if dispatcher:
                 owner = dispatcher
                 round_state.assignments["pick_first"] = owner
                 round_state.assignment_accepted["pick_first"] = True
@@ -587,7 +577,7 @@ class MathTaskEngineState:
             return MathTaskOutcome(message=f"Операция: {op}. Найди второе число", consume_digit=True)
         if round_state.stage == "pick_second":
             owner = round_state.assignments.get("pick_second")
-            if owner is None and dispatcher:
+            if dispatcher:
                 owner = dispatcher
                 round_state.assignments["pick_second"] = owner
                 round_state.assignment_accepted["pick_second"] = True
@@ -646,7 +636,14 @@ class MathTaskEngineState:
             return out
         return MathTaskOutcome(message=None)
 
-    def pick_answer(self, *, player_id: str, answer_value: int, now_ts: float | None = None) -> MathTaskOutcome:
+    def pick_answer(
+        self,
+        *,
+        player_id: str,
+        answer_value: int,
+        now_ts: float | None = None,
+        online_player_ids: list[str] | None = None,
+    ) -> MathTaskOutcome:
         if not self.active or self.selected_task not in {1, 2}:
             return MathTaskOutcome(message=None)
         pending = self.active_pending_answer()
@@ -672,12 +669,14 @@ class MathTaskEngineState:
             out = MathTaskOutcome(clear_answers=was_active)
             if was_active:
                 self._activate_next_pending()
+                self._auto_assign_unassigned_pending_answers(online_player_ids=online_player_ids or [])
                 if self.active_answer_id is not None:
                     out.spawn_answers = True
                     out.message = f"Результат найден! Осталось: {max(0, self.iterations_target - self.solved_count)}"
                     return out
             else:
                 out.message = "Результат найден! Твоя задача закрыта"
+                self._auto_assign_unassigned_pending_answers(online_player_ids=online_player_ids or [])
             if self.solved_count >= self.iterations_target and self.produced_count >= self.iterations_target:
                 self.active = False
                 self.current_round = None
@@ -871,7 +870,7 @@ class MathTaskEngineState:
                 return
         self.active_answer_id = None
 
-    def _resolve_answer_assignee(self, *, producer_player_id: str, online_player_ids: list[str]) -> str | None:
+    def _normalized_online_roster(self, *, online_player_ids: list[str]) -> list[str]:
         roster: list[str] = []
         seen: set[str] = set()
         for pid in online_player_ids:
@@ -880,34 +879,64 @@ class MathTaskEngineState:
                 continue
             seen.add(token)
             roster.append(token)
-        producer = str(producer_player_id).strip()
-        if producer and producer not in seen:
-            roster.append(producer)
-            seen.add(producer)
-        if not producer:
-            producer = roster[0] if roster else "p1"
         dispatcher = str(self.dispatcher_player_id).strip() if self.dispatcher_player_id is not None else ""
         if dispatcher and dispatcher not in seen:
-            roster.append(dispatcher)
             seen.add(dispatcher)
-        if not roster:
-            return dispatcher or producer or None
+            roster.append(dispatcher)
+        return roster
 
+    def _first_free_answer_assignee(
+        self,
+        *,
+        roster: list[str],
+        exclude_answer_id: int | None = None,
+    ) -> str | None:
         dispatcher = str(self.dispatcher_player_id).strip() if self.dispatcher_player_id is not None else ""
-        free_candidates = [
-            pid
-            for pid in roster
-            if pid != producer and (not dispatcher or pid != dispatcher) and not self._is_player_busy(player_id=pid)
-        ]
-        if free_candidates:
-            free_candidates.sort()
-            idx = max(0, int(self.next_answer_id) - 1) % len(free_candidates)
-            return free_candidates[idx]
-        # Fallback: if no free non-dispatcher exists, assign to dispatcher
-        # (while keeping "one player = one result task").
-        if dispatcher and not self._player_has_assigned_pending_answer(player_id=dispatcher):
-            return dispatcher
+        # 1) Any free non-dispatcher first.
+        for pid in roster:
+            if dispatcher and pid == dispatcher:
+                continue
+            if not self._is_player_busy(player_id=pid, exclude_answer_id=exclude_answer_id):
+                return pid
+        # 2) Then dispatcher fallback.
+        if dispatcher and dispatcher in roster:
+            if not self._player_has_assigned_pending_answer(
+                player_id=dispatcher,
+                exclude_answer_id=exclude_answer_id,
+            ):
+                return dispatcher
         return None
+
+    def _auto_assign_unassigned_pending_answers(self, *, online_player_ids: list[str]) -> None:
+        roster = self._normalized_online_roster(online_player_ids=online_player_ids)
+        if not roster:
+            return
+        dispatcher = str(self.dispatcher_player_id).strip() if self.dispatcher_player_id is not None else ""
+        for pending in self.pending_answers:
+            if pending.solved or pending.assigned_player_id is not None:
+                continue
+            assignee = self._first_free_answer_assignee(
+                roster=roster,
+                exclude_answer_id=pending.answer_id,
+            )
+            if assignee is None:
+                # Everyone is busy: keep in queue until somebody is free.
+                break
+            pending.assigned_player_id = assignee
+            pending.assigned_by_player_id = dispatcher or pending.assigned_by_player_id
+            pending.accepted = True
+
+    def _resolve_answer_assignee(self, *, producer_player_id: str, online_player_ids: list[str]) -> str | None:
+        roster = self._normalized_online_roster(online_player_ids=online_player_ids)
+        producer = str(producer_player_id).strip()
+        if producer and producer not in roster:
+            roster.append(producer)
+        if not roster:
+            return None
+        return self._first_free_answer_assignee(
+            roster=roster,
+            exclude_answer_id=None,
+        )
 
     def _resolve_next_stage_owner(
         self,
@@ -1003,6 +1032,10 @@ class MathTaskEngineState:
                 pending.accepted = True
             if pending.assigned_by_player_id == left:
                 pending.assigned_by_player_id = None
+        # Reassign disconnected player's pending tasks immediately if anyone is free.
+        self._auto_assign_unassigned_pending_answers(
+            online_player_ids=(team_online or online),
+        )
 
     def remap_player_ids(self, id_map: dict[str, str]) -> None:
         if not id_map:

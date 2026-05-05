@@ -5482,6 +5482,9 @@ class GameSession:
                         player_id=player_id,
                         answer_value=digit,
                         now_ts=time.time(),
+                        online_player_ids=self._team_player_ids(
+                            self._math_tasks.dispatcher_team_id or self._player_team(player_id)
+                        ),
                     )
                     if int(self._math_tasks.solved_count) > solved_before:
                         world.remove_object(target.object_id)
@@ -5502,6 +5505,9 @@ class GameSession:
                     player_id=player_id,
                     answer_value=digit,
                     now_ts=time.time(),
+                    online_player_ids=self._team_player_ids(
+                        self._math_tasks.dispatcher_team_id or self._player_team(player_id)
+                    ),
                 )
                 if int(self._math_tasks.solved_count) > solved_before:
                     world.remove_object(target.object_id)
@@ -5532,6 +5538,9 @@ class GameSession:
                 player_id=player_id,
                 answer_value=answer_value,
                 now_ts=time.time(),
+                online_player_ids=self._team_player_ids(
+                    self._math_tasks.dispatcher_team_id or self._player_team(player_id)
+                ),
             )
             assigned_to_other = bool(outcome.message and str(outcome.message).startswith("Этот ответ назначен игроку"))
             if assigned_to_other:
