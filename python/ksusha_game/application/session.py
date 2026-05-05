@@ -2464,81 +2464,60 @@ class GameSession:
                             )
                             ride_frames_by_dir = ride_anim.frames_for_height(ride_target_h)
                     if net_client_mode and not is_local:
-                        # Host-authoritative remote players: do not run local gameplay
-                        # simulation/collisions for them on client, only smooth transform.
-                        moving_by_interp = False
+                        # Remote players: input-driven simulation + soft server correction.
+                        # Relayed inputs arrive with every pos_update, so we simulate at
+                        # local render rate instead of lerping between sparse packets.
                         riding_remote = bool(state.active_ride_item_id)
-                        fast_horizontal_remote = riding_remote and abs(dx) > 0
+                        sim_base_speed = (
+                            self._net_host_bspd
+                            if self._net_host_bspd > 0
+                            else min(width, height) * self._config.sprite_sheet.move_speed_ratio
+                        )
+                        sim_speed = sim_base_speed * player.stats.speed_multiplier()
+                        if riding_remote:
+                            sim_speed *= 3.0
+                        player.apply_input(
+                            dx=dx,
+                            dy=dy,
+                            speed=sim_speed,
+                            dt=dt,
+                            anim_fps=self._config.sprite_sheet.anim_fps,
+                        )
+                        # Authoritative correction: keep simulated position close to server.
                         if state.net_target_x is not None and state.net_target_y is not None:
                             tx = float(state.net_target_x)
                             ty = float(state.net_target_y)
                             now_interp = time.perf_counter()
-                            if state.net_target_at is not None:
-                                age = max(0.0, now_interp - float(state.net_target_at))
-                            else:
-                                age = 0.0
+                            age = max(0.0, (now_interp - float(state.net_target_at)) if state.net_target_at is not None else 0.0)
                             gap_ema = max(
                                 1.0 / 90.0,
-                                min(
-                                    0.20,
-                                    max(
-                                        float(state.net_update_gap_ema),
-                                        float(self._client_rx_gap_ema) * 0.92,
-                                    ),
-                                ),
+                                min(0.20, max(float(state.net_update_gap_ema), float(self._client_rx_gap_ema) * 0.92)),
                             )
-                            # Short extrapolation window helps hide uneven packet spacing.
-                            lead_multiplier = 1.35
-                            if riding_remote:
-                                lead_multiplier = 2.20 if fast_horizontal_remote else 1.85
-                            lead_time = min(age, gap_ema * lead_multiplier)
+                            # Short lead: simulation predicts; compensate only input-relay lag (~1 packet).
+                            lead_time = min(age, gap_ema * (1.0 if riding_remote else 0.6))
                             tx += float(state.net_velocity_x) * lead_time
                             ty += float(state.net_velocity_y) * lead_time
-                            cx = float(player.x)
-                            cy = float(player.y)
-                            drift_x = tx - cx
-                            drift_y = ty - cy
+                            drift_x = tx - float(player.x)
+                            drift_y = ty - float(player.y)
                             drift = math.hypot(drift_x, drift_y)
                             frame_remote_interp_sum_px += drift
                             frame_remote_interp_max_px = max(frame_remote_interp_max_px, drift)
                             frame_remote_interp_samples += 1
-                            if drift > 0.35:
-                                moving_by_interp = True
-                                # Adaptive smoothing by drift size:
-                                # low drift => tighter follow, high drift => softer correction.
-                                if riding_remote:
-                                    if drift <= 10.0:
-                                        gain = 52.0
-                                    elif drift <= 28.0:
-                                        gain = 36.0
-                                    else:
-                                        gain = 24.0
-                                else:
-                                    if drift <= 6.0:
-                                        gain = 28.0
-                                    elif drift <= 20.0:
-                                        gain = 18.0
-                                    else:
-                                        gain = 12.0
-                                jitter_ratio = max(0.0, min(1.0, (gap_ema - 0.03) / 0.09))
-                                gain *= (1.0 - ((0.18 if riding_remote else 0.28) * jitter_ratio))
-                                lerp = min(1.0, dt * gain)
-                                player.x = cx + drift_x * lerp
-                                player.y = cy + drift_y * lerp
-                            else:
+                            if drift >= 48.0:
+                                # Hard snap: teleport / reconnect / large collision divergence.
                                 player.x = tx
                                 player.y = ty
-                        if moving_by_interp:
-                            if state.net_target_walk_time is not None:
-                                target_wt = float(state.net_target_walk_time)
-                                predicted_wt = player.walk_time + dt * self._config.sprite_sheet.anim_fps
-                                walk_gain = 28.0 if riding_remote else 22.0
-                                player.walk_time = predicted_wt + (target_wt - predicted_wt) * min(1.0, dt * walk_gain)
-                            else:
-                                player.walk_time += dt * self._config.sprite_sheet.anim_fps
-                        elif state.net_target_walk_time is not None:
+                            elif drift > 0.5:
+                                # Soft correction: tighter for ride since errors compound faster.
+                                correction_gain = 16.0 if riding_remote else 10.0
+                                lerp_c = min(1.0, dt * correction_gain)
+                                player.x += drift_x * lerp_c
+                                player.y += drift_y * lerp_c
+                        # apply_input already advanced walk_time; soft-sync to server value.
+                        moving_by_interp = False
+                        if state.net_target_walk_time is not None:
                             target_wt = float(state.net_target_walk_time)
-                            walk_gain = 30.0 if riding_remote else 24.0
+                            walk_gain = 24.0 if riding_remote else 18.0
                             player.walk_time = player.walk_time + (target_wt - player.walk_time) * min(1.0, dt * walk_gain)
                         current_frames = frames_by_dir[player.facing]
                         frame_index = int(player.walk_time) % len(current_frames)
