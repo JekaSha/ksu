@@ -52,6 +52,10 @@ class RenderCache:
     player_shadow: dict[tuple[int, int, tuple[int, int, int, int]], pygame.Surface] = field(default_factory=dict)
     player_visible_rect: dict[tuple[int, int], pygame.Rect] = field(default_factory=dict)
     ui_heart_sprite: dict[tuple[int, int, int, int], pygame.Surface] = field(default_factory=dict)
+    # UI panels: keyed by content tuple so they are only rebuilt when text changes.
+    task_panel_surf: tuple[tuple, pygame.Surface] | None = None
+    control_hints_surf: tuple[tuple, pygame.Surface] | None = None
+    right_panel_surf: tuple[tuple, pygame.Surface] | None = None
 
 
 class WorldRenderer:
@@ -500,7 +504,15 @@ class WorldRenderer:
     ) -> None:
         cam_x = int(camera.x)
         cam_y = int(camera.y)
+        view_l = cam_x - 64
+        view_t = cam_y - 64
+        view_r = cam_x + camera.width + 64
+        view_b = cam_y + camera.height + 64
         for room in world.rooms:
+            if room.x + room.width < view_l or room.x > view_r:
+                continue
+            if room.y + room.height < view_t or room.y > view_b:
+                continue
             tile = floor_tileset.get(room.floor_texture)
             tw, th = tile.get_size()
             start_x = room.x
@@ -643,8 +655,17 @@ class WorldRenderer:
         objects: list[WorldObject],
     ) -> None:
         sprites = wall_sprites.sprites()
+        wall_margin = 220
+        view_l = int(camera.x) - wall_margin
+        view_t = int(camera.y) - wall_margin
+        view_r = int(camera.x) + camera.width + wall_margin
+        view_b = int(camera.y) + camera.height + wall_margin
         for room in world.rooms:
             if not room.walls_enabled:
+                continue
+            if room.x + room.width < view_l or room.x > view_r:
+                continue
+            if room.y + room.height < view_t or room.y > view_b:
                 continue
             t = max(1, min(room.wall_thickness, room.width // 3, room.height // 3))
             top_t = (
@@ -885,8 +906,17 @@ class WorldRenderer:
     ) -> None:
         # Render bottom walls in a foreground pass so player can step visually under them.
         sprites = wall_sprites.sprites()
+        wall_margin = 220
+        view_l = int(camera.x) - wall_margin
+        view_t = int(camera.y) - wall_margin
+        view_r = int(camera.x) + camera.width + wall_margin
+        view_b = int(camera.y) + camera.height + wall_margin
         for room in world.rooms:
             if not room.walls_enabled:
+                continue
+            if room.x + room.width < view_l or room.x > view_r:
+                continue
+            if room.y + room.height < view_t or room.y > view_b:
                 continue
             t = max(1, min(room.wall_thickness, room.width // 3, room.height // 3))
             top_t = (
@@ -1474,12 +1504,15 @@ class WorldRenderer:
     ) -> list[tuple[pygame.Surface, float, float, int, bool, str]]:
         draw_list = sorted(objects, key=lambda obj: obj.y)
         occluders: list[tuple[pygame.Surface, float, float, int, bool, str]] = []
+        view = pygame.Rect(0, 0, camera.width, camera.height)
         for obj in draw_list:
             sprite = self._sprite_for_object(object_sprites, obj)
             skip_base_draw = False
             occluder_sprite = sprite
             x = obj.x - sprite.get_width() / 2 - camera.x
             y = obj.y - sprite.get_height() / 2 - camera.y
+            if not pygame.Rect(int(x), int(y), sprite.get_width(), sprite.get_height()).colliderect(view):
+                continue
             if obj.occlude_top and obj.occlude_split is not None:
                 split_ratio = float(obj.occlude_split)
                 if obj.kind == "plant":
@@ -1971,9 +2004,16 @@ class WorldRenderer:
         return rendered
 
     def _draw_task_panel(self, screen: pygame.Surface, lines: list[str]) -> int:
-        rendered = [self._lock_text_surface(line, (242, 243, 245)) for line in lines if line]
-        if not rendered:
+        content_key = tuple(line for line in lines if line)
+        if not content_key:
             return 10
+        x = 10
+        y = 54
+        cached = self._cache.task_panel_surf
+        if cached is not None and cached[0] == content_key:
+            screen.blit(cached[1], (x, y))
+            return y + cached[1].get_height()
+        rendered = [self._lock_text_surface(line, (242, 243, 245)) for line in content_key]
         max_w = max(surf.get_width() for surf in rendered)
         line_h = max(surf.get_height() for surf in rendered)
         pad_x = 10
@@ -1982,19 +2022,25 @@ class WorldRenderer:
         panel_h = len(rendered) * line_h + pad_y * 2 + max(0, len(rendered) - 1) * 3
         panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
         panel.fill((10, 16, 24, 205))
-        x = 10
-        y = 54
-        screen.blit(panel, (x, y))
-        cy = y + pad_y
+        cy = pad_y
         for surf in rendered:
-            screen.blit(surf, (x + pad_x, cy))
+            panel.blit(surf, (pad_x, cy))
             cy += line_h + 3
+        self._cache.task_panel_surf = (content_key, panel)
+        screen.blit(panel, (x, y))
         return y + panel_h
 
     def _draw_control_hints(self, screen: pygame.Surface, lines: list[str], *, top: int = 54) -> None:
-        rendered = [self._lock_text_surface(line, (226, 232, 240)) for line in lines if line]
-        if not rendered:
+        content_key = tuple(line for line in lines if line)
+        if not content_key:
             return
+        x = 10
+        y = int(top)
+        cached = self._cache.control_hints_surf
+        if cached is not None and cached[0] == content_key:
+            screen.blit(cached[1], (x, y))
+            return
+        rendered = [self._lock_text_surface(line, (226, 232, 240)) for line in content_key]
         max_w = max(surf.get_width() for surf in rendered)
         line_h = max(surf.get_height() for surf in rendered)
         pad_x = 10
@@ -2003,18 +2049,25 @@ class WorldRenderer:
         panel_h = len(rendered) * line_h + pad_y * 2 + max(0, len(rendered) - 1) * 3
         panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
         panel.fill((8, 12, 18, 165))
-        x = 10
-        y = int(top)
-        screen.blit(panel, (x, y))
-        cy = y + pad_y
+        cy = pad_y
         for surf in rendered:
-            screen.blit(surf, (x + pad_x, cy))
+            panel.blit(surf, (pad_x, cy))
             cy += line_h + 3
+        self._cache.control_hints_surf = (content_key, panel)
+        screen.blit(panel, (x, y))
 
     def _draw_right_panel(self, screen: pygame.Surface, lines: list[str], *, top: int = 54) -> int:
-        rendered = [self._lock_text_surface(line, (235, 240, 244)) for line in lines if line]
-        if not rendered:
+        content_key = tuple(line for line in lines if line)
+        if not content_key:
             return int(top)
+        y = int(top)
+        cached = self._cache.right_panel_surf
+        if cached is not None and cached[0] == content_key:
+            panel = cached[1]
+            x = max(8, screen.get_width() - panel.get_width() - 10)
+            screen.blit(panel, (x, y))
+            return y + panel.get_height()
+        rendered = [self._lock_text_surface(line, (235, 240, 244)) for line in content_key]
         max_w = max(surf.get_width() for surf in rendered)
         line_h = max(surf.get_height() for surf in rendered)
         pad_x = 10
@@ -2023,13 +2076,13 @@ class WorldRenderer:
         panel_h = len(rendered) * line_h + pad_y * 2 + max(0, len(rendered) - 1) * 3
         panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
         panel.fill((8, 12, 18, 170))
-        x = max(8, screen.get_width() - panel_w - 10)
-        y = int(top)
-        screen.blit(panel, (x, y))
-        cy = y + pad_y
+        cy = pad_y
         for surf in rendered:
-            screen.blit(surf, (x + pad_x, cy))
+            panel.blit(surf, (pad_x, cy))
             cy += line_h + 3
+        self._cache.right_panel_surf = (content_key, panel)
+        x = max(8, screen.get_width() - panel_w - 10)
+        screen.blit(panel, (x, y))
         return y + panel_h
 
     def _draw_right_panel_rows(

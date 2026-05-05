@@ -182,6 +182,7 @@ class MathTaskOutcome:
 @dataclass
 class MathTaskEngineState:
     has_math_quest: bool = False
+    quest_owner_player_id: str | None = None
     menu_open: bool = False
     menu_owner_player_id: str | None = None
     selected_task: int | None = None
@@ -208,6 +209,7 @@ class MathTaskEngineState:
     def to_payload(self) -> dict[str, object]:
         return {
             "has_math_quest": self.has_math_quest,
+            "quest_owner_player_id": self.quest_owner_player_id,
             "menu_open": self.menu_open,
             "menu_owner_player_id": self.menu_owner_player_id,
             "selected_task": self.selected_task,
@@ -246,6 +248,8 @@ class MathTaskEngineState:
             return cls()
         out = cls()
         out.has_math_quest = bool(payload.get("has_math_quest", False))
+        raw_owner = payload.get("quest_owner_player_id")
+        out.quest_owner_player_id = str(raw_owner).strip() if raw_owner is not None and str(raw_owner).strip() else None
         out.menu_open = bool(payload.get("menu_open", False))
         owner = payload.get("menu_owner_player_id")
         out.menu_owner_player_id = str(owner).strip() if owner is not None and str(owner).strip() else None
@@ -301,10 +305,14 @@ class MathTaskEngineState:
             out._activate_next_pending()
         return out
 
-    def unlock_math_quest(self) -> MathTaskOutcome:
+    def unlock_math_quest(self, *, player_id: str | None = None) -> MathTaskOutcome:
+        owner = str(player_id).strip() if player_id is not None else ""
         if self.has_math_quest:
+            if self.quest_owner_player_id is None and owner:
+                self.quest_owner_player_id = owner
             return MathTaskOutcome(message="Книга математики уже найдена")
         self.has_math_quest = True
+        self.quest_owner_player_id = owner or self.quest_owner_player_id
         return MathTaskOutcome(message="Открыт раздел: Математика")
 
     def open_menu(self, player_id: str) -> MathTaskOutcome:
@@ -375,7 +383,7 @@ class MathTaskEngineState:
         if not requester:
             return False
         if not dispatcher:
-            return True
+            return False
         return requester == dispatcher
 
     def task_operation(self) -> str:
@@ -506,10 +514,16 @@ class MathTaskEngineState:
     ) -> MathTaskOutcome:
         if not self.has_math_quest:
             return MathTaskOutcome(message="Сначала найди книгу математики")
+        owner = str(self.quest_owner_player_id).strip() if self.quest_owner_player_id is not None else ""
+        requester = str(player_id).strip()
+        if owner and requester and owner != requester and not self._is_dispatcher(player_id):
+            return MathTaskOutcome(message="Книгу математики взял другой игрок")
         if task_no < 1 or task_no > 9:
             return MathTaskOutcome(message="Номер задачи: 1..9")
         if self.menu_open and self.menu_owner_player_id not in {None, player_id}:
             return MathTaskOutcome(message="Эту задачу выбирает другой игрок")
+        if self.active and self.selected_task in {1, 2} and not self._is_dispatcher(player_id):
+            return MathTaskOutcome(message="Активную задачу может менять только ведущий")
         if self.active and self.selected_task == int(task_no) and task_no in {1, 2}:
             return MathTaskOutcome(message=f"Задача {task_no} уже идет. Удерживай Q 5 сек для сброса")
         self.selected_task = int(task_no)
@@ -1092,6 +1106,13 @@ class MathTaskEngineState:
                 self.dispatcher_player_id = sorted(online)[0]
             else:
                 self.dispatcher_player_id = None
+        if self.quest_owner_player_id == left:
+            if team_online:
+                self.quest_owner_player_id = sorted(team_online)[0]
+            elif online:
+                self.quest_owner_player_id = sorted(online)[0]
+            else:
+                self.quest_owner_player_id = None
 
         if self.current_round is not None:
             for stage in ("pick_first", "pick_second"):
@@ -1136,6 +1157,10 @@ class MathTaskEngineState:
         if joined not in seen:
             roster.append(joined)
             seen.add(joined)
+        if self.dispatcher_player_id is None and roster:
+            self.dispatcher_player_id = sorted(roster)[0]
+        if self.quest_owner_player_id is None and roster:
+            self.quest_owner_player_id = sorted(roster)[0]
         if self._player_has_assigned_pending_answer(player_id=joined):
             self._auto_assign_unassigned_pending_answers(online_player_ids=roster)
             return
@@ -1166,6 +1191,7 @@ class MathTaskEngineState:
 
         self.menu_owner_player_id = _remap(self.menu_owner_player_id)
         self.dispatcher_player_id = _remap(self.dispatcher_player_id)
+        self.quest_owner_player_id = _remap(self.quest_owner_player_id)
 
         if self.current_round is not None:
             for stage, owner in list(self.current_round.assignments.items()):

@@ -220,6 +220,7 @@ class GameSession:
         self._surface_body_rect_cache: dict[int, tuple[pygame.Surface, pygame.Rect]] = {}
         self._face_heart_effects: list[dict[str, float]] = []
         self._face_heart_pair_last_emit: dict[tuple[str, str], float] = {}
+        self._math_task_log_fp = None
 
     def _player_state(self, player_id: str) -> SessionPlayerState | None:
         return self._player_states.get(player_id)
@@ -261,6 +262,15 @@ class GameSession:
         team = self._player_team(pid)
         team_part = f" @T{team}" if team else ""
         return f"{self._player_display_name(pid)} [{pid}]{team_part}"
+
+    def _can_player_access_math_quest(self, player_id: str) -> bool:
+        if not self._math_tasks.has_math_quest:
+            return False
+        owner = str(self._math_tasks.quest_owner_player_id).strip() if self._math_tasks.quest_owner_player_id else ""
+        requester = str(player_id).strip()
+        if not owner:
+            return True
+        return owner == requester
 
     @staticmethod
     def _math_task_title(task_no: int | None) -> str:
@@ -405,10 +415,23 @@ class GameSession:
         dispatcher_team = self._normalize_team_id(dispatcher_team_raw)
         if previous == dispatcher_team and next_team != dispatcher_team:
             team_online = self._team_player_ids(dispatcher_team)
+            before = self._math_task_assignments_signature()
             self._math_tasks.on_player_left(
                 player_id=pid,
                 online_player_ids=list(self._player_states.keys()),
                 online_team_player_ids=team_online,
+            )
+            self._log_math_task_event(
+                "player_left_dispatcher_team",
+                player_id=pid,
+                from_team=previous,
+                to_team=next_team,
+            )
+            self._log_math_assignment_changes(
+                before=before,
+                trigger_event="player_left_dispatcher_team",
+                actor_player_id=pid,
+                reason="team changed out of dispatcher team",
             )
             return
         if (
@@ -1039,6 +1062,8 @@ class GameSession:
         conn_log_path: Path | None = None
         conn_client_log_fp = None
         conn_client_log_path: Path | None = None
+        math_task_log_fp = None
+        math_task_log_path: Path | None = None
         perf_window_started_at = time.monotonic()
         perf_frames = 0
         perf_frame_sum_ms = 0.0
@@ -1091,6 +1116,18 @@ class GameSession:
                 conn_log_path = None
                 conn_client_log_fp = None
                 conn_client_log_path = None
+        math_log_enabled_raw = str(os.getenv("KSU_MATH_TASK_LOG", "1")).strip().lower()
+        math_log_enabled = math_log_enabled_raw not in {"0", "false", "off", "no"}
+        if math_log_enabled and host_started:
+            try:
+                log_dir = project_root / "runtime_logs"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                math_task_log_path = log_dir / f"math_task_flow_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+                math_task_log_fp = math_task_log_path.open("a", encoding="utf-8", buffering=1)
+            except Exception:
+                math_task_log_fp = None
+                math_task_log_path = None
+        self._math_task_log_fp = math_task_log_fp
         if host_started:
             self._set_message(f"LAN server visible: {local_host_name}:{server_port}")
         else:
@@ -1163,6 +1200,12 @@ class GameSession:
             host_started=bool(host_started),
             server_port=int(server_port),
         )
+        if math_task_log_path is not None:
+            self._log_math_task_event(
+                "math_log_started",
+                player_id=self._LOCAL_PLAYER_ID,
+                path=str(math_task_log_path),
+            )
 
         snapshot = self._resource_snapshot(project_root) if dev_hot_enabled else None
         next_hot_check = 0.0
@@ -1170,7 +1213,8 @@ class GameSession:
         running = True
         while running:
             frame_started_at = time.perf_counter()
-            dt = clock.tick(self._config.window.fps) / 1000.0
+            target_fps = 30 if browser.is_connected() else self._config.window.fps
+            dt = clock.tick(target_fps) / 1000.0
             now = time.monotonic()
             network_state_dirty = False
             reload_requested = False
@@ -1825,7 +1869,7 @@ class GameSession:
                         pygame.K_BACKSPACE,
                         pygame.K_SPACE,
                     }:
-                        has_math_quest = self._math_tasks.has_math_quest
+                        has_math_quest = self._can_player_access_math_quest(self._LOCAL_PLAYER_ID)
                         dispatcher_team = self._math_tasks.dispatcher_team_id or self._player_team(self._LOCAL_PLAYER_ID)
                         inbox_rows = self._build_math_inbox_rows(player_id=self._LOCAL_PLAYER_ID)
                         if event_key == pygame.K_ESCAPE:
@@ -1867,7 +1911,10 @@ class GameSession:
                                 continue
                             if event_key == pygame.K_q:
                                 if not has_math_quest:
-                                    self._set_message("Сначала найди книгу математики")
+                                    if self._math_tasks.has_math_quest:
+                                        self._set_message("Книгу математики взял другой игрок")
+                                    else:
+                                        self._set_message("Сначала найди книгу математики")
                                 else:
                                     task_menu_section = "tasks"
                                 continue
@@ -1890,7 +1937,10 @@ class GameSession:
                                 continue
                             if event_key == pygame.K_q:
                                 if not has_math_quest:
-                                    self._set_message("Сначала найди книгу математики")
+                                    if self._math_tasks.has_math_quest:
+                                        self._set_message("Книгу математики взял другой игрок")
+                                    else:
+                                        self._set_message("Сначала найди книгу математики")
                                     continue
                                 selected_task_no = task_menu_selected_task + 1
                                 if self._math_tasks.active and self._math_tasks.selected_task == selected_task_no:
@@ -2752,7 +2802,7 @@ class GameSession:
                 task_panel_lines = ["TASKS DISPATCHER (Esc back)"]
                 if task_menu_section == "quests":
                     task_panel_lines.append("Разделы (1/2/3/4):")
-                    if self._math_tasks.has_math_quest:
+                    if self._can_player_access_math_quest(self._LOCAL_PLAYER_ID):
                         mark = ">" if task_menu_selected_quest == 0 else " "
                         task_panel_lines.append(f"{mark} Математика")
                         task_panel_lines.append("Q: открыть")
@@ -3377,6 +3427,12 @@ class GameSession:
                 conn_client_log_fp.close()
             except Exception:
                 pass
+        if math_task_log_fp is not None:
+            try:
+                math_task_log_fp.close()
+            except Exception:
+                pass
+        self._math_task_log_fp = None
         browser.stop()
         lan_host.stop()
         pygame.quit()
@@ -3605,10 +3661,22 @@ class GameSession:
         self._movement_inputs.pop(player_id, None)
         dispatcher_team = self._math_tasks.dispatcher_team_id
         team_online = self._team_player_ids(dispatcher_team) if dispatcher_team else list(self._player_states.keys())
+        before = self._math_task_assignments_signature()
         self._math_tasks.on_player_left(
             player_id=removed,
             online_player_ids=list(self._player_states.keys()),
             online_team_player_ids=team_online,
+        )
+        self._log_math_task_event(
+            "player_removed_from_session",
+            player_id=removed,
+            reason="remove_player",
+        )
+        self._log_math_assignment_changes(
+            before=before,
+            trigger_event="player_removed_from_session",
+            actor_player_id=removed,
+            reason="player removed",
         )
 
     def _player_name_key(self, name: str | None) -> str:
@@ -3760,10 +3828,22 @@ class GameSession:
                 self._set_player_team(host_event.player_id, host_event.player_team)
             dispatcher_team = self._math_tasks.dispatcher_team_id
             team_online = self._team_player_ids(dispatcher_team) if dispatcher_team else list(self._player_states.keys())
+            before = self._math_task_assignments_signature()
             self._math_tasks.on_player_join(
                 player_id=host_event.player_id,
                 online_player_ids=list(self._player_states.keys()),
                 online_team_player_ids=team_online,
+            )
+            self._log_math_task_event(
+                "player_joined_session",
+                player_id=host_event.player_id,
+                reason=("reconnect" if restored else "join"),
+            )
+            self._log_math_assignment_changes(
+                before=before,
+                trigger_event="player_joined_session",
+                actor_player_id=host_event.player_id,
+                reason=("reconnect join" if restored else "join"),
             )
             self._set_message(
                 f"Reconnected: {host_event.player_name}"
@@ -5277,11 +5357,24 @@ class GameSession:
             task_no = int(num_raw)
         except ValueError:
             return
+        self._log_math_task_event(
+            "task_select_requested",
+            player_id=player_id,
+            action=action,
+            task_no=int(task_no),
+        )
         outcome = self._math_tasks.select_task(
             player_id=player_id,
             task_no=task_no,
             now_ts=time.time(),
             team_id=self._player_team(player_id),
+        )
+        self._log_math_task_event(
+            "task_select_result",
+            player_id=player_id,
+            action=action,
+            task_no=int(task_no),
+            result_message=outcome.message,
         )
         self._apply_math_task_outcome(outcome, world, message_player_id=player_id)
 
@@ -5300,11 +5393,24 @@ class GameSession:
             task_no = int(num_raw)
         except ValueError:
             return
+        self._log_math_task_event(
+            "task_restart_requested",
+            player_id=player_id,
+            action=action,
+            task_no=int(task_no),
+        )
         outcome = self._math_tasks.restart_task(
             player_id=player_id,
             task_no=task_no,
             now_ts=time.time(),
             team_id=self._player_team(player_id),
+        )
+        self._log_math_task_event(
+            "task_restart_result",
+            player_id=player_id,
+            action=action,
+            task_no=int(task_no),
+            result_message=outcome.message,
         )
         self._apply_math_task_outcome(outcome, world, message_player_id=player_id)
 
@@ -5328,11 +5434,25 @@ class GameSession:
         assignee_id = str(assignee_raw).strip()
         if not assignee_id:
             return
+        before = self._math_task_assignments_signature()
         message = self._math_tasks.reassign_pending_answer(
             answer_id=answer_id,
             assignee_player_id=assignee_id,
             requested_by_player_id=player_id,
             online_player_ids=self._team_player_ids(self._math_tasks.dispatcher_team_id or self._player_team(player_id)),
+        )
+        self._log_math_task_event(
+            "answer_assign_request",
+            player_id=player_id,
+            answer_id=int(answer_id),
+            assignee_id=assignee_id,
+            result_message=message,
+        )
+        self._log_math_assignment_changes(
+            before=before,
+            trigger_event="answer_assign_request",
+            actor_player_id=player_id,
+            reason=(str(message).strip() or "assign"),
         )
         if message and str(player_id).strip() == self._LOCAL_PLAYER_ID:
             if message.startswith("Задача #"):
@@ -5360,12 +5480,26 @@ class GameSession:
         assignee_id = str(assignee_raw).strip()
         if not assignee_id:
             return
+        before = self._math_task_assignments_signature()
         dispatcher_team = self._math_tasks.dispatcher_team_id or self._player_team(player_id)
         message = self._math_tasks.reassign_round_stage(
             stage=stage_key,
             assignee_player_id=assignee_id,
             requested_by_player_id=player_id,
             online_player_ids=self._team_player_ids(dispatcher_team),
+        )
+        self._log_math_task_event(
+            "stage_assign_request",
+            player_id=player_id,
+            stage=stage_key,
+            assignee_id=assignee_id,
+            result_message=message,
+        )
+        self._log_math_assignment_changes(
+            before=before,
+            trigger_event="stage_assign_request",
+            actor_player_id=player_id,
+            reason=(str(message).strip() or "stage assign"),
         )
         if message and str(player_id).strip() == self._LOCAL_PLAYER_ID:
             if "игроку " in message:
@@ -5391,6 +5525,12 @@ class GameSession:
             return
         stage_key = str(stage_raw).strip().lower()
         message = self._math_tasks.accept_round_stage(stage=stage_key, player_id=player_id)
+        self._log_math_task_event(
+            "stage_accept_request",
+            player_id=player_id,
+            stage=stage_key,
+            result_message=message,
+        )
         if message and str(player_id).strip() == self._LOCAL_PLAYER_ID:
             self._set_message(message)
 
@@ -5412,6 +5552,12 @@ class GameSession:
         except ValueError:
             return
         message = self._math_tasks.accept_pending_answer(answer_id=answer_id, player_id=player_id)
+        self._log_math_task_event(
+            "answer_accept_request",
+            player_id=player_id,
+            answer_id=int(answer_id),
+            result_message=message,
+        )
         if message and str(player_id).strip() == self._LOCAL_PLAYER_ID:
             self._set_message(message)
 
@@ -5475,19 +5621,37 @@ class GameSession:
         player_id = self._active_player_context_id
 
         if target.kind == self._MATH_BOOK_KIND:
-            outcome = self._math_tasks.unlock_math_quest()
+            outcome = self._math_tasks.unlock_math_quest(player_id=player_id)
+            self._log_math_task_event(
+                "math_book_picked",
+                player_id=player_id,
+                object_id=target.object_id,
+                result_message=outcome.message,
+            )
             world.remove_object(target.object_id)
             self._apply_math_task_outcome(outcome, world, message_player_id=player_id)
             return True
 
         if target.kind == self._MATH_DIGIT_KIND:
             if not self._math_tasks.active:
-                self._set_message("Сначала активируй задачу (TAB)")
+                self._log_math_task_event(
+                    "digit_pick_blocked",
+                    player_id=player_id,
+                    value=str(target.label or ""),
+                    reason="task_not_active",
+                )
+                self._set_message_for_player(player_id, "Сначала активируй задачу (TAB)")
                 return True
             try:
                 digit = int(str(target.label or "").strip())
             except ValueError:
-                self._set_message("Некорректная цифра")
+                self._log_math_task_event(
+                    "digit_pick_blocked",
+                    player_id=player_id,
+                    value=str(target.label or ""),
+                    reason="invalid_digit",
+                )
+                self._set_message_for_player(player_id, "Некорректная цифра")
                 return True
             round_state = self._math_tasks.current_round
             active_pending = self._math_tasks.active_pending_answer()
@@ -5507,10 +5671,25 @@ class GameSession:
                     )
                     if int(self._math_tasks.solved_count) > solved_before:
                         world.remove_object(target.object_id)
+                    self._log_math_task_event(
+                        "digit_pick_as_answer",
+                        player_id=player_id,
+                        value=int(digit),
+                        answer_id=int(own_pending.answer_id),
+                        result_message=outcome.message,
+                    )
                     self._apply_math_task_outcome(outcome, world, message_player_id=player_id)
                 else:
                     expr = f"{own_pending.first_digit}{own_pending.operation}{own_pending.second_digit}=?"
-                    self._set_message(f"Сначала реши свой результат: {expr}")
+                    self._log_math_task_event(
+                        "digit_pick_blocked",
+                        player_id=player_id,
+                        value=int(digit),
+                        reason="own_answer_required_first",
+                        required_expr=expr,
+                        answer_id=int(own_pending.answer_id),
+                    )
+                    self._set_message_for_player(player_id, f"Сначала реши свой результат: {expr}")
                 return True
             if (
                 active_pending is not None
@@ -5523,7 +5702,15 @@ class GameSession:
                 self._relocate_math_task_value_object(world, target)
                 assignee_id = str(active_pending.assigned_player_id).strip()
                 assignee_name = self._player_display_name(assignee_id) if assignee_id else "другой игрок"
-                self._set_message(f"Это не твой результат. Его ищет {assignee_name}")
+                self._log_math_task_event(
+                    "digit_pick_blocked",
+                    player_id=player_id,
+                    value=int(digit),
+                    reason="assigned_to_other_player",
+                    answer_id=int(active_pending.answer_id),
+                    assignee_id=(assignee_id or None),
+                )
+                self._set_message_for_player(player_id, f"Это не твой результат. Его ищет {assignee_name}")
                 return True
             if (
                 active_pending is not None
@@ -5541,9 +5728,23 @@ class GameSession:
                     )
                     if int(self._math_tasks.solved_count) > solved_before:
                         world.remove_object(target.object_id)
+                    self._log_math_task_event(
+                        "digit_pick_as_answer",
+                        player_id=player_id,
+                        value=int(digit),
+                        answer_id=int(active_pending.answer_id),
+                        result_message=outcome.message,
+                    )
                     self._apply_math_task_outcome(outcome, world, message_player_id=player_id)
                 else:
-                    self._set_message("Сначала реши назначенный тебе результат")
+                    self._log_math_task_event(
+                        "digit_pick_blocked",
+                        player_id=player_id,
+                        value=int(digit),
+                        reason="answer_objects_still_present",
+                        answer_id=int(active_pending.answer_id),
+                    )
+                    self._set_message_for_player(player_id, "Сначала реши назначенный тебе результат")
                 return True
             if (
                 active_pending is not None
@@ -5564,9 +5765,17 @@ class GameSession:
                 )
                 if int(self._math_tasks.solved_count) > solved_before:
                     world.remove_object(target.object_id)
+                self._log_math_task_event(
+                    "digit_pick_as_answer",
+                    player_id=player_id,
+                    value=int(digit),
+                    answer_id=int(active_pending.answer_id),
+                    result_message=outcome.message,
+                )
                 self._apply_math_task_outcome(outcome, world, message_player_id=player_id)
                 return True
             dispatcher_team = self._math_tasks.dispatcher_team_id or self._player_team(player_id)
+            before = self._math_task_assignments_signature()
             outcome = self._math_tasks.pick_digit(
                 player_id=player_id,
                 digit=digit,
@@ -5575,18 +5784,44 @@ class GameSession:
             )
             if outcome.consume_digit:
                 world.remove_object(target.object_id)
+            self._log_math_task_event(
+                "digit_pick_result",
+                player_id=player_id,
+                value=int(digit),
+                consumed=bool(outcome.consume_digit),
+                result_message=outcome.message,
+            )
+            self._log_math_assignment_changes(
+                before=before,
+                trigger_event="digit_pick_result",
+                actor_player_id=player_id,
+                reason=(str(outcome.message).strip() if outcome.message else "digit pick"),
+            )
             self._apply_math_task_outcome(outcome, world, message_player_id=player_id)
             return True
 
         if target.kind == self._MATH_ANSWER_KIND:
             if not self._math_tasks.active:
-                self._set_message("Сначала активируй задачу (TAB)")
+                self._log_math_task_event(
+                    "answer_pick_blocked",
+                    player_id=player_id,
+                    value=str(target.label or ""),
+                    reason="task_not_active",
+                )
+                self._set_message_for_player(player_id, "Сначала активируй задачу (TAB)")
                 return True
             try:
                 answer_value = int(str(target.label or "").strip())
             except ValueError:
-                self._set_message("Некорректный ответ")
+                self._log_math_task_event(
+                    "answer_pick_blocked",
+                    player_id=player_id,
+                    value=str(target.label or ""),
+                    reason="invalid_answer",
+                )
+                self._set_message_for_player(player_id, "Некорректный ответ")
                 return True
+            before = self._math_task_assignments_signature()
             outcome = self._math_tasks.pick_answer(
                 player_id=player_id,
                 answer_value=answer_value,
@@ -5603,6 +5838,19 @@ class GameSession:
                 outcome.message = f"Это не твой результат. Его ищет {assigned_name}"
             elif outcome.clear_answers:
                 world.remove_object(target.object_id)
+            self._log_math_task_event(
+                "answer_pick_result",
+                player_id=player_id,
+                value=int(answer_value),
+                assigned_to_other=bool(assigned_to_other),
+                result_message=outcome.message,
+            )
+            self._log_math_assignment_changes(
+                before=before,
+                trigger_event="answer_pick_result",
+                actor_player_id=player_id,
+                reason=(str(outcome.message).strip() if outcome.message else "answer pick"),
+            )
             self._apply_math_task_outcome(outcome, world, message_player_id=player_id)
             return True
 
@@ -5656,6 +5904,16 @@ class GameSession:
         *,
         message_player_id: str | None = None,
     ) -> None:
+        self._log_math_task_event(
+            "math_outcome_applied",
+            player_id=message_player_id,
+            message=outcome.message,
+            clear_digits=bool(outcome.clear_digits),
+            clear_answers=bool(outcome.clear_answers),
+            spawn_digits=bool(outcome.spawn_digits),
+            spawn_answers=bool(outcome.spawn_answers),
+            consume_digit=bool(outcome.consume_digit),
+        )
         if outcome.clear_digits:
             self._clear_math_objects(world, kind=self._MATH_DIGIT_KIND)
         if outcome.clear_answers:
@@ -7116,6 +7374,151 @@ class GameSession:
     def _set_message(self, text: str, *, duration_sec: float = 1.6) -> None:
         self._message = text
         self._message_until = time.monotonic() + max(0.2, float(duration_sec))
+
+    def _set_message_for_player(self, player_id: str, text: str, *, duration_sec: float = 1.6) -> None:
+        if str(player_id).strip() != self._LOCAL_PLAYER_ID:
+            return
+        self._set_message(text, duration_sec=duration_sec)
+
+    def _math_task_assignments_signature(self) -> dict[str, object]:
+        round_state = self._math_tasks.current_round
+        stage_assignments: dict[str, str | None] = {}
+        if round_state is not None:
+            for stage_key in ("pick_first", "pick_second"):
+                owner = round_state.assignments.get(stage_key)
+                stage_assignments[stage_key] = str(owner).strip() if owner is not None and str(owner).strip() else None
+        pending_assignments: dict[int, str | None] = {}
+        for item in self._math_tasks.pending_answers:
+            if item.solved:
+                continue
+            owner = str(item.assigned_player_id).strip() if item.assigned_player_id is not None else ""
+            pending_assignments[int(item.answer_id)] = owner or None
+        return {
+            "dispatcher": (str(self._math_tasks.dispatcher_player_id).strip() if self._math_tasks.dispatcher_player_id else None),
+            "stage": stage_assignments,
+            "pending": pending_assignments,
+        }
+
+    def _log_math_assignment_changes(
+        self,
+        *,
+        before: dict[str, object],
+        trigger_event: str,
+        actor_player_id: str | None,
+        reason: str,
+    ) -> None:
+        after = self._math_task_assignments_signature()
+        before_dispatcher = before.get("dispatcher")
+        after_dispatcher = after.get("dispatcher")
+        if before_dispatcher != after_dispatcher:
+            self._log_math_task_event(
+                "dispatcher_changed",
+                player_id=actor_player_id,
+                trigger=trigger_event,
+                reason=reason,
+                from_player=before_dispatcher,
+                to_player=after_dispatcher,
+            )
+        before_stage = before.get("stage") if isinstance(before.get("stage"), dict) else {}
+        after_stage = after.get("stage") if isinstance(after.get("stage"), dict) else {}
+        for stage_key in ("pick_first", "pick_second"):
+            old_owner = before_stage.get(stage_key)
+            new_owner = after_stage.get(stage_key)
+            if old_owner != new_owner:
+                self._log_math_task_event(
+                    "stage_reassigned",
+                    player_id=actor_player_id,
+                    trigger=trigger_event,
+                    reason=reason,
+                    stage=stage_key,
+                    from_player=old_owner,
+                    to_player=new_owner,
+                )
+        before_pending = before.get("pending") if isinstance(before.get("pending"), dict) else {}
+        after_pending = after.get("pending") if isinstance(after.get("pending"), dict) else {}
+        keys: set[int] = set()
+        for key in before_pending.keys():
+            try:
+                keys.add(int(key))
+            except (TypeError, ValueError):
+                continue
+        for key in after_pending.keys():
+            try:
+                keys.add(int(key))
+            except (TypeError, ValueError):
+                continue
+        for answer_id in sorted(keys):
+            old_owner = before_pending.get(answer_id)
+            new_owner = after_pending.get(answer_id)
+            if old_owner == new_owner:
+                continue
+            self._log_math_task_event(
+                "answer_reassigned",
+                player_id=actor_player_id,
+                trigger=trigger_event,
+                reason=reason,
+                answer_id=int(answer_id),
+                from_player=old_owner,
+                to_player=new_owner,
+            )
+
+    def _log_math_task_event(self, event: str, *, player_id: str | None = None, **fields: object) -> None:
+        fp = self._math_task_log_fp
+        if fp is None:
+            return
+        pid = str(player_id).strip() if player_id is not None else ""
+        round_state = self._math_tasks.current_round
+        active_pending = self._math_tasks.active_pending_answer()
+        pending_rows: list[dict[str, object]] = []
+        for item in self._math_tasks.pending_answers:
+            if item.solved:
+                continue
+            pending_rows.append(
+                {
+                    "answer_id": int(item.answer_id),
+                    "expr": f"{int(item.first_digit)}{item.operation}{int(item.second_digit)}=?",
+                    "assignee": (str(item.assigned_player_id).strip() if item.assigned_player_id is not None else None),
+                    "preferred_assignee": (
+                        str(item.preferred_assignee_id).strip() if item.preferred_assignee_id is not None else None
+                    ),
+                    "accepted": bool(item.accepted),
+                    "is_active": bool(active_pending is not None and int(active_pending.answer_id) == int(item.answer_id)),
+                }
+            )
+        payload: dict[str, object] = {
+            "ts": time.time(),
+            "event": str(event).strip() or "math_event",
+            "player_id": (pid or None),
+            "player_name": (self._player_display_name(pid) if pid else None),
+            "player_team": (self._player_team(pid) if pid else None),
+            "dispatcher_player_id": (str(self._math_tasks.dispatcher_player_id).strip() if self._math_tasks.dispatcher_player_id else None),
+            "dispatcher_team_id": (str(self._math_tasks.dispatcher_team_id).strip() if self._math_tasks.dispatcher_team_id else None),
+            "task_no": (int(self._math_tasks.selected_task) if self._math_tasks.selected_task is not None else None),
+            "active": bool(self._math_tasks.active),
+            "stage": (str(round_state.stage).strip() if round_state is not None else None),
+            "stage_owner_pick_first": (
+                str(round_state.assignments.get("pick_first")).strip()
+                if round_state is not None and round_state.assignments.get("pick_first") is not None
+                else None
+            ),
+            "stage_owner_pick_second": (
+                str(round_state.assignments.get("pick_second")).strip()
+                if round_state is not None and round_state.assignments.get("pick_second") is not None
+                else None
+            ),
+            "produced_count": int(self._math_tasks.produced_count),
+            "solved_count": int(self._math_tasks.solved_count),
+            "pending_count": int(self._math_tasks.pending_count()),
+            "active_answer_id": (int(active_pending.answer_id) if active_pending is not None else None),
+            "pending": pending_rows,
+            "online_players": sorted([str(pid).strip() for pid in self._player_states.keys() if str(pid).strip()]),
+        }
+        for key, value in fields.items():
+            payload[str(key)] = value
+        try:
+            fp.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
     def _inventory_has_item(self, inventory: Inventory, item_id: str) -> bool:
         target = item_id.strip().lower()

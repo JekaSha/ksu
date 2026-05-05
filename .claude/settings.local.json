@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(.venv/bin/pip install *)",
-      "Bash(DISPLAY=\"\" PYTHONPATH=python .venv/bin/python *)"
+      "Bash(DISPLAY=\"\" PYTHONPATH=python .venv/bin/python *)",
+      "Bash(python -m pytest -x -q)",
+      "Bash(python3 -m pytest python/ -x -q)"
     ]
   }
 }
