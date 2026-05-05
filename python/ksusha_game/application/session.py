@@ -2980,6 +2980,8 @@ class GameSession:
                 ):
                     if round_state.stage == "pick_first":
                         stage_owner_id = round_state.assignments.get("pick_first")
+                        if stage_owner_id is None:
+                            stage_owner_id = self._math_tasks.dispatcher_player_id
                         stage_owner = (
                             self._player_caption(stage_owner_id)
                             if stage_owner_id
@@ -2991,6 +2993,8 @@ class GameSession:
                         task_assignments_rows.append((line, stage_owner_id))
                     elif round_state.stage == "pick_second":
                         stage_owner_id = round_state.assignments.get("pick_second")
+                        if stage_owner_id is None:
+                            stage_owner_id = self._math_tasks.dispatcher_player_id
                         stage_owner = (
                             self._player_caption(stage_owner_id)
                             if stage_owner_id
@@ -3012,6 +3016,8 @@ class GameSession:
                         assignee = self._player_caption(assignee_id) if assignee_id else "любой игрок"
                         expr = f"{pending_item.first_digit}{pending_item.operation}{pending_item.second_digit}=?"
                         if pending_item.answer_id == active_id:
+                            queue_state = "active"
+                        elif assignee_id is not None:
                             queue_state = "active"
                         else:
                             queue_state = "queued"

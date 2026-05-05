@@ -633,6 +633,11 @@ class MathTaskEngineState:
         if not self.active or self.selected_task not in {1, 2}:
             return MathTaskOutcome(message=None)
         pending = self.active_pending_answer()
+        player_pending = self._assigned_pending_answer_for_player(player_id=player_id)
+        # Parallel mode: if player has own delegated answer, resolve it even when it is
+        # not the globally active queue head.
+        if player_pending is not None:
+            pending = player_pending
         if pending is None:
             return MathTaskOutcome(message="Сейчас нет активного ответа")
         assigned = pending.assigned_player_id
@@ -646,12 +651,16 @@ class MathTaskEngineState:
             self.solved_count += 1
             self.total_solved += 1
             self._inc_contribution(player_id=player_id, kind="answer")
-            out = MathTaskOutcome(clear_answers=True)
-            self._activate_next_pending()
-            if self.active_answer_id is not None:
-                out.spawn_answers = True
-                out.message = f"Результат найден! Осталось: {max(0, self.iterations_target - self.solved_count)}"
-                return out
+            was_active = pending.answer_id == self.active_answer_id
+            out = MathTaskOutcome(clear_answers=was_active)
+            if was_active:
+                self._activate_next_pending()
+                if self.active_answer_id is not None:
+                    out.spawn_answers = True
+                    out.message = f"Результат найден! Осталось: {max(0, self.iterations_target - self.solved_count)}"
+                    return out
+            else:
+                out.message = "Результат найден! Твоя задача закрыта"
             if self.solved_count >= self.iterations_target and self.produced_count >= self.iterations_target:
                 self.active = False
                 self.current_round = None
@@ -851,8 +860,15 @@ class MathTaskEngineState:
             seen.add(producer)
         if not producer:
             producer = roster[0] if roster else "p1"
+        dispatcher = str(self.dispatcher_player_id).strip() if self.dispatcher_player_id is not None else ""
+        if dispatcher and dispatcher not in seen:
+            roster.append(dispatcher)
+            seen.add(dispatcher)
         if not roster:
-            return producer or None
+            return dispatcher or producer or None
+        # Rule: dispatcher must close own result before delegating next to others.
+        if dispatcher and self._player_has_assigned_pending_answer(player_id=dispatcher):
+            return dispatcher
         free_candidates = [
             pid
             for pid in roster
@@ -864,7 +880,9 @@ class MathTaskEngineState:
             return free_candidates[idx]
         if producer and not self._player_has_assigned_pending_answer(player_id=producer):
             return producer
-        return None
+        if dispatcher:
+            return dispatcher
+        return producer or (roster[0] if roster else None)
 
     def _resolve_next_stage_owner(
         self,
