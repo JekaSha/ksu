@@ -22,11 +22,6 @@ python_cmd=""
 
 detect_python_cmd() {
   local candidates=()
-  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
-    candidates+=("$VIRTUAL_ENV/bin/python")
-    candidates+=("$VIRTUAL_ENV/Scripts/python.exe")
-    candidates+=("$VIRTUAL_ENV/Scripts/python")
-  fi
   candidates+=(
     ".venv/bin/python"
     ".venv/Scripts/python.exe"
@@ -38,6 +33,11 @@ detect_python_cmd() {
     "env/Scripts/python.exe"
     "env/Scripts/python"
   )
+  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    candidates+=("$VIRTUAL_ENV/bin/python")
+    candidates+=("$VIRTUAL_ENV/Scripts/python.exe")
+    candidates+=("$VIRTUAL_ENV/Scripts/python")
+  fi
 
   for candidate in "${candidates[@]}"; do
     if [[ -x "$candidate" ]]; then
@@ -73,10 +73,7 @@ run_game() {
 
 setup_env_after_pull() {
   local activated=0
-  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
-    echo "Using active virtualenv: ${VIRTUAL_ENV}"
-    activated=1
-  elif [[ -f ".venv/bin/activate" ]]; then
+  if [[ -f ".venv/bin/activate" ]]; then
     # shellcheck disable=SC1091
     source ".venv/bin/activate"
     activated=1
@@ -99,6 +96,9 @@ setup_env_after_pull() {
   elif [[ -f "env/Scripts/activate" ]]; then
     # shellcheck disable=SC1091
     source "env/Scripts/activate"
+    activated=1
+  elif [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    echo "Using active virtualenv: ${VIRTUAL_ENV}"
     activated=1
   fi
 
