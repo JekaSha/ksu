@@ -5435,6 +5435,19 @@ class GameSession:
             active_pending = self._math_tasks.active_pending_answer()
             if (
                 active_pending is not None
+                and not self._has_math_answer_objects(world)
+                and active_pending.assigned_player_id not in {None, player_id}
+                and int(active_pending.correct_answer) == int(digit)
+            ):
+                # This digit is the delegated result for another player.
+                # Do not consume it as the next round's first/second digit.
+                self._relocate_math_task_value_object(world, target)
+                assignee_id = str(active_pending.assigned_player_id).strip()
+                assignee_name = self._player_display_name(assignee_id) if assignee_id else "другой игрок"
+                self._set_message(f"Это не твой результат. Его ищет {assignee_name}")
+                return True
+            if (
+                active_pending is not None
                 and active_pending.assigned_player_id == player_id
             ):
                 if not self._has_math_answer_objects(world):
@@ -5496,8 +5509,10 @@ class GameSession:
             )
             assigned_to_other = bool(outcome.message and str(outcome.message).startswith("Этот ответ назначен игроку"))
             if assigned_to_other:
-                self._relocate_math_answer_object(world, target)
-                outcome.message = "Это не твой результат"
+                self._relocate_math_task_value_object(world, target)
+                assigned_id = str(self._math_tasks.active_pending_answer().assigned_player_id or "").strip() if self._math_tasks.active_pending_answer() is not None else ""
+                assigned_name = self._player_display_name(assigned_id) if assigned_id else "другой игрок"
+                outcome.message = f"Это не твой результат. Его ищет {assigned_name}"
             elif outcome.clear_answers:
                 world.remove_object(target.object_id)
             self._apply_math_task_outcome(outcome, world)
@@ -5716,8 +5731,8 @@ class GameSession:
             )
             reserved.append(self._math_spawn_rect(x=x, y=y, width=70, height=70))
 
-    def _relocate_math_answer_object(self, world: WorldMap, obj: WorldObject) -> None:
-        if obj.kind != self._MATH_ANSWER_KIND:
+    def _relocate_math_task_value_object(self, world: WorldMap, obj: WorldObject) -> None:
+        if obj.kind not in {self._MATH_ANSWER_KIND, self._MATH_DIGIT_KIND}:
             return
         point = self._find_free_math_spawn_point(
             world,

@@ -547,20 +547,19 @@ class MathTaskEngineState:
         if self.produced_count >= self.iterations_target:
             return MathTaskOutcome(message="Все примеры собраны. Закройте очередь ответов")
         round_state = self.current_round
+        dispatcher = str(self.dispatcher_player_id).strip() if self.dispatcher_player_id is not None else ""
         if self.selected_task == 2:
             value = max(-9, min(9, int(digit)))
         else:
             value = max(0, min(9, int(digit)))
         if round_state.stage == "pick_first":
             owner = round_state.assignments.get("pick_first")
+            if owner is None and dispatcher:
+                owner = dispatcher
+                round_state.assignments["pick_first"] = owner
+                round_state.assignment_accepted["pick_first"] = True
             if owner not in {None, player_id}:
                 return MathTaskOutcome(message="Это число назначено другому игроку")
-            if self._player_has_assigned_pending_answer(player_id=player_id) and owner != player_id:
-                assigned_pending = self._assigned_pending_answer_for_player(player_id=player_id)
-                if assigned_pending is not None:
-                    expr = f"{assigned_pending.first_digit}{assigned_pending.operation}{assigned_pending.second_digit}"
-                    return MathTaskOutcome(message=f"Сначала реши свой результат: {expr}=?")
-                return MathTaskOutcome(message="Сначала реши назначенный тебе результат")
             if owner == player_id and not round_state.assignment_accepted.get("pick_first", True):
                 return MathTaskOutcome(message="Сначала прими задачу: найти первое число")
             round_state.first_digit = value
@@ -570,14 +569,12 @@ class MathTaskEngineState:
             return MathTaskOutcome(message=f"Операция: {op}. Найди второе число", consume_digit=True)
         if round_state.stage == "pick_second":
             owner = round_state.assignments.get("pick_second")
+            if owner is None and dispatcher:
+                owner = dispatcher
+                round_state.assignments["pick_second"] = owner
+                round_state.assignment_accepted["pick_second"] = True
             if owner not in {None, player_id}:
                 return MathTaskOutcome(message="Это число назначено другому игроку")
-            if self._player_has_assigned_pending_answer(player_id=player_id) and owner != player_id:
-                assigned_pending = self._assigned_pending_answer_for_player(player_id=player_id)
-                if assigned_pending is not None:
-                    expr = f"{assigned_pending.first_digit}{assigned_pending.operation}{assigned_pending.second_digit}"
-                    return MathTaskOutcome(message=f"Сначала реши свой результат: {expr}=?")
-                return MathTaskOutcome(message="Сначала реши назначенный тебе результат")
             if owner == player_id and not round_state.assignment_accepted.get("pick_second", True):
                 return MathTaskOutcome(message="Сначала прими задачу: найти второе число")
             first = int(round_state.first_digit or 0)
@@ -607,11 +604,8 @@ class MathTaskEngineState:
             self._inc_contribution(player_id=player_id, kind="pick_second")
             round_state.first_digit = None
             round_state.stage = "pick_first"
-            next_owner = self._resolve_next_stage_owner(
-                producer_player_id=player_id,
-                online_player_ids=online_player_ids or [],
-            )
-            leader_id = str(player_id).strip() or "p1"
+            leader_id = str(self.dispatcher_player_id or player_id).strip() or "p1"
+            next_owner = leader_id
             assigned_by = leader_id
             round_state.assignments["pick_first"] = next_owner
             round_state.assignment_accepted["pick_first"] = True
@@ -991,3 +985,69 @@ class MathTaskEngineState:
         for pending in self.pending_answers:
             pending.assigned_player_id = _remap(pending.assigned_player_id)
             pending.assigned_by_player_id = _remap(pending.assigned_by_player_id)
+
+        if self.run_contributions:
+            merged: dict[str, dict[str, int]] = {}
+            for raw_pid, stats in self.run_contributions.items():
+                mapped_pid = _remap(str(raw_pid).strip())
+                if mapped_pid is None:
+                    continue
+                current = merged.get(mapped_pid)
+                if current is None:
+                    current = {"pick_first": 0, "pick_second": 0, "answer": 0}
+                    merged[mapped_pid] = current
+                if isinstance(stats, dict):
+                    current["pick_first"] += max(0, int(stats.get("pick_first", 0) or 0))
+                    current["pick_second"] += max(0, int(stats.get("pick_second", 0) or 0))
+                    current["answer"] += max(0, int(stats.get("answer", 0) or 0))
+            self.run_contributions = merged
+
+        summary = self.last_completion_summary
+        if isinstance(summary, dict):
+            completed_by = _remap(summary.get("completed_by"))
+            summary["completed_by"] = completed_by
+            rows_raw = summary.get("rows")
+            if isinstance(rows_raw, list):
+                merged_rows: dict[str, dict[str, int | str]] = {}
+                for item in rows_raw:
+                    if not isinstance(item, dict):
+                        continue
+                    raw_pid = str(item.get("player_id", "")).strip()
+                    if not raw_pid:
+                        continue
+                    mapped_pid = _remap(raw_pid)
+                    if mapped_pid is None:
+                        continue
+                    row = merged_rows.get(mapped_pid)
+                    if row is None:
+                        row = {
+                            "player_id": mapped_pid,
+                            "pick_first": 0,
+                            "pick_second": 0,
+                            "answer": 0,
+                            "total": 0,
+                        }
+                        merged_rows[mapped_pid] = row
+                    row["pick_first"] = int(row["pick_first"]) + max(0, int(item.get("pick_first", 0) or 0))
+                    row["pick_second"] = int(row["pick_second"]) + max(0, int(item.get("pick_second", 0) or 0))
+                    row["answer"] = int(row["answer"]) + max(0, int(item.get("answer", 0) or 0))
+                remapped_rows: list[dict[str, object]] = []
+                for row in merged_rows.values():
+                    row["total"] = int(row["pick_first"]) + int(row["pick_second"]) + int(row["answer"])
+                    remapped_rows.append(
+                        {
+                            "player_id": str(row["player_id"]),
+                            "pick_first": int(row["pick_first"]),
+                            "pick_second": int(row["pick_second"]),
+                            "answer": int(row["answer"]),
+                            "total": int(row["total"]),
+                        }
+                    )
+                remapped_rows.sort(
+                    key=lambda item: (
+                        -int(item.get("total", 0)),
+                        -int(item.get("answer", 0)),
+                        str(item.get("player_id", "")),
+                    )
+                )
+                summary["rows"] = remapped_rows
