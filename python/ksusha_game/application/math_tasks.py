@@ -190,6 +190,7 @@ class MathTaskEngineState:
     pending_answers: list[MathPendingAnswer] = field(default_factory=list)
     active_answer_id: int | None = None
     next_answer_id: int = 1
+    answer_assign_cursor: int = 0
     dispatcher_player_id: str | None = None
     dispatcher_team_id: str | None = None
     run_started_at_ts: float | None = None
@@ -215,6 +216,7 @@ class MathTaskEngineState:
             "pending_answers": [item.to_payload() for item in self.pending_answers],
             "active_answer_id": self.active_answer_id,
             "next_answer_id": self.next_answer_id,
+            "answer_assign_cursor": int(self.answer_assign_cursor),
             "dispatcher_player_id": self.dispatcher_player_id,
             "dispatcher_team_id": self.dispatcher_team_id,
             "run_started_at_ts": self.run_started_at_ts,
@@ -256,6 +258,7 @@ class MathTaskEngineState:
         out.solved_count = max(0, int(payload.get("solved_count", 0) or 0))
         out.active_answer_id = int(payload.get("active_answer_id")) if isinstance(payload.get("active_answer_id"), int) else None
         out.next_answer_id = max(1, int(payload.get("next_answer_id", 1) or 1))
+        out.answer_assign_cursor = max(0, int(payload.get("answer_assign_cursor", 0) or 0))
         raw_dispatcher = payload.get("dispatcher_player_id")
         out.dispatcher_player_id = (
             str(raw_dispatcher).strip() if raw_dispatcher is not None and str(raw_dispatcher).strip() else None
@@ -314,6 +317,19 @@ class MathTaskEngineState:
     def pending_count(self) -> int:
         return len([item for item in self.pending_answers if not item.solved])
 
+    @staticmethod
+    def _same_player_id(left: str | None, right: str | None) -> bool:
+        a = str(left).strip() if left is not None else ""
+        b = str(right).strip() if right is not None else ""
+        if not a or not b:
+            return False
+        if a == b:
+            return True
+        # Network alias compatibility: p1 <-> host:p1
+        if a.endswith(f":{b}") or b.endswith(f":{a}"):
+            return True
+        return False
+
     def active_pending_answer(self) -> MathPendingAnswer | None:
         if self.active_answer_id is None:
             return None
@@ -328,14 +344,12 @@ class MathTaskEngineState:
             return None
         active = self.active_pending_answer()
         if active is not None:
-            assigned_active = str(active.assigned_player_id).strip() if active.assigned_player_id is not None else ""
-            if assigned_active == owner:
+            if self._same_player_id(active.assigned_player_id, owner):
                 return active
         for item in self.pending_answers:
             if item.solved:
                 continue
-            assigned = str(item.assigned_player_id).strip() if item.assigned_player_id is not None else ""
-            if assigned == owner:
+            if self._same_player_id(item.assigned_player_id, owner):
                 return item
         return None
 
@@ -446,6 +460,7 @@ class MathTaskEngineState:
         self.pending_answers = []
         self.active_answer_id = None
         self.next_answer_id = 1
+        self.answer_assign_cursor = 0
         self.run_started_at_ts = float(now_ts)
         self.run_contributions = {}
         leader_id = str(player_id).strip() or "p1"
@@ -840,8 +855,7 @@ class MathTaskEngineState:
                 continue
             if exclude_answer_id is not None and int(item.answer_id) == int(exclude_answer_id):
                 continue
-            assigned = str(item.assigned_player_id).strip() if item.assigned_player_id is not None else ""
-            if assigned and assigned == owner:
+            if self._same_player_id(item.assigned_player_id, owner):
                 return True
         return False
 
@@ -908,12 +922,19 @@ class MathTaskEngineState:
         exclude_answer_id: int | None = None,
     ) -> str | None:
         dispatcher = str(self.dispatcher_player_id).strip() if self.dispatcher_player_id is not None else ""
-        # 1) Any free non-dispatcher first.
-        for pid in roster:
-            if dispatcher and pid == dispatcher:
-                continue
-            if not self._is_player_busy(player_id=pid, exclude_answer_id=exclude_answer_id):
-                return pid
+        # 1) Any free non-dispatcher first, round-robin for even distribution.
+        free_non_dispatchers = [
+            pid
+            for pid in roster
+            if (not dispatcher or pid != dispatcher)
+            and not self._is_player_busy(player_id=pid, exclude_answer_id=exclude_answer_id)
+        ]
+        if free_non_dispatchers:
+            free_non_dispatchers.sort()
+            idx = int(self.answer_assign_cursor) % len(free_non_dispatchers)
+            assignee = free_non_dispatchers[idx]
+            self.answer_assign_cursor = int(self.answer_assign_cursor) + 1
+            return assignee
         # 2) Then dispatcher fallback.
         if dispatcher and dispatcher in roster:
             if not self._player_has_assigned_pending_answer(

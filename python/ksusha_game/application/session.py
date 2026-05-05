@@ -5481,22 +5481,23 @@ class GameSession:
             own_pending = self._math_tasks.assigned_pending_answer_for_player(player_id=player_id)
             # Priority: player's own delegated result must never be blocked by
             # somebody else's active result in queue.
-            if (
-                own_pending is not None
-                and int(own_pending.correct_answer) == int(digit)
-            ):
-                solved_before = int(self._math_tasks.solved_count)
-                outcome = self._math_tasks.pick_answer(
-                    player_id=player_id,
-                    answer_value=digit,
-                    now_ts=time.time(),
-                    online_player_ids=self._team_player_ids(
-                        self._math_tasks.dispatcher_team_id or self._player_team(player_id)
-                    ),
-                )
-                if int(self._math_tasks.solved_count) > solved_before:
-                    world.remove_object(target.object_id)
-                self._apply_math_task_outcome(outcome, world)
+            if own_pending is not None:
+                if int(own_pending.correct_answer) == int(digit):
+                    solved_before = int(self._math_tasks.solved_count)
+                    outcome = self._math_tasks.pick_answer(
+                        player_id=player_id,
+                        answer_value=digit,
+                        now_ts=time.time(),
+                        online_player_ids=self._team_player_ids(
+                            self._math_tasks.dispatcher_team_id or self._player_team(player_id)
+                        ),
+                    )
+                    if int(self._math_tasks.solved_count) > solved_before:
+                        world.remove_object(target.object_id)
+                    self._apply_math_task_outcome(outcome, world)
+                else:
+                    expr = f"{own_pending.first_digit}{own_pending.operation}{own_pending.second_digit}=?"
+                    self._set_message(f"Сначала реши свой результат: {expr}")
                 return True
             if (
                 active_pending is not None
