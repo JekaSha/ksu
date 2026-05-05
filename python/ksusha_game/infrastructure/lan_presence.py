@@ -21,6 +21,7 @@ class ServerEntry:
     port: int
     players: int
     max_players: int
+    joinable: bool
     last_seen: float
 
 
@@ -290,6 +291,7 @@ class LanPresenceHost:
     def _announcement_payload(self) -> bytes:
         with self._lock:
             team_catalog = [dict(item) for item in self._team_catalog]
+            joinable = bool(self._joinable and len(self._active_clients) < max(0, self.max_players - 1))
         payload = {
             "type": "ksu_server_announce",
             "server_id": self.server_id,
@@ -299,6 +301,7 @@ class LanPresenceHost:
             "port": self.server_port,
             "players": self.total_players(),
             "max_players": self.max_players,
+            "joinable": joinable,
             "teams": team_catalog,
             "ts": time.time(),
         }
@@ -996,6 +999,7 @@ class LanServerBrowser:
                     max_players = max(1, int(data.get("max_players", 10)))
                 except Exception:
                     max_players = 10
+                joinable = bool(data.get("joinable", True))
 
                 entry = ServerEntry(
                     server_id=sid,
@@ -1006,6 +1010,7 @@ class LanServerBrowser:
                     port=port,
                     players=players,
                     max_players=max_players,
+                    joinable=joinable,
                     last_seen=time.time(),
                 )
                 with self._lock:

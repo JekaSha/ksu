@@ -431,7 +431,20 @@ class GameSession:
 
     def _team_player_ids(self, team_id: str | None) -> list[str]:
         normalized = self._normalize_team_id(team_id)
-        return [pid for pid in self._player_states.keys() if self._player_team(pid) == normalized]
+        # Use union of known team map and active player states so freshly joined
+        # players are immediately eligible for task assignment even before their
+        # first full world snapshot/state init finishes.
+        seen: set[str] = set()
+        roster: list[str] = []
+        for pid in list(self._player_states.keys()) + list(self._player_teams.keys()):
+            token = str(pid).strip()
+            if not token or token in seen:
+                continue
+            if self._player_team(token) != normalized:
+                continue
+            seen.add(token)
+            roster.append(token)
+        return roster
 
     def _set_player_character_id(self, player_id: str, character_id: str | None) -> None:
         pid = str(player_id).strip()
@@ -1176,7 +1189,13 @@ class GameSession:
             frame_remote_interp_max_px = 0.0
             frame_remote_interp_samples = 0
             lan_host.set_joinable(not (browser.is_connected() or browser.is_connecting()))
-            current_servers = [s for s in browser.servers() if s.server_id != lan_host.server_id]
+            connected_sid = browser.connected_server_id()
+            current_servers = [
+                s
+                for s in browser.servers()
+                if s.server_id != lan_host.server_id
+                and (s.joinable or (connected_sid is not None and s.server_id == connected_sid))
+            ]
             connect_result = browser.poll_connect_result()
             if connect_result is not None:
                 ok, reason = connect_result
@@ -5459,6 +5478,26 @@ class GameSession:
                 return True
             round_state = self._math_tasks.current_round
             active_pending = self._math_tasks.active_pending_answer()
+            own_pending = self._math_tasks.assigned_pending_answer_for_player(player_id=player_id)
+            # Priority: player's own delegated result must never be blocked by
+            # somebody else's active result in queue.
+            if (
+                own_pending is not None
+                and int(own_pending.correct_answer) == int(digit)
+            ):
+                solved_before = int(self._math_tasks.solved_count)
+                outcome = self._math_tasks.pick_answer(
+                    player_id=player_id,
+                    answer_value=digit,
+                    now_ts=time.time(),
+                    online_player_ids=self._team_player_ids(
+                        self._math_tasks.dispatcher_team_id or self._player_team(player_id)
+                    ),
+                )
+                if int(self._math_tasks.solved_count) > solved_before:
+                    world.remove_object(target.object_id)
+                self._apply_math_task_outcome(outcome, world)
+                return True
             if (
                 active_pending is not None
                 and not self._has_math_answer_objects(world)

@@ -319,6 +319,9 @@ class MathTaskEngineState:
             return None
         return self._pending_by_id(self.active_answer_id)
 
+    def assigned_pending_answer_for_player(self, *, player_id: str) -> MathPendingAnswer | None:
+        return self._assigned_pending_answer_for_player(player_id=player_id)
+
     def _assigned_pending_answer_for_player(self, *, player_id: str) -> MathPendingAnswer | None:
         owner = str(player_id).strip()
         if not owner:
@@ -562,10 +565,15 @@ class MathTaskEngineState:
             value = max(0, min(9, int(digit)))
         if round_state.stage == "pick_first":
             owner = round_state.assignments.get("pick_first")
-            if dispatcher:
+            if dispatcher and not self._player_has_assigned_pending_answer(player_id=dispatcher):
                 owner = dispatcher
                 round_state.assignments["pick_first"] = owner
                 round_state.assignment_accepted["pick_first"] = True
+            elif dispatcher and owner == dispatcher:
+                round_state.assignments["pick_first"] = None
+                round_state.assignment_assigned_by["pick_first"] = None
+                round_state.assignment_accepted["pick_first"] = True
+                owner = None
             if owner not in {None, player_id}:
                 return MathTaskOutcome(message="Это число назначено другому игроку")
             if owner == player_id and not round_state.assignment_accepted.get("pick_first", True):
@@ -577,10 +585,15 @@ class MathTaskEngineState:
             return MathTaskOutcome(message=f"Операция: {op}. Найди второе число", consume_digit=True)
         if round_state.stage == "pick_second":
             owner = round_state.assignments.get("pick_second")
-            if dispatcher:
+            if dispatcher and not self._player_has_assigned_pending_answer(player_id=dispatcher):
                 owner = dispatcher
                 round_state.assignments["pick_second"] = owner
                 round_state.assignment_accepted["pick_second"] = True
+            elif dispatcher and owner == dispatcher:
+                round_state.assignments["pick_second"] = None
+                round_state.assignment_assigned_by["pick_second"] = None
+                round_state.assignment_accepted["pick_second"] = True
+                owner = None
             if owner not in {None, player_id}:
                 return MathTaskOutcome(message="Это число назначено другому игроку")
             if owner == player_id and not round_state.assignment_accepted.get("pick_second", True):
@@ -614,6 +627,8 @@ class MathTaskEngineState:
             round_state.stage = "pick_first"
             next_owner = str(self.dispatcher_player_id or player_id).strip() or None
             assigned_by = str(self.dispatcher_player_id or player_id).strip() or "p1"
+            if next_owner is not None and self._player_has_assigned_pending_answer(player_id=next_owner):
+                next_owner = None
             round_state.assignments["pick_first"] = next_owner
             round_state.assignment_accepted["pick_first"] = True
             round_state.assignment_assigned_by["pick_first"] = assigned_by if next_owner is not None else None
@@ -728,6 +743,7 @@ class MathTaskEngineState:
         pending.assigned_player_id = assignee
         pending.assigned_by_player_id = requester
         pending.accepted = True
+        self._release_stage_if_player_busy(player_id=assignee)
         return f"Задача #{pending.answer_id}: ответ назначен игроку {assignee}"
 
     def reassign_round_stage(
@@ -925,6 +941,25 @@ class MathTaskEngineState:
             pending.assigned_player_id = assignee
             pending.assigned_by_player_id = dispatcher or pending.assigned_by_player_id
             pending.accepted = True
+            self._release_stage_if_player_busy(player_id=assignee)
+
+    def _release_stage_if_player_busy(self, *, player_id: str) -> None:
+        if self.current_round is None or not self.active:
+            return
+        owner = str(player_id).strip()
+        if not owner:
+            return
+        stage_key = self._active_stage_key()
+        if stage_key is None:
+            return
+        current_owner = self.current_round.assignments.get(stage_key)
+        if str(current_owner).strip() != owner:
+            return
+        if not self._player_has_assigned_pending_answer(player_id=owner):
+            return
+        self.current_round.assignments[stage_key] = None
+        self.current_round.assignment_assigned_by[stage_key] = None
+        self.current_round.assignment_accepted[stage_key] = True
 
     def _resolve_answer_assignee(self, *, producer_player_id: str, online_player_ids: list[str]) -> str | None:
         roster = self._normalized_online_roster(online_player_ids=online_player_ids)
