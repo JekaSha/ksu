@@ -46,8 +46,8 @@ detect_python_cmd() {
     fi
   done
 
-  if command -v python3.14 >/dev/null 2>&1; then
-    python_cmd="python3.14"
+  if command -v python3.13 >/dev/null 2>&1; then
+    python_cmd="python3.13"
     return 0
   fi
   if command -v python3 >/dev/null 2>&1; then

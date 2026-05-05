@@ -17,7 +17,7 @@ Tests live in `python/tests/` mirroring the layer structure (`domain/`, `infrast
 
 ```bash
 # Setup (once)
-python3.14 -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -r python/requirements.txt
 

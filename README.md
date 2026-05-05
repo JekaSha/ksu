@@ -36,7 +36,7 @@
 
 ```bash
 cd /Users/jekas/code/python/ксюша
-python3.14 -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r python/requirements.txt
 python python/ksusha_walk.py
