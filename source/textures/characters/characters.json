@@ -4,6 +4,7 @@
       "id": "ksu",
       "name": "Ksusha",
       "gender": "female",
+      "age_group": "kid",
       "sheets": {
         "walk": "walk/ksu.png",
         "walk_with_bag": "walk/ksu_with_bag.png",
@@ -17,6 +18,7 @@
       "id": "jekas",
       "name": "Jekas",
       "gender": "male",
+      "age_group": "adult",
       "weight_kg": 78,
       "height_cm": 180,
       "skills": {
@@ -35,6 +37,7 @@
       "id": "lisa",
       "name": "Lisa",
       "gender": "female",
+      "age_group": "adult",
       "weight_kg": 50,
       "height_cm": 165,
       "sheets": {

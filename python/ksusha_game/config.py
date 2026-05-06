@@ -345,6 +345,21 @@ def resolve_character_gender(character_id: str | None) -> str | None:
     return None
 
 
+def resolve_character_age_group(character_id: str | None) -> str | None:
+    characters_root = Path("source/textures/characters")
+    character = str(character_id or "").strip() or _resolve_character_id()
+    manifest = _resolve_character_manifest(character, characters_root)
+    if manifest is None:
+        return None
+    raw = manifest.get("age_group")
+    token = str(raw).strip().lower() if raw is not None else ""
+    if token in {"adult", "grownup"}:
+        return "adult"
+    if token in {"kid", "kids", "child", "children"}:
+        return "kid"
+    return None
+
+
 def resolve_character_sheet_path(character_id: str | None, sheet_id: str) -> Path | None:
     sheet_token = str(sheet_id or "").strip()
     if not sheet_token:

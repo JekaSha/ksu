@@ -20,6 +20,7 @@ from ksusha_game.config import (
     list_available_characters,
     load_user_settings,
     resolve_character_config,
+    resolve_character_age_group,
     resolve_character_gender,
     resolve_character_physical_stats,
     resolve_character_sheet_bundle,
@@ -514,6 +515,10 @@ class GameSession:
         char_id = self._player_character_id(player_id)
         return resolve_character_gender(char_id)
 
+    def _player_age_group(self, player_id: str) -> str | None:
+        char_id = self._player_character_id(player_id)
+        return resolve_character_age_group(char_id)
+
     def _player_visual_center(self, player_id: str) -> tuple[float, float]:
         state = self._player_state(player_id)
         if state is None:
@@ -549,12 +554,16 @@ class GameSession:
             gender_a = self._player_gender(pid_a)
             if gender_a not in {"male", "female"}:
                 continue
+            if self._player_age_group(pid_a) != "adult":
+                continue
             for pid_b in player_ids[i + 1 :]:
                 state_b = self._player_state(pid_b)
                 if state_b is None:
                     continue
                 gender_b = self._player_gender(pid_b)
                 if gender_b not in {"male", "female"} or gender_b == gender_a:
+                    continue
+                if self._player_age_group(pid_b) != "adult":
                     continue
                 ax, ay = self._player_visual_center(pid_a)
                 bx, by = self._player_visual_center(pid_b)
@@ -600,7 +609,7 @@ class GameSession:
                 continue
             drift_y = 26.0 * t
             pulse = 1.0 + 0.20 * math.sin(t * math.pi * 3.0)
-            size = int(max(14, min(34, round(22 * pulse))))
+            size = int(max(28, min(68, round(44 * pulse))))
             out.append((float(fx.get("x", 0.0)), float(fx.get("y", 0.0) - drift_y), size, alpha))
         return out
 
@@ -2632,6 +2641,7 @@ class GameSession:
                         world=world,
                         object_sprites=object_sprites,
                         inventory=inventory,
+                        is_running=is_running,
                     )
                     self._resolve_player_unstuck(
                         player_id=player_id,
@@ -8198,6 +8208,7 @@ class GameSession:
         push_factor = self._mass_based_drag_factor(player, inventory, world, collided)
         if (
             not is_jumping
+            and is_running
             and self._can_push_object(player, inventory, world, collided)
             and self._is_moving_towards_object(
                 obj=collided,
@@ -8272,6 +8283,7 @@ class GameSession:
         world: WorldMap,
         object_sprites: ObjectSpriteLibrary,
         inventory: Inventory,
+        is_running: bool,
     ) -> None:
         current_rect = self._player_collider_rect(player.x, player.y, sprite_w, sprite_h)
         collided = self._first_player_collision(player_id=player_id, player_rect=current_rect)
@@ -8281,6 +8293,8 @@ class GameSession:
         move_dx = player.x - prev_x
         move_dy = player.y - prev_y
         if (
+            is_running
+            and
             (abs(move_dx) >= 0.001 or abs(move_dy) >= 0.001)
             and self._try_push_player(
                 player_id=player_id,
